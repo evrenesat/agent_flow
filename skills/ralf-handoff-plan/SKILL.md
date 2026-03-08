@@ -5,7 +5,7 @@ description: "Create a strict RALF checkpoint handoff plan for coding work that 
 
 # RALF Handoff Plan
 
-Use this skill only for RALF-style planning. Do not route between multiple plan types.
+Use this skill only for RALF-style planning.
 
 ## Behavior
 
@@ -40,6 +40,7 @@ Do not omit any of them when they are needed to prevent implementation drift.
 Produce a strict checkpoint plan for cross-model or later-session handoff.
 
 Requirements:
+
 - Use Markdown task lists (`- [ ]`) for checkpoints and internal steps.
 - Define done at project and checkpoint level.
 - Keep checkpoints atomic and independently verifiable.
@@ -60,36 +61,44 @@ Use this checkpoint skeleton:
 ### [ ] Checkpoint N: <name>
 
 **Goal:**
+
 - <narrow checkpoint outcome>
 
 **Context Bootstrapping:**
+
 - Run these commands before editing:
 - `<command>`
 - `<command>`
 
 **Scope & Blast Radius:**
+
 - May create/modify: [files]
 - Must not touch: [files/systems]
 - Constraints: [anti-shortcuts + preserved behavior]
 
 **Steps:**
+
 - [ ] Step 1: ...
 - [ ] Step 2: ...
 - [ ] Step 3: ...
 
 **Dependencies:**
+
 - Depends on Checkpoint N-1.
 
 **Verification:**
+
 - Run scoped tests: `<exact command>`
 - Run non-regression tests: `<exact command>`
 
 **Done When:**
+
 - Verification commands pass cleanly.
 - <observable condition>
 - A git commit is created with message: `...`
 
 **Stop and Escalate If:**
+
 - <explicit failure mode>
 ```
 
@@ -98,11 +107,13 @@ Use this checkpoint skeleton:
 Use `Critical Invariants` for statements that must remain true across all checkpoints.
 
 Examples:
+
 - No runtime path may be hardcoded outside config.
 - The same canonical input must be reused across requests for cacheability.
 - A deprecated path may not remain active after migration.
 
 Each invariant must be:
+
 - concrete
 - testable
 - important enough that violating it would materially change the implementation
@@ -112,6 +123,7 @@ Each invariant must be:
 Use `Forbidden Implementations` to name likely shortcuts explicitly.
 
 Examples:
+
 - Do not silently fall back to a local absolute path.
 - Do not keep both old and new config sources live.
 - Do not describe future-state docs as implemented behavior before code reaches parity.
@@ -123,6 +135,7 @@ If a shortcut is plausible and harmful, name it explicitly.
 Behavioral acceptance tests must describe observable outcomes.
 
 Examples:
+
 - "Given `start_when_ready`, inference begins after grid writing completes while summary generation is still running."
 - "Given the same run, every summary request reuses the exact same transcript body."
 
@@ -133,6 +146,7 @@ Do not rely only on unit-test commands. The plan must state what a passing imple
 Every important requirement must map to at least one concrete verification method.
 
 Allowed verification types:
+
 - exact test command
 - exact grep or search command
 - exact file existence or symlink check
@@ -150,6 +164,7 @@ If docs intentionally describe future state, the plan must say so explicitly and
 ## Clarification Standard
 
 Before finalizing the plan, gather the same requirement clarity you would for any strong implementation plan:
+
 - Ask targeted questions about scope, constraints, dependencies, tradeoffs, and acceptance criteria.
 - Confirm risky assumptions before locking the final plan.
 - Prefer explicit defaults over leaving choices open.
@@ -159,6 +174,7 @@ Before finalizing the plan, gather the same requirement clarity you would for an
 For every plan generated with this skill, persist the final RALF plan to disk.
 
 Rules:
+
 1. Save under `plans/` in the current project's root.
 2. Use a descriptive markdown filename that makes the handoff purpose obvious.
 3. Avoid overwriting existing files.
