@@ -1,0 +1,37 @@
+#!/bin/bash
+
+DRY_RUN=0
+PLAN_FILE="IMPLEMENTATION_PLAN.md"
+
+# Parse arguments
+for arg in "$@"; do
+  if [ "$arg" == "--dry-run" ]; then
+    DRY_RUN=1
+  else
+    PLAN_FILE="$arg"
+  fi
+done
+
+# Verify the file exists before proceeding
+if [ ! -f "$PLAN_FILE" ]; then
+  echo "Error: Plan file '$PLAN_FILE' not found."
+  exit 1
+fi
+
+# Convert the relative path to an absolute path.
+ABS_PLAN_PATH="$(cd "$(dirname "$PLAN_FILE")" && pwd)/$(basename "$PLAN_FILE")"
+
+# Define the prompt for the Ralph loop
+PROMPT="/ralph:loop \"Read the plan file at ${ABS_PLAN_PATH}. Review the overall progress to understand what has already been done, then continue from where the plan was left off by finding the first unchecked checkpoint (### [ ]). Read the context, scope, and steps for that checkpoint. Execute the work. Run the required verification commands. If verification passes, modify ${ABS_PLAN_PATH} to change that specific '### [ ]' to '### [x]'. Create a git commit. If there are no unchecked checkpoints remaining in the file, output exactly <promise>PLAN_COMPLETE</promise>.\" --completion-promise \"PLAN_COMPLETE\" --max-iterations 20"
+
+# Handle dry-run execution
+if [ "$DRY_RUN" -eq 1 ]; then
+  echo "Dry run enabled. The following command would be executed:"
+  echo ""
+  echo "gemini -y -s -p \"$PROMPT\""
+  echo ""
+  exit 0
+fi
+
+# Execute the CLI in headless mode
+gemini -y -s -p "$PROMPT"
