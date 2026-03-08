@@ -1,4 +1,4 @@
 interface:
   display_name: "RALF Handoff Plan"
-  short_description: "Create a strict RALF checkpoint handoff plan"
-  default_prompt: "Create a strict RALF checkpoint handoff plan for this coding task."
+  short_description: "Create a strict, decision-complete RALF handoff plan"
+  default_prompt: "Create a strict, decision-complete RALF checkpoint handoff plan for this coding task."

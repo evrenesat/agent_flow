@@ -1,6 +1,6 @@
 # agent_flow
 
-Generic home for shareable agent workflow assets.
+Generic home for shareable agent workflow assets and the source of truth for custom items shared across coding agents.
 
 ## Layout
 
@@ -12,6 +12,10 @@ Generic home for shareable agent workflow assets.
 
 - `skills/ralf-handoff-plan/`
 - `scripts/ralf`
+
+## Source Of Truth
+
+This repo owns the custom `ralf-handoff-plan` skill and the `ralf` helper script. Live paths in local agent runtimes point back here via symlinks.
 
 ## Live Links
 
