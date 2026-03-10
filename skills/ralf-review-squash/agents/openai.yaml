@@ -1,0 +1,4 @@
+interface:
+  display_name: "RALF Review Squash"
+  short_description: "Review RALF commit batches and squash approved work"
+  default_prompt: "Use $ralf-review-squash to review sub-agent commits since the last review, squash all approved handoff commits since the original base into one final commit, and compact DEVLOG.md if needed."

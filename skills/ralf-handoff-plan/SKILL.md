@@ -25,13 +25,14 @@ The plan must be decision complete. The implementer should not need to choose be
 Every final RALF plan must include these sections in substance, even if headers are adapted slightly for readability:
 
 1. `Summary`
-2. `Done Means`
-3. `Critical Invariants`
-4. `Forbidden Implementations`
-5. `Checkpoints`
-6. `Behavioral Acceptance Tests`
-7. `Plan-to-Verification Matrix`
-8. `Assumptions And Defaults`
+2. `Git Tracking`
+3. `Done Means`
+4. `Critical Invariants`
+5. `Forbidden Implementations`
+6. `Checkpoints`
+7. `Behavioral Acceptance Tests`
+8. `Plan-to-Verification Matrix`
+9. `Assumptions And Defaults`
 
 Do not omit any of them when they are needed to prevent implementation drift.
 
@@ -50,6 +51,8 @@ Requirements:
 - Include scoped and non-regression verification commands per checkpoint.
 - Require a git commit boundary per checkpoint.
 - Include explicit stop-and-escalate conditions.
+- Require an explicit documentation impact review that updates relevant existing docs when the change warrants it.
+- Require a `Git Tracking` section that captures the current branch, the immutable pre-handoff base commit, the mutable last-reviewed commit, and a review log for later review/squash passes.
 - Add `Critical Invariants` for rules that must hold across the entire implementation.
 - Add `Forbidden Implementations` for shortcuts the implementer might otherwise take.
 - Add `Behavioral Acceptance Tests` as observable outcomes, not just test commands.
@@ -69,6 +72,9 @@ Use this checkpoint skeleton:
 - Run these commands before editing:
 - `<command>`
 - `<command>`
+- If this is Checkpoint 1, capture the git tracking values before any edits:
+- `git branch --show-current`
+- `git rev-parse HEAD`
 
 **Scope & Blast Radius:**
 
@@ -100,6 +106,18 @@ Use this checkpoint skeleton:
 **Stop and Escalate If:**
 
 - <explicit failure mode>
+```
+
+Use this `Git Tracking` skeleton in the final plan:
+
+```markdown
+## Git Tracking
+
+- Plan Branch: `<git branch --show-current>`
+- Pre-Handoff Base HEAD: `<git rev-parse HEAD>`
+- Last Reviewed HEAD: `none`
+- Review Log:
+  - None yet.
 ```
 
 ## Critical Invariants Guidance
@@ -160,6 +178,36 @@ Do not leave major requirements without verification coverage.
 Do not let the plan describe documentation changes as reflecting implemented behavior unless the corresponding checkpoint explicitly brings the code to that state in the same handoff.
 
 If docs intentionally describe future state, the plan must say so explicitly and explain why.
+
+## Git Tracking Rule
+
+The `Git Tracking` section is the source of truth for later review/squash workflows.
+
+Requirements:
+
+- Capture `Plan Branch` and `Pre-Handoff Base HEAD` before any implementation checkpoint begins.
+- Use the full SHA from `git rev-parse HEAD`, not a short SHA.
+- Treat `Pre-Handoff Base HEAD` as immutable for the life of the handoff, even after squashes.
+- Initialize `Last Reviewed HEAD` to `none`.
+- Require later review workflows to update `Last Reviewed HEAD` and append to `Review Log` after each review pass.
+- If a later plan revision changes scope, preserve the original base SHA unless the user explicitly restarts the handoff from a new baseline.
+
+## Documentation Coverage Rule
+
+Every final RALF plan must evaluate whether the change warrants documentation updates and, when it does, assign those updates to the relevant checkpoint(s).
+
+Required guidance:
+
+- Update `ARCHITECTURE.md` where the implemented change affects architecture, system boundaries, data flow, component responsibilities, or integration contracts already described there.
+- Update `DEVLOG.md` where the project uses it to record implementation decisions, notable behavior changes, migrations, or operational follow-ups caused by the work.
+- Update `AGENTS.md` only in affected subdirectories when the change alters coding-agent instructions, local workflow constraints, generated artifacts, or directory-specific implementation rules for that subdirectory.
+- Do not modify the root `AGENTS.md` as part of the implementation handoff.
+- Update relevant existing user-facing documentation when the change modifies user-visible behavior, supported workflows, flags, configuration, setup, or troubleshooting guidance.
+- Treat README updates as opt-in to existing coverage only: the plan must instruct implementers to search the root `README.md` and any affected subdirectory `README.md` files for an already relevant section, and update that section if it exists.
+- Do not add a new README section, a new README file, or new feature mention in README solely to document the change when no relevant existing section already covers that area.
+- If no relevant README section exists, the plan must leave README untouched and direct any necessary documentation updates to a more appropriate existing doc instead, if one exists.
+- Documentation updates must be scoped to the behavior actually implemented in the same handoff, not speculative future state.
+- When the plan concludes that a documentation file does not need changes, it should say why, so the implementer does not have to guess.
 
 ## Clarification Standard
 
