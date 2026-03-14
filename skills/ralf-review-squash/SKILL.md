@@ -55,6 +55,7 @@ If the new batch looks correct:
 5. Update the plan file:
    - set `Last Reviewed HEAD` to the new squashed `HEAD`
    - append a `Review Log` entry with the review date, the reviewed range, the new squashed SHA, and outcome `approved+squashed`
+6. If plan's all checkpoints are completely done, move plan file to `plans/implemented` and include it in you final commit.
 
 ## Rejection Path
 

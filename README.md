@@ -22,11 +22,15 @@ Guides the agent through an autonomous, test-driven development loop. The agent 
 ## Scripts
 
 ### `ralf`
-A bash runner that executes an autonomous loop over a plan file (default `IMPLEMENTATION_PLAN.md`). It reads untouched checkpoints (`[ ]`), performs the needed steps, verifies them, marks them done (`[x]`), and commits.
+A bash runner that executes an autonomous loop over a plan file (default `IMPLEMENTATION_PLAN.md`). It reads untouched checkpoints (`[ ]`), performs the needed steps, verifies them, marks them done (`[x]`), and commits. It now defaults to OpenCode, writing the Ralph plugin state file directly for headless execution, with Gemini kept as a fallback runtime.
+
+For OpenCode runs, the wrapper uses JSON output instead of the default formatted tool stream. That keeps patch/diff noise out of the terminal and treats a leftover `ralph-loop.local.md` as a hard failure instead of silently returning success.
 
 **Usage:**
 ```bash
 ralf [path/to/plan.md]
+ralf --runtime opencode [path/to/plan.md]
+ralf --runtime gemini [path/to/plan.md]
 ralf --dry-run [path/to/plan.md]
 ```
 
