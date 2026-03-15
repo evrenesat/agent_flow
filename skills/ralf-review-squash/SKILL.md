@@ -48,14 +48,27 @@ Selection rules:
 
 If the new batch looks correct:
 
-1. Rewrite history so every commit after `Pre-Handoff Base HEAD` becomes one commit.
-2. Use a non-interactive workflow. Prefer `git reset --soft <Pre-Handoff Base HEAD>` followed by a new commit over interactive rebase.
-3. Write a fresh final commit message that covers the full accumulated scope of the handoff, including earlier approved work and the latest fixes.
-4. If `DEVLOG.md` exists and multiple handoff-related entries were added or updated during the handoff, compact them to one entry that matches the final squashed change.
-5. Update the plan file:
-   - set `Last Reviewed HEAD` to the new squashed `HEAD`
-   - append a `Review Log` entry with the review date, the reviewed range, the new squashed SHA, and outcome `approved+squashed`
-6. If plan's all checkpoints are completely done, move plan file to `plans/implemented` and include it in you final commit.
+1. Decide the final squash scope before rewriting history.
+   - If the active plan is the original handoff plan, squash from that plan's `Pre-Handoff Base HEAD`.
+   - If the active plan is a follow-up fix plan created after an earlier review rejection, do not automatically assume the final squash scope is only the fix-plan range.
+   - When the user wants one final accumulated handoff commit, switch back to the original handoff plan and use its `Pre-Handoff Base HEAD` as the squash anchor.
+   - Only squash the fix-plan range by itself when the user explicitly wants the earlier handoff commits preserved separately.
+2. If the final squash scope is the full original handoff, treat the original handoff plan as the source of truth for finalization.
+   - Update the original plan's `Git Tracking` and `Review Log` to capture both the earlier rejection and the final approved+squashed review.
+   - Move the original plan to `plans/in-progress/done` when its checkpoints are complete.
+   - Remove the temporary fix plan unless the user explicitly wants to keep it.
+   - Include any explicitly requested summary or handoff companion plan files in the final commit.
+3. Rewrite history so every commit after the chosen squash base becomes one commit.
+4. Use a non-interactive workflow. Prefer `git reset --soft <chosen squash base>` followed by a new commit over interactive rebase.
+5. Write a fresh final commit message that covers the full accumulated scope of the handoff, including earlier approved work and the latest fixes.
+6. If `DEVLOG.md` exists and multiple handoff-related entries were added or updated during the handoff, compact them to one entry that matches the final squashed change.
+7. Update the plan file used for finalization:
+   - do not require the finalized plan file to record the exact SHA of the new squashed commit inside that same commit
+   - the finalized plan should record the reviewed ranges and outcome `approved+squashed`
+   - if `Last Reviewed HEAD` is still useful, use stable non-self-referential wording or omit the exact value
+   - the exact final squashed SHA is not needed for future checkpoint comparison on a completed plan
+8. If the finalized plan's checkpoints are completely done, move that finalized plan to `plans/in-progress/done/` and include it in the final commit.
+9. Treat dirty changes in plan files that are intentionally part of the final handoff state as part of finalization, not as unrelated worktree noise. Still stop if truly unrelated dirty changes remain and make the squash ambiguous.
 
 ## Rejection Path
 
@@ -84,5 +97,6 @@ Before finishing, verify:
 - the reviewed range is correct relative to `Last Reviewed HEAD` or `Pre-Handoff Base HEAD`
 - the reported commit counts match git history
 - after approval, the branch contains exactly one accumulated handoff commit after `Pre-Handoff Base HEAD`
+- after approval, do not require the finalized plan file to self-reference the final squashed commit hash
 - after rejection, no history rewrite occurred
 - `DEVLOG.md` was compacted only when a squash occurred and multiple relevant entries existed
