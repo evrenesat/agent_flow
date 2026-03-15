@@ -28,10 +28,10 @@ PROMPT="/ralph:loop \"Read the plan file at ${ABS_PLAN_PATH}. Review the overall
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "Dry run enabled. The following command would be executed:"
   echo ""
-  echo "gemini -y -s -p \"$PROMPT\""
+  echo "gemini -y -p \"$PROMPT\""
   echo ""
   exit 0
 fi
 
 # Execute the CLI in headless mode
-gemini -y -s -p "$PROMPT"
+gemini -y -p "$PROMPT"

@@ -17,16 +17,20 @@ Creates a strict RALF checkpoint handoff plan for coding work that will be imple
 Reviews sub-agent commits after a RALF handoff. It compares the new batch of commits against the plan's expected outcome, and either creates a follow-up fix plan or squashes the entire handoff history into a single clean commit.
 
 ### `ralph-execute`
-Guides the agent through an autonomous, test-driven development loop. The agent relies on file state, verifies its work with tests, and auto-corrects based on test failures instead of waiting for conversational feedback.
+Guides the agent through executing an existing RALF or Ralph plan. The agent resumes from the first unchecked checkpoint, keeps the plan file's checkboxes in sync with verified progress, and creates git commits at the required checkpoint or final-plan boundaries.
 
 ## Scripts
 
 ### `ralf`
-A bash runner that executes an autonomous loop over a plan file (default `IMPLEMENTATION_PLAN.md`). It reads untouched checkpoints (`[ ]`), performs the needed steps, verifies them, marks them done (`[x]`), and commits.
+A bash runner that executes an autonomous loop over a plan file (default `IMPLEMENTATION_PLAN.md`). It reads untouched checkpoints (`[ ]`), performs the needed steps, verifies them, marks them done (`[x]`), and commits. It now defaults to OpenCode, writing the Ralph plugin state file directly for headless execution, with Gemini kept as a fallback runtime.
+
+For OpenCode runs, the wrapper uses JSON output instead of the default formatted tool stream. That keeps patch/diff noise out of the terminal and treats a leftover `ralph-loop.local.md` as a hard failure instead of silently returning success.
 
 **Usage:**
 ```bash
 ralf [path/to/plan.md]
+ralf --runtime opencode [path/to/plan.md]
+ralf --runtime gemini [path/to/plan.md]
 ralf --dry-run [path/to/plan.md]
 ```
 
