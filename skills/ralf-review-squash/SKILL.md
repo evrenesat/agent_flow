@@ -76,6 +76,8 @@ If the new batch is not acceptable:
 
 1. Do not squash commits.
 2. Create a new RALF fix plan that addresses the review findings against the current `HEAD`.
+   - The fix plan will be handed over to implementer without any reference to the original plan.
+   - Therefore, the fix plan should be self-contained and not need any context from the original plan.
 3. Update the plan file:
    - set `Last Reviewed HEAD` to the current `HEAD`
    - append a `Review Log` entry with the review date, the reviewed range, and outcome `changes-requested`

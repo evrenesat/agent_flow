@@ -245,7 +245,6 @@ esac
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "Dry run enabled. The following command would be executed:"
   echo ""
-<<<<<<< HEAD
   if [ "$RUNTIME" = "opencode" ]; then
     echo "State file (${STATE_FILE}):"
     echo ""
@@ -254,14 +253,10 @@ if [ "$DRY_RUN" -eq 1 ]; then
   fi
   printf '%q ' "${COMMAND[@]}"
   echo ""
-=======
-  echo "gemini -y -p \"$PROMPT\""
->>>>>>> origin/main
   echo ""
   exit 0
 fi
 
-<<<<<<< HEAD
 if ! command -v "${COMMAND[0]}" >/dev/null 2>&1; then
   echo "Error: Required command '${COMMAND[0]}' is not installed or not on PATH." >&2
   exit 1
@@ -277,7 +272,3 @@ if [ "$RUNTIME" = "opencode" ]; then
 fi
 
 "${COMMAND[@]}"
-=======
-# Execute the CLI in headless mode
-gemini -y -p "$PROMPT"
->>>>>>> origin/main

@@ -17,7 +17,7 @@ Creates a strict RALF checkpoint handoff plan for coding work that will be imple
 Reviews sub-agent commits after a RALF handoff. It compares the new batch of commits against the plan's expected outcome, and either creates a follow-up fix plan or squashes the entire handoff history into a single clean commit.
 
 ### `ralph-execute`
-Guides the agent through an autonomous, test-driven development loop. The agent relies on file state, verifies its work with tests, and auto-corrects based on test failures instead of waiting for conversational feedback.
+Guides the agent through executing an existing RALF or Ralph plan. The agent resumes from the first unchecked checkpoint, keeps the plan file's checkboxes in sync with verified progress, and creates git commits at the required checkpoint or final-plan boundaries.
 
 ## Scripts
 
