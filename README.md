@@ -22,17 +22,19 @@ Guides the agent through executing an existing RALF or Ralph plan. The agent res
 ## Scripts
 
 ### `ralf`
-A bash runner that executes an autonomous loop over a plan file (default `IMPLEMENTATION_PLAN.md`). It reads untouched checkpoints (`[ ]`), performs the needed steps, verifies them, marks them done (`[x]`), and commits. It now defaults to OpenCode, writing the Ralph plugin state file directly for headless execution, with Gemini kept as a fallback runtime.
-
-For OpenCode runs, the wrapper uses JSON output instead of the default formatted tool stream. That keeps patch/diff noise out of the terminal and treats a leftover `ralph-loop.local.md` as a hard failure instead of silently returning success.
+A bash runner for Gemini headless Ralph loops over a checkpoint plan file. It builds the planner prompt from the plan path, initializes Ralph state with the installed Gemini Ralph extension, then runs Gemini with that exact same prompt so later iterations do not trip the prompt-mismatch hook.
 
 **Usage:**
 ```bash
-ralf [path/to/plan.md]
-ralf --runtime opencode [path/to/plan.md]
-ralf --runtime gemini [path/to/plan.md]
-ralf --dry-run [path/to/plan.md]
+ralf [--dry-run] [path/to/plan.md]
+ralf [--dry-run] path/to/plan.md [extra instructions ...]
 ```
+
+Everything after an explicit plan path is appended verbatim to the generated planner prompt. `--dry-run` prints both the Ralph setup command and the Gemini command without executing them.
+
+By default the script expects Gemini Ralph's setup script at `~/.gemini/extensions/ralph/scripts/setup.sh`. Override that path with `RALPH_SETUP_SCRIPT` if your extension is installed elsewhere.
+
+`scripts/ralf_offf.sh` is not the active runner.
 
 ## Source Of Truth
 
