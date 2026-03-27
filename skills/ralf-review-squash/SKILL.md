@@ -1,104 +1,109 @@
 ---
 name: ralf-review-squash
-description: "Review sub-agent commits after a RALF handoff, compare the new batch since the last review, and either create a fix plan or squash the full handoff history into one final commit."
+description: "Review a completed autonomous RALF handoff, compare the full accumulated implementation against the original plan, and either squash the whole handoff into one final commit or create a focused fix plan for the remaining failed checkpoints or behaviors."
 ---
 
 # RALF Review Squash
 
-Use this skill only for post-handoff review of work produced under a RALF plan that includes `Git Tracking`.
+Use this skill only for the final review pass of work produced under a RALF plan that includes `Git Tracking`.
 
 ## Behavior
 
-- Load the active RALF plan before reviewing code or history.
-- Review only the commits created since the last recorded review, while keeping the full handoff scope in mind.
-- If the newest batch is acceptable, squash the entire handoff history since the original base commit into one final commit.
-- If the newest batch is not acceptable, do not squash; create a follow-up RALF fix plan instead.
+- Load the active original RALF plan before reviewing code or history.
+- Assume the happy path is a completed autonomous run. Review the whole accumulated handoff, not just one checkpoint batch.
+- Treat files under `plans/` as architect or reviewer-owned artifacts. If an implementation commit modifies plan files unexpectedly, reject that work unless the user explicitly asked for plan-file commits from the implementer.
+- Treat checkpoint/version commit prefixes such as `cp4 v01`, `cp4 v02`, and `cp5 v01` as the primary review-tracking mechanism. Use exact SHAs as supporting evidence, not as the only way to understand state.
+- If the original plan still has unchecked checkpoints, do not repurpose this skill for routine checkpoint review. Rerun the autonomous executor unless the user explicitly asks for a different workflow.
+- If the full accumulated work is acceptable, approve and squash once at the whole-plan level.
+- If the full accumulated work is not acceptable, do not squash. Create a focused fix plan for the failed checkpoints or behaviors instead of a whole-plan redo.
 - Treat `ralf` and `ralph` as equivalent spellings.
 - Compact `DEVLOG.md` to one handoff entry only when a squash actually happens and multiple handoff entries exist.
 
 ## Core Rule
 
-The plan file is the source of truth for review state. Do not infer `Last Reviewed HEAD` from commit messages or memory when the plan file provides it.
+The original plan file is the source of truth for long-lived review state. Fix plans are temporary overlays for rejected work, not replacements for the original plan.
 
 ## Required Inputs
 
-Before reviewing or squashing, identify one active RALF plan file under `plans/`.
+Before reviewing or squashing, identify the active original RALF plan under `plans/in-progress/`.
 
 Selection rules:
 
 1. If the user names a plan file, use it.
-2. Otherwise search `plans/` for plan files containing `Pre-Handoff Base HEAD`.
+2. Otherwise search `plans/in-progress/` for original plan files containing `Pre-Handoff Base HEAD`.
 3. Filter candidates to the current branch recorded in `Plan Branch`.
-4. If exactly one candidate remains, use it.
-5. If multiple candidates remain, stop and ask the user which plan to use.
+4. Ignore temporary fix plans when choosing the original long-lived plan.
+5. If exactly one original plan remains, use it.
+6. If multiple original plans remain, stop and ask the user which plan to use.
 
 ## Review Workflow
 
-1. Read the plan file's `Git Tracking` section.
+1. Read the original plan's `Git Tracking` section and checkpoint state.
 2. Confirm the current branch matches `Plan Branch`.
-3. Set the review start commit to `Last Reviewed HEAD` when present; otherwise use `Pre-Handoff Base HEAD`.
-4. Review the commit range from that start commit to `HEAD`.
-5. Report:
+3. Confirm the original plan is effectively complete or that the user explicitly asked for a non-standard review.
+4. Determine the review start point in this order:
+   - honor an explicit user instruction such as "last review onward"
+   - otherwise use the latest reviewed range recorded in `Review Log`
+   - otherwise use `Last Reviewed HEAD` when present and still useful
+   - otherwise use `Pre-Handoff Base HEAD`
+5. Review the full accumulated implementation from that start point through `HEAD`.
+6. Report:
    - the number of new commits since the last review
    - the total number of commits since `Pre-Handoff Base HEAD`
-   - the key files and behaviors changed in the new batch
-6. Review the actual code state, not just commit messages.
+   - the checkpoints and behaviors covered by the accumulated run
+7. Review the actual code state, not just commit messages.
+8. When reporting or updating review state, prefer checkpoint/version labels such as "reviewed through `cp5 v01`". Include exact SHAs only when they materially help disambiguate the history.
 
 ## Approval Path
 
-If the new batch looks correct:
+If the accumulated work looks correct:
 
-1. Decide the final squash scope before rewriting history.
-   - If the active plan is the original handoff plan, squash from that plan's `Pre-Handoff Base HEAD`.
-   - If the active plan is a follow-up fix plan created after an earlier review rejection, do not automatically assume the final squash scope is only the fix-plan range.
-   - When the user wants one final accumulated handoff commit, switch back to the original handoff plan and use its `Pre-Handoff Base HEAD` as the squash anchor.
-   - Only squash the fix-plan range by itself when the user explicitly wants the earlier handoff commits preserved separately.
-2. If the final squash scope is the full original handoff, treat the original handoff plan as the source of truth for finalization.
-   - Update the original plan's `Git Tracking` and `Review Log` to capture both the earlier rejection and the final approved+squashed review.
-   - Move the original plan to `plans/in-progress/done` when its checkpoints are complete.
-   - Remove the temporary fix plan unless the user explicitly wants to keep it.
-   - Include any explicitly requested summary or handoff companion plan files in the final commit.
-3. Rewrite history so every commit after the chosen squash base becomes one commit.
-4. Use a non-interactive workflow. Prefer `git reset --soft <chosen squash base>` followed by a new commit over interactive rebase.
-5. Write a fresh final commit message that covers the full accumulated scope of the handoff, including earlier approved work and the latest fixes.
-6. If `DEVLOG.md` exists and multiple handoff-related entries were added or updated during the handoff, compact them to one entry that matches the final squashed change.
-7. Update the plan file used for finalization:
-   - do not require the finalized plan file to record the exact SHA of the new squashed commit inside that same commit
-   - the finalized plan should record the reviewed ranges and outcome `approved+squashed`
-   - if `Last Reviewed HEAD` is still useful, use stable non-self-referential wording or omit the exact value
-   - the exact final squashed SHA is not needed for future checkpoint comparison on a completed plan
-8. If the finalized plan's checkpoints are completely done, move that finalized plan to `plans/in-progress/done/` and include it in the final commit.
+1. Use the original plan's `Pre-Handoff Base HEAD` as the squash anchor for the final accumulated handoff.
+2. Update the original plan's `Git Tracking` and `Review Log` to capture the approved and squashed result.
+3. Delete any remaining fix plans for that handoff unless the user explicitly asked to keep them.
+4. Rewrite history so every commit after the squash anchor becomes one final accumulated commit.
+5. Use a non-interactive workflow. Prefer `git reset --soft <squash-base>` followed by a new commit over interactive rebase.
+6. Write a fresh final commit message that covers the full accumulated scope of the handoff.
+7. If `DEVLOG.md` exists and multiple handoff-related entries were added or updated during the handoff, compact them to one entry that matches the final squashed change.
+8. If the original plan's checkpoints are all complete, move that original plan to `plans/done/`, include it in the final commit, and mention the moved plan path in the final response. Create `plans/done/` first if it does not exist.
 9. Treat dirty changes in plan files that are intentionally part of the final handoff state as part of finalization, not as unrelated worktree noise. Still stop if truly unrelated dirty changes remain and make the squash ambiguous.
 
 ## Rejection Path
 
-If the new batch is not acceptable:
+If the accumulated work is not acceptable:
 
 1. Do not squash commits.
-2. Create a new RALF fix plan that addresses the review findings against the current `HEAD`.
-   - The fix plan will be handed over to implementer without any reference to the original plan.
-   - Therefore, the fix plan should be self-contained and not need any context from the original plan.
-3. Update the plan file:
-   - set `Last Reviewed HEAD` to the current `HEAD`
-   - append a `Review Log` entry with the review date, the reviewed range, and outcome `changes-requested`
-4. Keep `Pre-Handoff Base HEAD` unchanged.
-5. Do not compact `DEVLOG.md`.
+2. Create a new RALF fix plan that covers only the failed checkpoints or behaviors against the current `HEAD`.
+3. Ensure `plans/in-progress/` exists before writing the fix plan. Create it if it does not exist.
+4. Use the filename format `original-plan-name-fix-cpN-v01.md` when the rejection is anchored to one checkpoint. If multiple checkpoints are involved, use a similarly descriptive focused name.
+5. The fix plan must be self-contained and must not require the implementer to read prior chat context.
+6. When creating a new fix plan, delete older superseded fix plans for the same original handoff by default unless the user explicitly asks to keep them.
+7. After creating the new fix plan, `plans/in-progress/` should contain only the original handoff plan plus that newest fix plan for the same handoff.
+8. Update the original plan:
+   - append a `Review Log` entry with the review date, the reviewed checkpoint or behavior range, and outcome `changes-requested`
+   - update `Last Reviewed HEAD` only when it clearly helps and does not create brittle bookkeeping pressure
+9. Keep `Pre-Handoff Base HEAD` unchanged.
+10. Do not compact `DEVLOG.md`.
 
 ## Stop And Escalate If
 
-- No RALF plan file with `Git Tracking` can be found.
-- The current branch does not match the plan's `Plan Branch`.
-- `Pre-Handoff Base HEAD` is missing or no longer reachable.
-- The worktree has unrelated dirty changes that make the review or squash ambiguous.
-- Multiple plan files are plausible and the active one cannot be determined safely.
+- no original RALF plan with `Git Tracking` can be found
+- the current branch does not match the plan's `Plan Branch`
+- `Pre-Handoff Base HEAD` is missing or no longer reachable
+- the original plan is still mid-flight and the correct next action is to resume the autonomous executor
+- the worktree has unrelated dirty changes that make the review or squash ambiguous
+- multiple original plan files are plausible and the active one cannot be determined safely
 
 ## Verification
 
 Before finishing, verify:
 
-- the reviewed range is correct relative to `Last Reviewed HEAD` or `Pre-Handoff Base HEAD`
+- the reviewed range is correct relative to the original plan's checkpoint/version review history, `Last Reviewed HEAD`, or `Pre-Handoff Base HEAD`
 - the reported commit counts match git history
 - after approval, the branch contains exactly one accumulated handoff commit after `Pre-Handoff Base HEAD`
-- after approval, do not require the finalized plan file to self-reference the final squashed commit hash
+- after approval, no stale fix plans remain in `plans/in-progress/`
+- after final approval, `plans/done/` exists and contains the completed original handoff plan
 - after rejection, no history rewrite occurred
+- after rejection, `plans/in-progress/` contains only the original handoff plan plus the newest focused fix plan for that handoff
+- after rejection, superseded older fix plans were deleted unless the user asked to keep them
 - `DEVLOG.md` was compacted only when a squash occurred and multiple relevant entries existed

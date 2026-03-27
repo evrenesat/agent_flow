@@ -1,2 +1,4 @@
 .DS_Store
 temp/
+/skills/.system/*
+/codex-ralph-loop-plugin/ralph-loop-claude/*

@@ -1,4 +1,4 @@
 interface:
   display_name: "RALF Handoff Plan"
-  short_description: "Create a strict, decision-complete RALF handoff plan"
-  default_prompt: "Use $ralf-handoff-plan to create a strict, decision-complete RALF checkpoint handoff plan and record the current branch and base HEAD for later review."
+  short_description: "Create a strict, durable, decision-complete RALF handoff plan"
+  default_prompt: "Use $ralf-handoff-plan to create a strict, durable, decision-complete RALF checkpoint handoff plan that can be resumed from disk and reviewed later without relying on prior chat context."

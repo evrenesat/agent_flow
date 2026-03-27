@@ -13,6 +13,10 @@ Use this skill only for RALF-style planning.
 - Confirm risky assumptions before locking the final plan.
 - Keep questions concise and sequenced.
 - Produce a strict checkpoint handoff plan, not a standard implementation plan.
+- Keep the plan execution-model agnostic. The plan must work for checkpoint-scoped CP execution and for autonomous non-CP execution without declaring a mode field.
+- Make the plan durable under crash, rerun, and later-session handoff. A fresh agent or thread must be able to resume from disk without relying on prior chat context.
+- Treat the original handoff plan as the long-lived ledger under `plans/in-progress/` until the handoff is complete.
+- Treat reviewer-created fix plans as temporary overlays for rejected work, not replacements for the original plan's long-lived state.
 - Treat `ralf` and `ralph` as equivalent spellings.
 - If the user asks for planning but does not want RALF, do not use this skill.
 
@@ -45,14 +49,18 @@ Requirements:
 - Use Markdown task lists (`- [ ]`) for checkpoints and internal steps.
 - Define done at project and checkpoint level.
 - Keep checkpoints atomic and independently verifiable.
+- Write each checkpoint so a fresh agent or thread can resume from disk with no hidden chat context.
 - Include explicit context bootstrapping commands before edits.
 - List allowed files and forbidden files or systems per checkpoint.
 - Include anti-shortcut constraints and preserved behaviors.
 - Include scoped and non-regression verification commands per checkpoint.
 - Require a git commit boundary per checkpoint.
+- Define a commit message format per checkpoint that starts with the checkpoint/version prefix `cpN vNN` on the first line, followed by the rest of the commit message body. Every checkpoint commit, including the first commit for that checkpoint, must use an explicit version starting at `v01`. Example first line: `cp1 v01`
+- Make checkpoint state durable enough for restart. Step checkboxes should reflect meaningful progress inside the checkpoint and help a later rerun or reviewer understand what is already done.
+- Do not encode whether plan checkboxes are updated by the executor or the reviewer. The consuming execution or review skill owns that policy.
 - Include explicit stop-and-escalate conditions.
 - Require an explicit documentation impact review that updates relevant existing docs when the change warrants it.
-- Require a `Git Tracking` section that captures the current branch, the immutable pre-handoff base commit, the mutable last-reviewed commit, and a review log for later review/squash passes.
+- Require a `Git Tracking` section that captures the current branch, the immutable pre-handoff base commit, an optional last-reviewed commit field, and a review log for later review passes. Review state should be understandable from checkpoint/version labels even when exact reviewed SHAs are omitted or become stale.
 - Add `Critical Invariants` for rules that must hold across the entire implementation.
 - Add `Forbidden Implementations` for shortcuts the implementer might otherwise take.
 - Add `Behavioral Acceptance Tests` as observable outcomes, not just test commands.
@@ -79,7 +87,7 @@ Use this checkpoint skeleton:
 **Scope & Blast Radius:**
 
 - May create/modify: [files]
-- Must not touch: [files/systems]
+- Must not touch: [files/systems, including `plans/**` except read-only access to the assigned plan file and the minimal progress-tracking edits performed by the consuming execution or review workflow]
 - Constraints: [anti-shortcuts + preserved behavior]
 
 **Steps:**
@@ -101,7 +109,12 @@ Use this checkpoint skeleton:
 
 - Verification commands pass cleanly.
 - <observable condition>
-- A git commit is created with message: `...`
+- A git commit is created with message starting with:
+  ```text
+  cpN vNN
+  <rest of the commit message>
+  ```
+  The first commit for a checkpoint must use `v01`. Later fix passes for the same checkpoint increment the version number, for example `cp4 v02`, `cp4 v03`, and so on.
 
 **Stop and Escalate If:**
 
@@ -115,7 +128,7 @@ Use this `Git Tracking` skeleton in the final plan:
 
 - Plan Branch: `<git branch --show-current>`
 - Pre-Handoff Base HEAD: `<git rev-parse HEAD>`
-- Last Reviewed HEAD: `none`
+- Last Reviewed HEAD: `none`  <!-- optional support field, not the primary review tracker -->
 - Review Log:
   - None yet.
 ```
@@ -181,7 +194,7 @@ If docs intentionally describe future state, the plan must say so explicitly and
 
 ## Git Tracking Rule
 
-The `Git Tracking` section is the source of truth for later review/squash workflows.
+The `Git Tracking` section is the source of truth for later review workflows.
 
 Requirements:
 
@@ -189,7 +202,9 @@ Requirements:
 - Use the full SHA from `git rev-parse HEAD`, not a short SHA.
 - Treat `Pre-Handoff Base HEAD` as immutable for the life of the handoff, even after squashes.
 - Initialize `Last Reviewed HEAD` to `none`.
-- Require later review workflows to update `Last Reviewed HEAD` and append to `Review Log` after each review pass.
+- Treat checkpoint/version commit prefixes such as `cp4 v01`, `cp4 v02`, and `cp5 v01` as the primary human-readable tracking mechanism for review progress.
+- Use `Last Reviewed HEAD` only as optional support metadata. Do not make the handoff process depend on updating that field after every review.
+- Require later review workflows to append to `Review Log` after each review pass. Review-log entries should name the checkpoint/version batch that was reviewed, and may include exact SHAs when useful.
 - If a later plan revision changes scope, preserve the original base SHA unless the user explicitly restarts the handoff from a new baseline.
 
 ## Documentation Coverage Rule
@@ -223,8 +238,11 @@ For every plan generated with this skill, persist the final RALF plan to disk.
 
 Rules:
 
-1. Save under `plans/` in the current project's root.
-2. Use a descriptive markdown filename that makes the handoff purpose obvious.
-3. Avoid overwriting existing files.
-4. Exception: allow overwrite only when the target file was created by the assistant in the same session.
-5. If a same-name file already exists from a prior session, create a new variant name such as `-v2`, `-v3`, or a date suffix.
+1. Ensure `plans/in-progress/` exists in the current project's root before writing the active plan. Create it if it does not exist.
+2. Save the active original handoff plan under `plans/in-progress/`. Do not leave active plans directly under `plans/`.
+3. Use a descriptive markdown filename that makes the handoff purpose obvious.
+4. Avoid overwriting existing files.
+5. Exception: allow overwrite only when the target file was created by the assistant in the same session.
+6. If a same-name file already exists from a prior session, create a new variant name such as `-v2`, `-v3`, or a date suffix.
+7. Architect or reviewer workflows must delete superseded fix plans whenever a newer fix plan is created, and must delete any remaining fix plans once a checkpoint is accepted so that only the original handoff plan remains in `plans/in-progress/` before the next normal checkpoint starts.
+8. When every checkpoint is complete, move the original handoff plan to `plans/done/`. Create `plans/done/` if it does not exist, and include the moved plan path in the final response.

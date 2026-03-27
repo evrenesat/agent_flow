@@ -1,21 +1,22 @@
 ---
-name: ralph-execute
-description: Execute an existing RALF or Ralph checkpoint plan in a long-running loop. Use when an agent must continue a plan file, keep its checkboxes synchronized with actual progress, run verification after each checkpoint, and create git commits at checkpoint or final-plan boundaries.
+name: ralf-execute
+description: "Execute an existing RALF plan autonomously across the whole plan. Use when an agent must resume from the first unchecked checkpoint, use a fresh agent or fresh thread boundary for each checkpoint, keep the plan file synchronized with verified progress, and continue until the plan is complete."
 ---
 
-# Ralph Execute
+# RALF Execute
 
-Use this skill only to execute an existing RALF or Ralph plan. Treat `ralf` and `ralph` as equivalent spellings.
+Use this skill only to execute an existing RALF plan autonomously. Treat `ralf` and `ralph` as equivalent spellings.
 
 The plan file is the source of truth. Do not rely on chat memory when the plan, repository state, test output, or git history disagree.
 
 ## Core Rules
 
-- Execute the first incomplete checkpoint, not an arbitrary task that looks related.
-- Work one checkpoint at a time unless the plan explicitly instructs otherwise.
+- Execute the whole plan by completing one checkpoint at a time in order.
+- Always resume from the first unchecked checkpoint unless the user explicitly instructs otherwise.
+- Use a fresh agent, fresh thread, or equivalent fresh-context run for each checkpoint. Do not carry hidden checkpoint context forward as the primary source of truth.
+- Re-read the plan from disk between checkpoints.
 - Keep the plan file synchronized with actual progress while you work.
 - Do not mark any step or checkpoint complete before its required verification passes.
-- The moment a step is truly done, reflect that state in the plan file. Do not leave finished step checkboxes unchecked "for later".
 - A checkpoint that passed verification is not complete until its plan updates are saved and its required commit has been created.
 - Never leave a finished checkpoint, especially the last checkpoint in the plan, sitting as uncommitted worktree changes.
 - Stop and escalate when the plan is ambiguous, contradictory, or unsafe to continue.
@@ -34,17 +35,24 @@ If the plan file is missing, multiple candidate plans exist, or the next checkpo
 
 Follow this loop strictly:
 
-1. Read the plan file and find the first unchecked checkpoint heading.
+1. Read the plan file from disk and find the first unchecked checkpoint heading.
 2. Read that checkpoint fully before editing code. Also read any earlier checkpoints it depends on.
-3. Run the checkpoint's context-bootstrapping commands and inspect the repo state.
-4. If unrelated dirty changes make the checkpoint ambiguous, stop and escalate instead of guessing.
-5. Implement only the scope assigned to that checkpoint.
-6. Run the exact verification commands from the checkpoint. Add scoped checks only when needed to diagnose a failure, not as a substitute for required verification.
-7. If verification fails, diagnose the failure, keep the checkpoint unchecked, and continue iterating on that same checkpoint.
-8. If verification passes, stop all other work, update the plan file immediately, create the required commit immediately, and only then move to the next checkpoint.
-9. When no unchecked checkpoints remain, emit the required completion promise if one was provided. Otherwise report that the plan is complete.
+3. Start a fresh agent, thread, or equivalent fresh-context run for that checkpoint. If the platform cannot spawn a fresh worker, rebuild context from disk before continuing and do not rely on prior chat memory.
+4. Run the checkpoint's context-bootstrapping commands and inspect the repo state.
+5. If unrelated dirty changes make the checkpoint ambiguous, stop and escalate instead of guessing.
+6. Implement only the scope assigned to that checkpoint.
+7. Run the exact verification commands from the checkpoint. Add scoped checks only when needed to diagnose a failure, not as a substitute for required verification.
+8. If verification fails, diagnose the failure, keep the checkpoint unchecked, and continue iterating on that same checkpoint.
+9. If verification passes, stop all other work, update the plan file immediately, create the required commit immediately, and only then reopen the plan from disk to look for the next unchecked checkpoint.
+10. When no unchecked checkpoints remain, emit the required completion promise if one was provided. Otherwise report that the plan is complete.
 
-Do not reorder step 8. "I'll commit after one more small cleanup", "I'll update the checkboxes at the end", and "I'll report completion first" are all execution mistakes.
+Do not reorder step 9. "I'll commit after one more small cleanup", "I'll update the checkboxes at the end", and "I'll report completion first" are all execution mistakes.
+
+## Restart Rule
+
+- If the autonomous run crashes, exits early, or loses context, restart by rereading the plan file and resuming from the first unchecked checkpoint.
+- Use step-level checkboxes inside the active checkpoint as additional evidence for what is already done, but do not treat them as a substitute for the unchecked checkpoint heading.
+- If the plan file and repo state disagree, resolve the mismatch from disk and git state before continuing.
 
 ## Plan Synchronization Rules
 

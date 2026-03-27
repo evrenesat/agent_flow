@@ -11,13 +11,19 @@ Generic home for shareable agent workflow assets and the source of truth for cus
 ## Skills
 
 ### `ralf-handoff-plan`
-Creates a strict RALF checkpoint handoff plan for coding work that will be implemented by another agent or session. Use this to pause work safely and leave precise instructions on what remains to be done, including verification commands and git tracking.
+Creates a strict RALF checkpoint handoff plan for coding work that will be implemented by another agent or session. The plan stays execution-model agnostic, but it must be durable enough to resume from disk and support later review without relying on prior chat context.
+
+### `ralf-execute`
+Runs a RALF plan autonomously from the first unchecked checkpoint through completion. It is the non-CP executor: it uses a fresh context boundary for each checkpoint, keeps the plan file synchronized with verified progress, commits each completed checkpoint, and resumes from the first unchecked checkpoint after crashes or reruns.
+
+### `ralf-cp-execute`
+Implements one checkpoint from a RALF plan and stops. It is the CP executor: it treats the plan as read-only, works on the named checkpoint or the first unchecked checkpoint by default, creates the checkpoint commit, and leaves plan updates to the reviewer.
 
 ### `ralf-review-squash`
-Reviews sub-agent commits after a RALF handoff. It compares the new batch of commits against the plan's expected outcome, and either creates a follow-up fix plan or squashes the entire handoff history into a single clean commit.
+Reviews a completed autonomous RALF run. It is the non-CP review path: it checks the full accumulated implementation against the original plan, then either squashes the whole handoff into one final commit or creates a focused fix plan for the remaining failed checkpoints or behaviors.
 
-### `ralph-execute`
-Guides the agent through executing an existing RALF or Ralph plan. The agent resumes from the first unchecked checkpoint, keeps the plan file's checkboxes in sync with verified progress, and creates git commits at the required checkpoint or final-plan boundaries.
+### `ralf-cp-review`
+Reviews one checkpoint-sized RALF batch. It is the CP review path: it checks the current checkpoint or focused fix pass, updates the original plan when the checkpoint is approved, and creates or replaces one focused fix plan when more work is needed.
 
 ## Scripts
 
