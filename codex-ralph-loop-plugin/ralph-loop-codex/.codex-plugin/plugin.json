@@ -1,0 +1,21 @@
+{
+  "name": "ralph-loop-codex",
+  "displayName": "RALF for Codex",
+  "version": "0.1.0",
+  "description": "Codex-native RALF planning and execution workflows packaged as a standalone local plugin.",
+  "author": {
+    "name": "Evren Ozkan",
+    "email": "xx@evren.io"
+  },
+  "repository": "https://github.com/evrenesat/agent_flow",
+  "homepage": "https://github.com/evrenesat",
+  "category": "Productivity",
+  "skills": "./skills/",
+  "interface": {
+    "defaultPrompt": [
+      "Use `ralf` to choose the right RALF workflow.",
+      "Use `ralf-execute` when a plan already exists and you want autonomous continuation.",
+      "Use `ralf-cp-execute` for one checkpoint only."
+    ]
+  }
+}
