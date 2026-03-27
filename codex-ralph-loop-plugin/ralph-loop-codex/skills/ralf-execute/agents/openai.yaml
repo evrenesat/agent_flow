@@ -1,0 +1,4 @@
+interface:
+  display_name: "RALF Execute"
+  short_description: "Run a RALF plan autonomously, one fresh checkpoint at a time"
+  default_prompt: "Use $ralf-execute to resume the first unchecked checkpoint in a RALF plan, execute the whole plan autonomously with a fresh context boundary per checkpoint, keep the plan synchronized with verified progress, and continue until the plan is complete."

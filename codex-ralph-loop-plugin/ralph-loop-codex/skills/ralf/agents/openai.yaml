@@ -1,0 +1,4 @@
+interface:
+  display_name: "RALF"
+  short_description: "Route users to the correct packaged RALF workflow"
+  default_prompt: "Use $ralf to choose the correct packaged RALF workflow, or ask one targeted clarification question if the user's intent is ambiguous."

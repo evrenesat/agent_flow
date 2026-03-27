@@ -1,0 +1,4 @@
+interface:
+  display_name: "RALF Review Squash"
+  short_description: "Review a completed autonomous RALF run and squash approved work"
+  default_prompt: "Use $ralf-review-squash to review the full accumulated work from a completed autonomous RALF handoff, approve and squash the whole handoff if it is correct, or create a focused fix plan if it is not."
