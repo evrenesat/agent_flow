@@ -7,6 +7,7 @@ Generic home for shareable agent workflow assets and the source of truth for cus
 - `skills/`: Versioned custom skills that can be linked into agent runtimes.
 - `commands/`: Placeholder for future reusable command wrappers.
 - `scripts/`: Generic helper scripts, including the `ralf` runner.
+- `codex-ralph-loop-plugin/`: Source for the Codex RALF plugin, hidden runtime payload, and install scripts.
 
 ## Skills
 
@@ -41,6 +42,51 @@ Everything after an explicit plan path is appended verbatim to the generated pla
 By default the script expects Gemini Ralph's setup script at `~/.gemini/extensions/ralph/scripts/setup.sh`. Override that path with `RALPH_SETUP_SCRIPT` if your extension is installed elsewhere.
 
 `scripts/ralf_offf.sh` is not the active runner.
+
+## Codex Ralph Loop
+
+The Codex Ralph source lives in this repo, but the live runtime belongs in Codex's real config locations.
+
+- Source payload lives under `codex-ralph-loop-plugin/ralph-loop-codex/`.
+- The hidden runtime payload lives under `codex-ralph-loop-plugin/ralph-loop-codex/.codex-runtime/`.
+- The install script wires the runtime into `~/.codex/` and symlinks `ralf-codex` into a bin dir on your `PATH`.
+- `ralph-loop.local.md` in the active working project is the durable Ralph state file for Codex runs.
+- The loop continues only while the state file is active, the plan still has unchecked checkpoints, and the completion promise has not been emitted.
+
+The loop manager itself does not require any of the repo skills. If you already have a plan file, the installed `ralf-codex` launcher plus the installed Codex hooks are enough.
+
+The repo skills are optional helpers for adjacent tasks:
+
+- `ralf-handoff-plan` when you want Codex to author a strict checkpoint plan
+- `ralf-cp-execute` when you want a single-checkpoint workflow instead of the full loop
+- `ralf-cp-review` and `ralf-review-squash` when you want review-specific guidance outside the loop manager
+
+## Codex Runtime Install
+
+Install the live Codex runtime from this repo with:
+
+```bash
+python3 codex-ralph-loop-plugin/ralph-loop-codex/scripts/install.py
+```
+
+That installer:
+
+- enables `codex_hooks = true` in `~/.codex/config.toml`
+- merges the Ralph hook entries into `~/.codex/hooks.json`
+- symlinks the hidden runtime payload into `~/.codex/ralf-loop-codex`
+- symlinks `ralf-codex` into `~/bin` by default
+
+After installation, use:
+
+```bash
+ralf-codex path/to/plan.md
+```
+
+or:
+
+```bash
+ralf-codex --prepare-only path/to/plan.md
+```
 
 ## Source Of Truth
 

@@ -1,4 +1,4 @@
 interface:
   display_name: "RALF"
-  short_description: "Route users to the correct packaged RALF workflow"
-  default_prompt: "Use $ralf to choose the correct packaged RALF workflow, or ask one targeted clarification question if the user's intent is ambiguous."
+  short_description: "Explain Codex RALF installation and usage"
+  default_prompt: "Use $ralf to explain how to install the Codex RALF runtime, how to run ralf-codex on a plan file, and that extra RALF skills are optional."

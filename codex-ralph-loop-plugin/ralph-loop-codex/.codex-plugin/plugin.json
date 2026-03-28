@@ -1,21 +1,38 @@
 {
   "name": "ralph-loop-codex",
-  "displayName": "RALF for Codex",
   "version": "0.1.0",
-  "description": "Codex-native RALF planning and execution workflows packaged as a standalone local plugin.",
+  "description": "Codex RALF source bundle with installable hooks, launcher, and setup guidance.",
   "author": {
     "name": "Evren Ozkan",
-    "email": "xx@evren.io"
+    "email": "xx@evren.io",
+    "url": "https://github.com/evrenesat"
   },
+  "homepage": "https://github.com/evrenesat/agent_flow",
   "repository": "https://github.com/evrenesat/agent_flow",
-  "homepage": "https://github.com/evrenesat",
-  "category": "Productivity",
+  "license": "MIT",
+  "keywords": [
+    "ralf",
+    "ralph",
+    "codex",
+    "checkpoint",
+    "workflow"
+  ],
   "skills": "./skills/",
   "interface": {
+    "displayName": "RALF for Codex",
+    "shortDescription": "Installable Codex RALF runtime and setup helper",
+    "longDescription": "Use this plugin to install the Codex RALF runtime into live Codex paths, run ralf-codex on a plan file, and keep extra RALF skills optional.",
+    "developerName": "Evren Ozkan",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/evrenesat/agent_flow",
     "defaultPrompt": [
-      "Use `ralf` to choose the right RALF workflow.",
-      "Use `ralf-execute` when a plan already exists and you want autonomous continuation.",
-      "Use `ralf-cp-execute` for one checkpoint only."
+      "Use `ralf` to explain how to install the Codex RALF runtime.",
+      "Show me how to run an existing RALF plan with `ralf-codex`.",
+      "Tell me which RALF skills are optional versus required."
     ]
   }
 }

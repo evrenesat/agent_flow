@@ -1,70 +1,92 @@
 # RALF for Codex
 
-This plugin packages the RALF planning and execution workflows for Codex as skills, not as a Claude stop-hook loop.
+This plugin packages the Codex Ralph source, hidden runtime payload, and install scripts.
 
 ## What this plugin does
 
-RALF here means a checkpoint-oriented workflow for planning, autonomous execution, checkpoint-scoped execution, checkpoint review, and final review. The main idea is fresh context boundaries between checkpoints, with the plan on disk as the source of truth.
+The loop runtime comes from this plugin's hidden payload, but it must be installed into Codex's live locations:
+
+- `~/.codex/hooks.json`
+- `~/.codex/config.toml`
+- a bin directory on your `PATH`
+
+The source of truth stays in this repo. The installer wires the runtime into the locations Codex actually reads.
 
 ## Bundled skills
 
-- `ralf`, the front door. Use this when you want the plugin to route you to the right RALF workflow.
-- `ralf-handoff-plan`, create a strict checkpoint handoff plan.
-- `ralf-execute`, run an existing plan from the first unchecked checkpoint through completion.
-- `ralf-cp-execute`, execute one checkpoint only.
-- `ralf-cp-review`, review one checkpoint-sized batch and update the original plan if it passes.
-- `ralf-review-squash`, review a completed autonomous run and squash approved work at the end.
+- `ralf`, the front door. Use this when you want the plugin to explain the Codex RALF flow and point you to the launcher.
 
-## When to use each skill
+## What you need
 
-- Use `ralf` when you know you want RALF, but not which packaged skill to invoke.
-- Use `ralf-handoff-plan` when you need a durable handoff plan for another agent or later session.
-- Use `ralf-execute` when the plan already exists and you want the whole plan worked through in order.
-- Use `ralf-cp-execute` when you want exactly one checkpoint implemented and committed.
-- Use `ralf-cp-review` when you are reviewing one checkpoint batch and deciding whether it is ready to approve.
-- Use `ralf-review-squash` when the whole autonomous handoff is done and you want final review plus squash logic.
+For the loop itself, you only need:
 
-## What changed from Claude
+- a plan file with real `### [ ] Checkpoint ...` headings
+- the installed `ralf-codex` launcher
+- the installed Codex hook entries
 
-The older Ralph Loop plugin used Claude slash commands plus a stop hook. This Codex plugin does not.
+No extra RALF skills are required for whole-plan loop execution.
 
-- `/ralph-loop` conceptually maps to `ralf` or `ralf-execute` after a plan exists.
-- `/cancel-ralph` has no direct plugin-state equivalent in v1, because execution is plan-driven rather than state-file driven.
-- `/help` maps to this README and to the skill descriptions.
+## Install
 
-## v1 boundaries
+Run:
 
-This plugin does not promise:
+```bash
+python3 scripts/install.py
+```
 
-- Claude-style stop-hook interception
-- same-session prompt reinjection
-- marketplace integration
-- external runner scripts that shell out to the Codex CLI
+By default this:
 
-That is intentional. The v1 goal is a portable Codex-native workflow, not a faithful reimplementation of Claude's session control model.
+- symlinks `.codex-runtime/` into `~/.codex/ralf-loop-codex`
+- merges the managed Ralph hooks into `~/.codex/hooks.json`
+- enables `codex_hooks = true` in `~/.codex/config.toml`
+- symlinks `bin/ralf-codex` into `~/bin/ralf-codex`
+
+Optional flags:
+
+```bash
+python3 scripts/install.py --codex-home ~/.codex --bin-dir ~/bin --force
+```
+
+Remove the live runtime with:
+
+```bash
+python3 scripts/uninstall.py
+```
 
 ## Quick start
 
-If you already have a plan:
+If you already have a plan and want Codex CLI to drive it:
 
-```text
-Use $ralf-execute to continue the first unchecked checkpoint in the plan.
+```bash
+ralf-codex path/to/plan.md
 ```
 
-If you need a new plan:
+If you want to start the run from the Codex app:
 
-```text
-Use $ralf-handoff-plan to create a strict checkpoint handoff plan.
+```bash
+ralf-codex --prepare-only path/to/plan.md
 ```
 
-If you only want one checkpoint:
+Then paste the printed prompt into a Codex app thread for the actual project you want to work in.
 
-```text
-Use $ralf-cp-execute for the named checkpoint, or the first unchecked checkpoint by default.
-```
+## Optional skills
+
+The repo's RALF skills are optional helpers, not runtime dependencies.
+
+- Use them if you want Codex to create a plan for you.
+- Use them if you want checkpoint-only execution or review-specific behavior outside the full loop.
+- Ignore them if you already have a good plan file and just want the loop manager.
+
+## Boundaries
+
+The plugin is the source bundle. The live runtime still has to be installed.
+
+- Installing the plugin alone is not enough to activate hooks.
+- Whole-plan Codex continuation depends on the installed hook entries and launcher.
+- The loop does not depend on the extra RALF skills.
 
 ## Notes
 
-- This plugin is self-contained under `ralph-loop-codex`.
-- It does not add marketplace metadata in this pass.
-- It does not copy Claude hook files into the Codex plugin.
+- The hidden runtime payload lives under `.codex-runtime/`.
+- The install scripts are the supported way to wire this plugin into live Codex paths.
+- Cancel a run by removing `ralph-loop.local.md` or setting `active: false`.
