@@ -5,8 +5,8 @@ from pathlib import Path
 from .base import HarnessInvocation
 
 
-class ClaudeAdapter:
-    name = "claude"
+class PiAdapter:
+    name = "pi"
 
     def build_invocation(
         self,
@@ -15,28 +15,26 @@ class ClaudeAdapter:
         model: str,
         system_prompt: str,
         user_prompt: str,
+        effort: str | None = None,
     ) -> HarnessInvocation:
-        argv = (
-            "claude",
-            "-p",
+        argv: list[str] = [
+            "pi",
+            "--print",
             "--system-prompt",
             system_prompt,
-            "--model",
-            model,
-            "--permission-mode",
-            "bypassPermissions",
-            "--dangerously-skip-permissions",
-            "--tools",
-            "default",
-            user_prompt,
-        )
+        ]
+        if effort is not None:
+            argv.extend(["--models", f"{model}:{effort}"])
+        else:
+            argv.extend(["--model", model])
+        argv.extend(["--tools", "read,bash,edit,write,grep,find,ls"])
+        argv.append(user_prompt)
         return HarnessInvocation(
             label=self.name,
-            argv=argv,
+            argv=tuple(argv),
             env={},
             prompt_mode="system-prompt-flag",
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             effective_prompt=user_prompt,
         )
-

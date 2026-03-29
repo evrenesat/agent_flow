@@ -112,6 +112,7 @@ def run_controller(
             model=config.model,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
+            effort=config.effort,
         )
         completed = runner(
             list(invocation.argv),

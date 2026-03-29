@@ -22,9 +22,10 @@ def _positive_int(value: str) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="ralf-universal")
+    parser = argparse.ArgumentParser(prog="ralph")
     parser.add_argument("--harness", required=True, choices=sorted(ADAPTERS))
     parser.add_argument("--model", required=True)
+    parser.add_argument("--effort")
     parser.add_argument("--max-turns", type=_positive_int, default=DEFAULT_MAX_TURNS)
     parser.add_argument("--stagnation-limit", type=_positive_int, default=DEFAULT_STAGNATION_LIMIT)
     parser.add_argument("--keep-runs", type=_positive_int, default=DEFAULT_KEEP_RUNS)
@@ -39,7 +40,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parents[1]
     plan_path = Path(args.plan_file).expanduser().resolve()
     extra_instructions = tuple(token for token in args.extra_instructions if token != "--")
     config = ControllerConfig(
@@ -51,6 +52,7 @@ def main(argv: list[str] | None = None) -> int:
         stagnation_limit=args.stagnation_limit,
         keep_runs=args.keep_runs,
         extra_instructions=extra_instructions,
+        effort=args.effort,
     )
 
     try:
@@ -63,4 +65,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

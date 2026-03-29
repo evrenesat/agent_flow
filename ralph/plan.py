@@ -130,4 +130,3 @@ def load_plan(path: Path) -> ParsedPlan:
     if not path.is_file():
         raise _build_error(path, "plan file does not exist")
     return parse_plan_text(path.read_text(encoding="utf-8"), source_path=path)
-

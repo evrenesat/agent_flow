@@ -15,9 +15,10 @@ class CodexAdapter:
         model: str,
         system_prompt: str,
         user_prompt: str,
+        effort: str | None = None,
     ) -> HarnessInvocation:
         effective_prompt = "\n\n".join((system_prompt, user_prompt))
-        argv = (
+        argv: list[str] = [
             "codex",
             "exec",
             "--dangerously-bypass-approvals-and-sandbox",
@@ -25,15 +26,16 @@ class CodexAdapter:
             str(repo_root),
             "--model",
             model,
-            effective_prompt,
-        )
+        ]
+        if effort is not None:
+            argv.extend(["-c", f'model_reasoning_effort=\'"{effort}"\''])
+        argv.append(effective_prompt)
         return HarnessInvocation(
             label=self.name,
-            argv=argv,
+            argv=tuple(argv),
             env={},
             prompt_mode="prefix-system-into-user-prompt",
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             effective_prompt=effective_prompt,
         )
-

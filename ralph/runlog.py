@@ -88,6 +88,7 @@ def write_run_metadata(
         "plan_path": str(config.plan_path),
         "harness": config.harness,
         "model": config.model,
+        "effort": config.effort,
         "max_turns": config.max_turns,
         "stagnation_limit": config.stagnation_limit,
         "keep_runs": config.keep_runs,

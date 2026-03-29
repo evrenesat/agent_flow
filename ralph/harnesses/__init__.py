@@ -18,4 +18,3 @@ def get_adapter(name: str) -> HarnessAdapter:
         return ADAPTERS[name]
     except KeyError as exc:
         raise KeyError(f"unsupported harness '{name}'") from exc
-

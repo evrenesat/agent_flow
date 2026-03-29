@@ -16,6 +16,7 @@ class ControllerConfig:
     stagnation_limit: int = 5
     keep_runs: int = 20
     extra_instructions: tuple[str, ...] = ()
+    effort: str | None = None
 
 
 @dataclass
@@ -49,4 +50,3 @@ class ControllerRunResult:
             "final_snapshot": asdict(self.final_snapshot),
             "status": self.status,
         }
-

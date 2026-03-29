@@ -26,6 +26,6 @@ class HarnessAdapter(Protocol):
         model: str,
         system_prompt: str,
         user_prompt: str,
+        effort: str | None = None,
     ) -> HarnessInvocation:
         ...
-
