@@ -5,9 +5,9 @@ from pathlib import Path
 from .base import HarnessInvocation
 
 
-class CodexAdapter:
-    name = "codex"
-    supports_effort = True
+class GeminiAdapter:
+    name = "gemini"
+    supports_effort = False
 
     def build_invocation(
         self,
@@ -19,21 +19,20 @@ class CodexAdapter:
         effort: str | None = None,
     ) -> HarnessInvocation:
         effective_prompt = "\n\n".join((system_prompt, user_prompt))
-        argv: list[str] = [
-            "codex",
-            "exec",
-            "--dangerously-bypass-approvals-and-sandbox",
-            "-C",
-            str(repo_root),
-            "--model",
-            model,
-        ]
-        if effort is not None:
-            argv.extend(["-c", f'model_reasoning_effort=\'"{effort}"\''])
-        argv.append(effective_prompt)
         return HarnessInvocation(
             label=self.name,
-            argv=tuple(argv),
+            argv=(
+                "gemini",
+                "--prompt",
+                effective_prompt,
+                "--model",
+                model,
+                "--approval-mode",
+                "yolo",
+                "--sandbox=false",
+                "--output-format",
+                "text",
+            ),
             env={},
             prompt_mode="prefix-system-into-user-prompt",
             system_prompt=system_prompt,

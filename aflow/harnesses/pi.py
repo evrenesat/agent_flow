@@ -7,6 +7,7 @@ from .base import HarnessInvocation
 
 class PiAdapter:
     name = "pi"
+    supports_effort = True
 
     def build_invocation(
         self,

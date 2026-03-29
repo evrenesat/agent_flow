@@ -1,105 +1,122 @@
-# agent_flow
+# aflow
 
-Generic home for shareable agent workflow assets and the source of truth for custom items shared across coding agents.
+`aflow` is a plan checkpoint controller for `codex`, `pi`, `claude`, `opencode`, and `gemini`.
 
-## Layout
+## Install
 
-- `skills/`: Versioned custom skills that can be linked into agent runtimes.
-- `commands/`: Placeholder for future reusable command wrappers.
-- `aflow/`: Self-contained plan checkpoint controller for codex, pi, and claude.
-- `codex-ralph-loop-plugin/`: Source for the Codex RALF plugin, hidden runtime payload, and install scripts.
-
-## Skills
-
-### `ralf-handoff-plan`
-Creates a strict RALF checkpoint handoff plan for coding work that will be implemented by another agent or session. The plan stays execution-model agnostic, but it must be durable enough to resume from disk and support later review without relying on prior chat context.
-
-### `ralf-execute`
-Runs a RALF plan autonomously from the first unchecked checkpoint through completion. It is the non-CP executor: it uses a fresh context boundary for each checkpoint, keeps the plan file synchronized with verified progress, commits each completed checkpoint, and resumes from the first unchecked checkpoint after crashes or reruns.
-
-### `ralf-cp-execute`
-Implements one checkpoint from a RALF plan and stops. It is the CP executor: it treats the plan as read-only, works on the named checkpoint or the first unchecked checkpoint by default, creates the checkpoint commit, and leaves plan updates to the reviewer.
-
-### `ralf-review-squash`
-Reviews a completed autonomous RALF run. It is the non-CP review path: it checks the full accumulated implementation against the original plan, then either squashes the whole handoff into one final commit or creates a focused fix plan for the remaining failed checkpoints or behaviors.
-
-### `ralf-cp-review`
-Reviews one checkpoint-sized RALF batch. It is the CP review path: it checks the current checkpoint or focused fix pass, updates the original plan when the checkpoint is approved, and creates or replaces one focused fix plan when more work is needed.
-
-## Scripts
-
-### `ralf`
-A bash runner for Gemini headless Ralph loops over a checkpoint plan file. It builds the planner prompt from the plan path, initializes Ralph state with the installed Gemini Ralph extension, then runs Gemini with that exact same prompt so later iterations do not trip the prompt-mismatch hook.
-
-**Usage:**
-```bash
-ralf [--dry-run] [path/to/plan.md]
-ralf [--dry-run] path/to/plan.md [extra instructions ...]
-```
-
-Everything after an explicit plan path is appended verbatim to the generated planner prompt. `--dry-run` prints both the Ralph setup command and the Gemini command without executing them.
-
-By default the script expects Gemini Ralph's setup script at `~/.gemini/extensions/ralph/scripts/setup.sh`. Override that path with `RALPH_SETUP_SCRIPT` if your extension is installed elsewhere.
-
-`scripts/ralf_offf.sh` is not the active runner.
-
-### `aflow`
-
-Plan checkpoint controller for codex, pi, and claude. Lives under `aflow/`. See `aflow/README.md` for usage, supported harnesses, optional `--effort`, limits, and live status banner details.
-
-Install as a system tool with `uv tool install /Users/evren/code/agent_flow`.
-
-## Codex Ralph Loop
-
-The Codex Ralph source lives in this repo, but the live runtime belongs in Codex's real config locations.
-
-- Source payload lives under `codex-ralph-loop-plugin/ralph-loop-codex/`.
-- The hidden runtime payload lives under `codex-ralph-loop-plugin/ralph-loop-codex/.codex-runtime/`.
-- The install script wires the runtime into `~/.codex/` and symlinks `ralf-codex` into a bin dir on your `PATH`.
-- `ralph-loop.local.md` in the active working project is the durable Ralph state file for Codex runs.
-- The loop continues only while the state file is active, the plan still has unchecked checkpoints, and the completion promise has not been emitted.
-
-The loop manager itself does not require any of the repo skills. If you already have a plan file, the installed `ralf-codex` launcher plus the installed Codex hooks are enough.
-
-The repo skills are optional helpers for adjacent tasks:
-
-- `ralf-handoff-plan` when you want Codex to author a strict checkpoint plan
-- `ralf-cp-execute` when you want a single-checkpoint workflow instead of the full loop
-- `ralf-cp-review` and `ralf-review-squash` when you want review-specific guidance outside the loop manager
-
-## Codex Runtime Install
-
-Install the live Codex runtime from this repo with:
+Install it as a tool with `uv`:
 
 ```bash
-python3 codex-ralph-loop-plugin/ralph-loop-codex/scripts/install.py
+uv tool install /Users/evren/code/agent_flow
 ```
 
-That installer:
+That gives you the `aflow` command on your `PATH`.
 
-- enables `codex_hooks = true` in `~/.codex/config.toml`
-- merges the Ralph hook entries into `~/.codex/hooks.json`
-- symlinks the hidden runtime payload into `~/.codex/ralf-loop-codex`
-- symlinks `ralf-codex` into `~/bin` by default
+## Usage
 
-After installation, use:
+From an installed tool:
 
 ```bash
-ralf-codex path/to/plan.md
+aflow --harness codex --model gpt-5.4 path/to/plan.md [extra instructions ...]
+aflow --harness codex --model gpt-5.4 --effort high path/to/plan.md
+aflow --harness opencode --model zai-coding-plan/glm-5-turbo path/to/plan.md
+aflow --harness gemini --model gemini-2.5-pro path/to/plan.md
 ```
 
-or:
+From a source checkout:
 
 ```bash
-ralf-codex --prepare-only path/to/plan.md
+python3 -m aflow --harness codex --model gpt-5.4 path/to/plan.md
 ```
 
-## Source Of Truth
+`--harness` and `--model` are required. Supported harnesses are `claude`, `codex`, `gemini`, `opencode`, and `pi`.
 
-This repository is the source of truth for these skills and scripts. Live paths in local agent runtimes point back here via symlinks.
+## What It Does
 
-## Live Links
+`aflow` reads a checkpoint plan from disk, runs one fresh harness process per turn, and keeps going until the plan is complete or the controller hits a clear stop condition.
 
-Sample symlink targets on local developer machines:
-- `/Users/evren/.codex/skills/ralf-handoff-plan`
-- `/Users/evren/bin/ralf`
+It treats the plan file on disk as the source of truth. The controller does not rely on harness session resume state or hidden completion signals.
+
+## Live Status Banner
+
+While a harness turn is running, `aflow` shows a persistent Rich banner on stderr with:
+
+- elapsed runtime
+- harness, model, and effort level
+- checkpoint progress (`current/total`) and checkpoint name
+- turn progress (`current/max`)
+- accumulated issue count
+- plan file path
+- current status such as `initializing`, `running turn N`, `completed`, or `failed`
+
+Raw harness stdout and stderr are not streamed live. They are captured in the run artifacts.
+
+## Optional `--effort`
+
+Pass `--effort <level>` to request a specific reasoning effort from the underlying harness. When omitted, `aflow` does not add any effort-specific flag.
+
+| Harness | Without `--effort` | With `--effort high` |
+|---------|-------------------|---------------------|
+| codex | `--model gpt-5.4` | `--model gpt-5.4 -c model_reasoning_effort='"high"'` |
+| pi | `--model sonnet` | `--models sonnet:high` |
+| claude | no extra flag | `--effort high` |
+| opencode | no extra flag | ignored, warning emitted |
+| gemini | no extra flag | ignored, warning emitted |
+
+Effort values are passed through as-is. Validation is left to the harness CLI. The `opencode` and `gemini` harnesses do not support effort tuning; when `--effort` is passed for those harnesses, `aflow` prints a single warning to stderr and continues without an effort flag.
+
+## Non-interactive and Full-Permission Mode
+
+Each harness uses a documented headless mode with full permissions:
+
+- `opencode` uses `opencode run` with the prefixed prompt and `--dir` for the repo root
+- `gemini` uses `--prompt` (not positional query), `--approval-mode yolo`, and `--sandbox=false`
+- `codex` uses `exec` with `--dangerously-bypass-approvals-and-sandbox`
+- `claude` uses `-p` with `--permission-mode bypassPermissions` and `--dangerously-skip-permissions`
+- `pi` uses `--print` with a `--tools` list
+
+## Limits
+
+- max turns: `15` via `--max-turns`
+- stagnation limit: `5` completed turns with no checkpoint-progress change via `--stagnation-limit`
+- retained runs: `20` via `--keep-runs`
+
+## Run Logs
+
+Run data lives under `.aflow/runs/<run-id>/`.
+
+Each run stores:
+
+- prompts
+- argv
+- stdout and stderr
+- per-turn result metadata
+- live status state such as `run_started_at`, `active_turn`, `issues_accumulated`, and `status_message`
+
+Older run directories are pruned automatically.
+
+## Shipped Skills
+
+This repo still ships a few skills, but for the current `aflow` workflow the ones worth documenting are:
+
+- `ralf-handoff-plan`: writes strict checkpoint handoff plans that `aflow` can execute from disk
+- `ralf-review-squash`: reviews a completed handoff and either squashes it or produces a focused fix plan
+
+Those skills live under `skills/` and are repo assets that support the tool workflow. They are not required to run the package itself.
+
+## Repository Layout
+
+From the perspective of a Python tool package, the important paths are:
+
+- `aflow/`: the Python package
+- `pyproject.toml`: package metadata, dependencies, and console-script entrypoint
+- `skills/`: optional workflow assets shipped alongside the tool
+- `plans/`: saved working plans and handoff artifacts
+
+The source entrypoint should not be a root-level executable named `aflow`, because that path is already occupied by the `aflow/` package directory. For source checkouts, `python3 -m aflow` is the clean package-native entrypoint. For installed use, the console script from `pyproject.toml` is the real entrypoint.
+
+## Troubleshooting
+
+- If the harness exits non-zero, `aflow` stops and prints the run log directory.
+- If the plan is inconsistent, for example a checkpoint heading is marked complete while a step is still unchecked, `aflow` stops before continuing.
+- If a run stalls, inspect the saved data under `.aflow/runs/<run-id>/`.

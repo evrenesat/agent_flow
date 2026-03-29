@@ -18,6 +18,7 @@ class HarnessInvocation:
 
 class HarnessAdapter(Protocol):
     name: str
+    supports_effort: bool
 
     def build_invocation(
         self,

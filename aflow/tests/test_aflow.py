@@ -18,15 +18,19 @@ from aflow.controller import (
 )
 from aflow.harnesses.claude import ClaudeAdapter
 from aflow.harnesses.codex import CodexAdapter
+from aflow.harnesses.gemini import GeminiAdapter
+from aflow.harnesses.opencode import OpencodeAdapter
 from aflow.harnesses.pi import PiAdapter
-from aflow.plan import PlanParseError, load_plan
-from aflow.run_state import ControllerConfig
+from aflow.plan import PlanParseError, PlanSnapshot, load_plan
+from aflow.run_state import ControllerConfig, ControllerState
 from aflow.runlog import create_run_paths, prune_old_runs
 from aflow.cli import build_parser
-from aflow.status import build_banner
+from aflow.status import build_banner, BannerRenderer
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+ALL_HARNESSES = ("claude", "codex", "gemini", "opencode", "pi")
 
 
 def _write_plan(path: Path, text: str) -> None:
@@ -136,7 +140,7 @@ def _launcher_environment(
 
 def _run_launcher(repo_root: Path, *args: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [str(repo_root / "aflow" / "aflow"), *args],
+        ["python3", "-m", "aflow", *args],
         cwd=repo_root,
         env=env,
         capture_output=True,
@@ -426,6 +430,122 @@ class AdaptersTests(unittest.TestCase):
         self.assertIn("low", argv)
         effort_index = argv.index("--effort")
         self.assertEqual(argv[effort_index + 1], "low")
+
+    def test_opencode_without_effort(self) -> None:
+        adapter = OpencodeAdapter()
+        invocation = adapter.build_invocation(
+            repo_root=Path("/repo"),
+            model="glm-5-turbo",
+            system_prompt="SYSTEM",
+            user_prompt="USER",
+        )
+
+        self.assertEqual(
+            invocation.argv,
+            (
+                "opencode",
+                "run",
+                "--model",
+                "glm-5-turbo",
+                "--format",
+                "default",
+                "--dir",
+                "/repo",
+                "SYSTEM\n\nUSER",
+            ),
+        )
+        self.assertEqual(invocation.prompt_mode, "prefix-system-into-user-prompt")
+        self.assertEqual(invocation.effective_prompt, "SYSTEM\n\nUSER")
+
+    def test_opencode_with_effort_ignores_effort(self) -> None:
+        adapter = OpencodeAdapter()
+        invocation = adapter.build_invocation(
+            repo_root=Path("/repo"),
+            model="glm-5-turbo",
+            system_prompt="SYSTEM",
+            user_prompt="USER",
+            effort="high",
+        )
+
+        self.assertFalse(adapter.supports_effort)
+        argv = invocation.argv
+        self.assertNotIn("effort", " ".join(argv).lower())
+        self.assertEqual(
+            argv,
+            (
+                "opencode",
+                "run",
+                "--model",
+                "glm-5-turbo",
+                "--format",
+                "default",
+                "--dir",
+                "/repo",
+                "SYSTEM\n\nUSER",
+            ),
+        )
+
+    def test_gemini_without_effort(self) -> None:
+        adapter = GeminiAdapter()
+        invocation = adapter.build_invocation(
+            repo_root=Path("/repo"),
+            model="gemini-2.5-pro",
+            system_prompt="SYSTEM",
+            user_prompt="USER",
+        )
+
+        self.assertEqual(
+            invocation.argv,
+            (
+                "gemini",
+                "--prompt",
+                "SYSTEM\n\nUSER",
+                "--model",
+                "gemini-2.5-pro",
+                "--approval-mode",
+                "yolo",
+                "--sandbox=false",
+                "--output-format",
+                "text",
+            ),
+        )
+        self.assertEqual(invocation.prompt_mode, "prefix-system-into-user-prompt")
+        self.assertEqual(invocation.effective_prompt, "SYSTEM\n\nUSER")
+
+    def test_gemini_with_effort_ignores_effort(self) -> None:
+        adapter = GeminiAdapter()
+        invocation = adapter.build_invocation(
+            repo_root=Path("/repo"),
+            model="gemini-2.5-pro",
+            system_prompt="SYSTEM",
+            user_prompt="USER",
+            effort="high",
+        )
+
+        self.assertFalse(adapter.supports_effort)
+        argv = invocation.argv
+        self.assertNotIn("effort", " ".join(argv).lower())
+        self.assertEqual(
+            argv,
+            (
+                "gemini",
+                "--prompt",
+                "SYSTEM\n\nUSER",
+                "--model",
+                "gemini-2.5-pro",
+                "--approval-mode",
+                "yolo",
+                "--sandbox=false",
+                "--output-format",
+                "text",
+            ),
+        )
+
+    def test_parser_accepts_opencode_and_gemini(self) -> None:
+        from aflow.cli import parse_args
+        for harness in ("opencode", "gemini"):
+            args = parse_args(["--harness", harness, "--model", "m", "plan.md"])
+            self.assertEqual(args.harness, harness)
 
 
 class ControllerTests(unittest.TestCase):
@@ -835,6 +955,110 @@ class ControllerTests(unittest.TestCase):
             self.assertIn("status_message", run_json)
             self.assertEqual(run_json["active_turn"], 1)
 
+    def test_run_json_updated_at_turn_start_before_subprocess(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / "plan.md"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+
+### [ ] Checkpoint 2: Second
+- [ ] step two
+""",
+            )
+
+            call_count = 0
+            run_json_at_call: list[dict] = []
+
+            def runner(argv, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                run_dir = (repo_root / ".aflow" / "runs")
+                run_dirs = sorted(run_dir.iterdir())
+                run_json_at_call.append(
+                    json.loads((run_dirs[0] / "run.json").read_text(encoding="utf-8"))
+                )
+                if call_count == 1:
+                    _write_plan(
+                        plan_path,
+                        """# Plan
+
+### [x] Checkpoint 1: First
+- [x] step one
+
+### [ ] Checkpoint 2: Second
+- [ ] step two
+""",
+                    )
+                    return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+                _write_plan(
+                    plan_path,
+                    """# Plan
+
+### [x] Checkpoint 1: First
+- [x] step one
+
+### [x] Checkpoint 2: Second
+- [x] step two
+""",
+                )
+                return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+            result = run_controller(
+                ControllerConfig(
+                    repo_root=repo_root,
+                    plan_path=plan_path,
+                    harness="codex",
+                    model="gpt-5.4",
+                    max_turns=5,
+                ),
+                adapter=CodexAdapter(),
+                runner=runner,
+            )
+
+            self.assertEqual(result.turns_completed, 2)
+            self.assertTrue(result.final_snapshot.is_complete)
+            self.assertEqual(len(run_json_at_call), 2)
+            self.assertEqual(run_json_at_call[0]["active_turn"], 1)
+            self.assertEqual(run_json_at_call[0]["status_message"], "running turn 1")
+            self.assertEqual(run_json_at_call[1]["active_turn"], 2)
+            self.assertEqual(run_json_at_call[1]["status_message"], "running turn 2")
+
+
+class LazyBannerTests(unittest.TestCase):
+    def test_banner_is_noop_when_rich_unavailable(self) -> None:
+        import aflow.status as status_mod
+
+        original = status_mod._RICH_AVAILABLE
+        try:
+            status_mod._RICH_AVAILABLE = False
+            renderer = status_mod.BannerRenderer(
+                config_harness="codex",
+                config_model="gpt-5.4",
+                config_effort=None,
+                config_max_turns=15,
+                config_plan_path=Path("/fake/plan.md"),
+            )
+            state = ControllerState(last_snapshot=PlanSnapshot(None, 0, 0, False))
+            renderer.start(state)
+            renderer.update(state)
+            renderer.stop(state)
+            result = status_mod.build_banner(
+                config_harness="codex",
+                config_model="gpt-5.4",
+                config_effort=None,
+                config_max_turns=15,
+                config_plan_path=Path("/fake/plan.md"),
+                state=state,
+            )
+            self.assertIsNone(result)
+        finally:
+            status_mod._RICH_AVAILABLE = original
+
 
 class RetentionTests(unittest.TestCase):
     def test_retention_prune_old_runs_keeps_newest_twenty_directories(self) -> None:
@@ -882,7 +1106,7 @@ class EndToEndLauncherTests(unittest.TestCase):
 - [x] step one
 """,
             )
-            for harness in ("codex", "pi", "claude"):
+            for harness in ALL_HARNESSES:
                 _write_fake_harness(repo_root, harness)
 
             result = _run_launcher(
@@ -959,7 +1183,7 @@ class EndToEndLauncherTests(unittest.TestCase):
 - [x] step one
 """,
             )
-            for harness in ("codex", "pi", "claude"):
+            for harness in ALL_HARNESSES:
                 _write_fake_harness(repo_root, harness)
 
             result = _run_launcher(
@@ -1015,7 +1239,7 @@ class EndToEndLauncherTests(unittest.TestCase):
 - [x] step one
 """,
             )
-            for harness in ("codex", "pi", "claude"):
+            for harness in ALL_HARNESSES:
                 _write_fake_harness(repo_root, harness)
 
             result = _run_launcher(
@@ -1068,7 +1292,7 @@ class EndToEndLauncherTests(unittest.TestCase):
 - [x] step one
 """,
             )
-            for harness in ("codex", "pi", "claude"):
+            for harness in ALL_HARNESSES:
                 _write_fake_harness(repo_root, harness)
 
             result = _run_launcher(
@@ -1111,7 +1335,7 @@ class EndToEndLauncherTests(unittest.TestCase):
 - [ ] step one
 """,
             )
-            for harness in ("codex", "pi", "claude"):
+            for harness in ALL_HARNESSES:
                 _write_fake_harness(repo_root, harness)
 
             result = _run_launcher(
@@ -1172,7 +1396,7 @@ class EndToEndLauncherTests(unittest.TestCase):
 - [ ] step one
 """,
             )
-            for harness in ("codex", "pi", "claude"):
+            for harness in ALL_HARNESSES:
                 _write_fake_harness(repo_root, harness)
 
             result = _run_launcher(
@@ -1245,7 +1469,7 @@ class EndToEndLauncherTests(unittest.TestCase):
 - [ ] step one
 """,
             )
-            for harness in ("codex", "pi", "claude"):
+            for harness in ALL_HARNESSES:
                 _write_fake_harness(repo_root, harness)
 
             result = _run_launcher(
@@ -1304,7 +1528,7 @@ class EndToEndLauncherTests(unittest.TestCase):
 - [x] step one
 """,
             )
-            for harness in ("codex", "pi", "claude"):
+            for harness in ALL_HARNESSES:
                 _write_fake_harness(repo_root, harness)
 
             _run_launcher(
@@ -1325,6 +1549,128 @@ class EndToEndLauncherTests(unittest.TestCase):
 
             self.assertTrue((repo_root / ".aflow" / "runs").exists())
             self.assertFalse((repo_root / ".ralf" / "runs").exists())
+
+    def test_launcher_opencode_with_effort_warns_and_ignores_effort(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            repo_root = _copy_aflow_repo(tmp_path)
+            resolved_repo_root = repo_root.resolve()
+            plan_path = tmp_path / "plan.md"
+            completed_plan_path = tmp_path / "completed-plan.md"
+            count_file = tmp_path / "count.txt"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+""",
+            )
+            _write_plan(
+                completed_plan_path,
+                """# Plan
+
+### [x] Checkpoint 1: First
+- [x] step one
+""",
+            )
+            for harness in ALL_HARNESSES:
+                _write_fake_harness(repo_root, harness)
+
+            result = _run_launcher(
+                repo_root,
+                "--harness",
+                "opencode",
+                "--model",
+                "glm-5-turbo",
+                "--effort",
+                "high",
+                str(plan_path),
+                env=_launcher_environment(
+                    repo_root,
+                    scenario="success",
+                    plan_path=plan_path,
+                    count_file=count_file,
+                    completed_plan_path=completed_plan_path,
+                ),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("warning: harness 'opencode' ignores --effort", result.stderr)
+            self.assertEqual(result.stderr.count("warning"), 1)
+
+            run_dirs = sorted((repo_root / ".aflow" / "runs").iterdir())
+            run_dir = run_dirs[0]
+            run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+            self.assertEqual(run_json["effort"], "high")
+
+            turn_dir = run_dir / "turns" / "turn-001"
+            argv = json.loads((turn_dir / "argv.json").read_text(encoding="utf-8"))
+            self.assertEqual(argv["label"], "opencode")
+            self.assertNotIn("effort", " ".join(argv["argv"]).lower())
+            self.assertEqual(argv["argv"][0], "opencode")
+            self.assertIn("--dir", argv["argv"])
+            self.assertIn(str(resolved_repo_root), argv["argv"])
+
+    def test_launcher_gemini_with_effort_warns_and_ignores_effort(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            repo_root = _copy_aflow_repo(tmp_path)
+            plan_path = tmp_path / "plan.md"
+            completed_plan_path = tmp_path / "completed-plan.md"
+            count_file = tmp_path / "count.txt"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+""",
+            )
+            _write_plan(
+                completed_plan_path,
+                """# Plan
+
+### [x] Checkpoint 1: First
+- [x] step one
+""",
+            )
+            for harness in ALL_HARNESSES:
+                _write_fake_harness(repo_root, harness)
+
+            result = _run_launcher(
+                repo_root,
+                "--harness",
+                "gemini",
+                "--model",
+                "gemini-2.5-pro",
+                "--effort",
+                "high",
+                str(plan_path),
+                env=_launcher_environment(
+                    repo_root,
+                    scenario="success",
+                    plan_path=plan_path,
+                    count_file=count_file,
+                    completed_plan_path=completed_plan_path,
+                ),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("warning: harness 'gemini' ignores --effort", result.stderr)
+            self.assertEqual(result.stderr.count("warning"), 1)
+
+            run_dirs = sorted((repo_root / ".aflow" / "runs").iterdir())
+            run_dir = run_dirs[0]
+            run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+            self.assertEqual(run_json["effort"], "high")
+
+            turn_dir = run_dir / "turns" / "turn-001"
+            argv = json.loads((turn_dir / "argv.json").read_text(encoding="utf-8"))
+            self.assertEqual(argv["label"], "gemini")
+            self.assertNotIn("effort", " ".join(argv["argv"]).lower())
+            self.assertIn("--approval-mode", argv["argv"])
+            self.assertIn("--sandbox=false", argv["argv"])
 
 
 if __name__ == "__main__":

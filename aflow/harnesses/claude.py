@@ -7,6 +7,7 @@ from .base import HarnessInvocation
 
 class ClaudeAdapter:
     name = "claude"
+    supports_effort = True
 
     def build_invocation(
         self,

@@ -3,17 +3,25 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
-from rich.live import Live
-from rich.text import Text
-
 from .plan import PlanSnapshot
 from .run_state import ControllerState
 
+_RICH_AVAILABLE = False
+try:
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.live import Live
+    from rich.text import Text
 
-_STDERR_CONSOLE = Console(file=None, stderr=True)
+    _RICH_AVAILABLE = True
+except ImportError:
+    Console = object  # type: ignore[assignment,misc]
+    Live = object  # type: ignore[assignment,misc]
+
+_STDERR_CONSOLE: Console | None = None
+if _RICH_AVAILABLE:
+    _STDERR_CONSOLE = Console(file=None, stderr=True)  # type: ignore[call-arg]
 
 
 def _elapsed(started_at: datetime) -> str:
@@ -44,7 +52,9 @@ def build_banner(
     config_max_turns: int,
     config_plan_path: Path,
     state: ControllerState,
-) -> Panel:
+) -> Panel | None:
+    if not _RICH_AVAILABLE:
+        return None
     snapshot = state.last_snapshot
     table = Table.grid(padding=(0, 1))
     table.add_column(style="bold cyan")
@@ -86,6 +96,8 @@ class BannerRenderer:
         self._live: Live | None = None
 
     def start(self, state: ControllerState) -> None:
+        if not _RICH_AVAILABLE:
+            return
         panel = build_banner(
             config_harness=self._config_harness,
             config_model=self._config_model,
@@ -94,11 +106,13 @@ class BannerRenderer:
             config_plan_path=self._config_plan_path,
             state=state,
         )
+        if panel is None:
+            return
         self._live = Live(panel, console=self._console, refresh_per_second=1)
         self._live.start()
 
     def update(self, state: ControllerState) -> None:
-        if self._live is None:
+        if self._live is None or not _RICH_AVAILABLE:
             return
         panel = build_banner(
             config_harness=self._config_harness,
@@ -108,10 +122,12 @@ class BannerRenderer:
             config_plan_path=self._config_plan_path,
             state=state,
         )
+        if panel is None:
+            return
         self._live.update(panel)
 
     def stop(self, state: ControllerState) -> None:
-        if self._live is None:
+        if self._live is None or not _RICH_AVAILABLE:
             return
         panel = build_banner(
             config_harness=self._config_harness,
@@ -121,6 +137,8 @@ class BannerRenderer:
             config_plan_path=self._config_plan_path,
             state=state,
         )
+        if panel is None:
+            return
         self._live.update(panel)
         self._live.stop()
         self._live = None

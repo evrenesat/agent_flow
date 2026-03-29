@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -90,12 +92,36 @@ def _run_process(
         text=True,
     )
     banner.update(state)
-    stdout, stderr = proc.communicate()
+
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+
+    def _drain(stream, chunks: list[str]) -> None:
+        while True:
+            chunk = stream.read(4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+
+    assert proc.stdout is not None
+    assert proc.stderr is not None
+    t_out = threading.Thread(target=_drain, args=(proc.stdout, stdout_chunks), daemon=True)
+    t_err = threading.Thread(target=_drain, args=(proc.stderr, stderr_chunks), daemon=True)
+    t_out.start()
+    t_err.start()
+
+    while proc.poll() is None:
+        time.sleep(1)
+        banner.update(state)
+
+    t_out.join()
+    t_err.join()
+
     return subprocess.CompletedProcess(
         proc.args,
         proc.returncode or 0,
-        stdout,
-        stderr,
+        "".join(stdout_chunks),
+        "".join(stderr_chunks),
     )
 
 
@@ -162,6 +188,7 @@ def run_controller(
         state.active_turn = turn_number
         state.status_message = f"running turn {turn_number}"
         banner.update(state)
+        write_run_metadata(run_paths, config, state, status="running", last_snapshot=state.last_snapshot)
 
         system_prompt = build_system_prompt(state.last_snapshot, stagnation_turns=state.stagnation_turns)
         user_prompt = build_user_prompt(config.plan_path, config.extra_instructions)

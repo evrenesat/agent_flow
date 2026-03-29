@@ -43,6 +43,12 @@ def main(argv: list[str] | None = None) -> int:
     repo_root = Path(__file__).resolve().parents[1]
     plan_path = Path(args.plan_file).expanduser().resolve()
     extra_instructions = tuple(token for token in args.extra_instructions if token != "--")
+    adapter = ADAPTERS[args.harness]
+    if args.effort is not None and not adapter.supports_effort:
+        print(
+            f"warning: harness '{adapter.name}' ignores --effort; continuing without an effort flag",
+            file=sys.stderr,
+        )
     config = ControllerConfig(
         repo_root=repo_root,
         plan_path=plan_path,

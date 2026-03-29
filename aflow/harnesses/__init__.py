@@ -3,13 +3,17 @@ from __future__ import annotations
 from .base import HarnessAdapter, HarnessInvocation
 from .claude import ClaudeAdapter
 from .codex import CodexAdapter
+from .gemini import GeminiAdapter
+from .opencode import OpencodeAdapter
 from .pi import PiAdapter
 
 
 ADAPTERS: dict[str, HarnessAdapter] = {
-    "codex": CodexAdapter(),
-    "pi": PiAdapter(),
     "claude": ClaudeAdapter(),
+    "codex": CodexAdapter(),
+    "gemini": GeminiAdapter(),
+    "opencode": OpencodeAdapter(),
+    "pi": PiAdapter(),
 }
 
 
