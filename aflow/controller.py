@@ -10,6 +10,7 @@ from .harnesses.base import HarnessAdapter, HarnessInvocation
 from .plan import PlanParseError, PlanSnapshot, load_plan
 from .run_state import ControllerConfig, ControllerRunResult, ControllerState
 from .runlog import create_run_paths, prune_old_runs, write_run_metadata, write_turn_artifacts
+from .status import BannerRenderer
 
 
 BASE_SYSTEM_PROMPT = """You are the universal RALF checkpoint controller.
@@ -74,37 +75,94 @@ def _format_failure(
     )
 
 
+def _run_process(
+    invocation: HarnessInvocation,
+    repo_root: Path,
+    banner: BannerRenderer,
+    state: ControllerState,
+) -> subprocess.CompletedProcess[str]:
+    proc = subprocess.Popen(
+        list(invocation.argv),
+        cwd=str(repo_root),
+        env={**os.environ, **invocation.env},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    banner.update(state)
+    stdout, stderr = proc.communicate()
+    return subprocess.CompletedProcess(
+        proc.args,
+        proc.returncode or 0,
+        stdout,
+        stderr,
+    )
+
+
+def _make_banner(config: ControllerConfig) -> BannerRenderer:
+    return BannerRenderer(
+        config_harness=config.harness,
+        config_model=config.model,
+        config_effort=config.effort,
+        config_max_turns=config.max_turns,
+        config_plan_path=config.plan_path,
+    )
+
+
 def run_controller(
     config: ControllerConfig,
     *,
     adapter: HarnessAdapter | None = None,
-    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    banner: BannerRenderer | None = None,
 ) -> ControllerRunResult:
     adapter = adapter or get_adapter(config.harness)
     run_paths = create_run_paths(config)
-    write_run_metadata(run_paths, config, None, status="initializing")
+    state = ControllerState(last_snapshot=PlanSnapshot(None, 0, 0, False))
+    state.status_message = "initializing"
+    write_run_metadata(run_paths, config, state, status="initializing")
+
+    if banner is None:
+        banner = _make_banner(config)
+    banner.start(state)
 
     try:
         parsed_plan = load_plan(config.plan_path)
     except (PlanParseError, FileNotFoundError) as exc:
+        state.status_message = "failed"
+        banner.stop(state)
         summary = _format_failure(
             reason=str(exc),
             run_dir=run_paths.run_dir,
             snapshot=PlanSnapshot(None, 0, 0, False),
         )
-        write_run_metadata(run_paths, config, None, status="failed", failure_reason=summary)
+        write_run_metadata(run_paths, config, state, status="failed", failure_reason=summary)
         raise ControllerError(summary, run_dir=run_paths.run_dir) from exc
 
     snapshot = parsed_plan.snapshot
-    state = ControllerState(last_snapshot=snapshot)
+    state.last_snapshot = snapshot
     write_run_metadata(run_paths, config, state, status="running", last_snapshot=snapshot)
+    banner.update(state)
 
     if snapshot.is_complete:
-        result = ControllerRunResult(run_dir=run_paths.run_dir, turns_completed=0, final_snapshot=snapshot)
+        state.status_message = "completed"
+        banner.stop(state)
+        result = ControllerRunResult(
+            run_dir=run_paths.run_dir,
+            turns_completed=0,
+            final_snapshot=snapshot,
+            issues_accumulated=state.issues_accumulated,
+        )
         write_run_metadata(run_paths, config, state, status="completed", last_snapshot=snapshot)
         return result
 
+    use_popen = runner is None
+
     for turn_number in range(1, config.max_turns + 1):
+        state.active_turn = turn_number
+        state.status_message = f"running turn {turn_number}"
+        banner.update(state)
+
         system_prompt = build_system_prompt(state.last_snapshot, stagnation_turns=state.stagnation_turns)
         user_prompt = build_user_prompt(config.plan_path, config.extra_instructions)
         invocation = adapter.build_invocation(
@@ -114,20 +172,27 @@ def run_controller(
             user_prompt=user_prompt,
             effort=config.effort,
         )
-        completed = runner(
-            list(invocation.argv),
-            cwd=str(config.repo_root),
-            env={**os.environ, **invocation.env},
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+
+        if use_popen:
+            completed = _run_process(invocation, config.repo_root, banner, state)
+        else:
+            assert runner is not None
+            completed = runner(
+                list(invocation.argv),
+                cwd=str(config.repo_root),
+                env={**os.environ, **invocation.env},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
 
         try:
             parsed_after = load_plan(config.plan_path)
             post_snapshot = parsed_after.snapshot
         except (PlanParseError, FileNotFoundError) as exc:
-            turn_dir = write_turn_artifacts(
+            state.status_message = "failed"
+            state.issues_accumulated += 1
+            write_turn_artifacts(
                 run_paths,
                 turn_number=turn_number,
                 invocation=invocation,
@@ -152,9 +217,12 @@ def run_controller(
                 failure_reason=summary,
                 turns_completed=state.turns_completed,
             )
+            banner.stop(state)
             raise ControllerError(summary, run_dir=run_paths.run_dir) from exc
 
         if completed.returncode != 0:
+            state.status_message = "failed"
+            state.issues_accumulated += 1
             write_turn_artifacts(
                 run_paths,
                 turn_number=turn_number,
@@ -180,6 +248,7 @@ def run_controller(
                 turns_completed=state.turns_completed,
                 last_snapshot=post_snapshot,
             )
+            banner.stop(state)
             raise ControllerError(summary, run_dir=run_paths.run_dir)
 
         write_turn_artifacts(
@@ -205,10 +274,12 @@ def run_controller(
         )
 
         if post_snapshot.is_complete:
+            state.status_message = "completed"
             result = ControllerRunResult(
                 run_dir=run_paths.run_dir,
                 turns_completed=state.turns_completed,
                 final_snapshot=post_snapshot,
+                issues_accumulated=state.issues_accumulated,
             )
             write_run_metadata(
                 run_paths,
@@ -219,9 +290,11 @@ def run_controller(
                 turns_completed=state.turns_completed,
             )
             prune_old_runs(run_paths.runs_root, config.keep_runs)
+            banner.stop(state)
             return result
 
         if state.stagnation_turns >= config.stagnation_limit:
+            state.status_message = "failed"
             summary = _format_failure(
                 reason=(
                     f"checkpoint progress did not change for {config.stagnation_limit} completed turns"
@@ -238,8 +311,10 @@ def run_controller(
                 last_snapshot=post_snapshot,
                 turns_completed=state.turns_completed,
             )
+            banner.stop(state)
             raise ControllerError(summary, run_dir=run_paths.run_dir)
 
+    state.status_message = "failed"
     summary = _format_failure(
         reason=f"reached max turns limit of {config.max_turns}",
         run_dir=run_paths.run_dir,
@@ -255,4 +330,5 @@ def run_controller(
         turns_completed=state.turns_completed,
     )
     prune_old_runs(run_paths.runs_root, config.keep_runs)
+    banner.stop(state)
     raise ControllerError(summary, run_dir=run_paths.run_dir)

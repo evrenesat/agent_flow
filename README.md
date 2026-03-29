@@ -6,7 +6,7 @@ Generic home for shareable agent workflow assets and the source of truth for cus
 
 - `skills/`: Versioned custom skills that can be linked into agent runtimes.
 - `commands/`: Placeholder for future reusable command wrappers.
-- `ralph/`: Self-contained plan checkpoint controller for codex, pi, and claude.
+- `aflow/`: Self-contained plan checkpoint controller for codex, pi, and claude.
 - `codex-ralph-loop-plugin/`: Source for the Codex RALF plugin, hidden runtime payload, and install scripts.
 
 ## Skills
@@ -43,9 +43,11 @@ By default the script expects Gemini Ralph's setup script at `~/.gemini/extensio
 
 `scripts/ralf_offf.sh` is not the active runner.
 
-### `ralph`
+### `aflow`
 
-Plan checkpoint controller for codex, pi, and claude. Lives under `ralph/`. See `ralph/README.md` for usage, supported harnesses, optional `--effort`, and limits.
+Plan checkpoint controller for codex, pi, and claude. Lives under `aflow/`. See `aflow/README.md` for usage, supported harnesses, optional `--effort`, limits, and live status banner details.
+
+Install as a system tool with `uv tool install /Users/evren/code/agent_flow`.
 
 ## Codex Ralph Loop
 

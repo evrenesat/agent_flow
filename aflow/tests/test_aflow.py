@@ -10,18 +10,20 @@ import unittest
 import shutil
 import textwrap
 
-from ralph.controller import (
+from aflow.controller import (
     ControllerError,
     build_system_prompt,
     build_user_prompt,
     run_controller,
 )
-from ralph.harnesses.claude import ClaudeAdapter
-from ralph.harnesses.codex import CodexAdapter
-from ralph.harnesses.pi import PiAdapter
-from ralph.plan import PlanParseError, load_plan
-from ralph.run_state import ControllerConfig
-from ralph.runlog import create_run_paths, prune_old_runs
+from aflow.harnesses.claude import ClaudeAdapter
+from aflow.harnesses.codex import CodexAdapter
+from aflow.harnesses.pi import PiAdapter
+from aflow.plan import PlanParseError, load_plan
+from aflow.run_state import ControllerConfig
+from aflow.runlog import create_run_paths, prune_old_runs
+from aflow.cli import build_parser
+from aflow.status import build_banner
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -31,14 +33,14 @@ def _write_plan(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def _copy_ralph_repo(tmp_path: Path) -> Path:
+def _copy_aflow_repo(tmp_path: Path) -> Path:
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
-    ralph_src = REPO_ROOT / "ralph"
-    ralph_dst = repo_root / "ralph"
+    aflow_src = REPO_ROOT / "aflow"
+    aflow_dst = repo_root / "aflow"
     shutil.copytree(
-        ralph_src,
-        ralph_dst,
+        aflow_src,
+        aflow_dst,
         ignore=shutil.ignore_patterns("__pycache__", "tests"),
     )
     return repo_root
@@ -134,13 +136,19 @@ def _launcher_environment(
 
 def _run_launcher(repo_root: Path, *args: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [str(repo_root / "ralph" / "ralph"), *args],
+        [str(repo_root / "aflow" / "aflow"), *args],
         cwd=repo_root,
         env=env,
         capture_output=True,
         text=True,
         check=False,
     )
+
+
+class CLITests(unittest.TestCase):
+    def test_prog_name_is_aflow(self) -> None:
+        parser = build_parser()
+        self.assertEqual(parser.prog, "aflow")
 
 
 class PlanParserTests(unittest.TestCase):
@@ -193,15 +201,76 @@ class PlanParserTests(unittest.TestCase):
             with self.assertRaises(PlanParseError):
                 load_plan(plan_path)
 
+    def test_parser_total_checkpoint_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_path = Path(tmpdir) / "plan.md"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+
+### [ ] Checkpoint 2: Second
+- [ ] step two
+
+### [x] Checkpoint 3: Done
+- [x] step three
+""",
+            )
+
+            parsed = load_plan(plan_path)
+            self.assertEqual(parsed.snapshot.total_checkpoint_count, 3)
+
+    def test_parser_current_checkpoint_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_path = Path(tmpdir) / "plan.md"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [x] Checkpoint 1: Done
+- [x] step one
+
+### [ ] Checkpoint 2: Current
+- [ ] step two
+
+### [ ] Checkpoint 3: Pending
+- [ ] step three
+""",
+            )
+
+            parsed = load_plan(plan_path)
+            self.assertEqual(parsed.snapshot.current_checkpoint_index, 2)
+
+    def test_parser_current_checkpoint_index_none_when_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_path = Path(tmpdir) / "plan.md"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [x] Checkpoint 1: Done
+- [x] step one
+
+### [x] Checkpoint 2: Done
+- [x] step two
+""",
+            )
+
+            parsed = load_plan(plan_path)
+            self.assertTrue(parsed.snapshot.is_complete)
+            self.assertIsNone(parsed.snapshot.current_checkpoint_index)
+
 
 class EffortParsingTests(unittest.TestCase):
     def test_parse_with_effort(self) -> None:
-        from ralph.cli import parse_args
+        from aflow.cli import parse_args
         args = parse_args(["--harness", "codex", "--model", "gpt-5.4", "--effort", "high", "plan.md"])
         self.assertEqual(args.effort, "high")
 
     def test_parse_without_effort(self) -> None:
-        from ralph.cli import parse_args
+        from aflow.cli import parse_args
         args = parse_args(["--harness", "codex", "--model", "gpt-5.4", "plan.md"])
         self.assertIsNone(args.effort)
 
@@ -401,7 +470,7 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(result.turns_completed, 1)
             self.assertTrue(result.final_snapshot.is_complete)
             self.assertEqual(len(calls), 1)
-            self.assertTrue((repo_root / ".ralf" / "runs").exists())
+            self.assertTrue((repo_root / ".aflow" / "runs").exists())
 
     def test_controller_passes_effort_to_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -615,7 +684,7 @@ class ControllerTests(unittest.TestCase):
                     runner=runner,
                 )
 
-            run_dir = (repo_root / ".ralf" / "runs")
+            run_dir = (repo_root / ".aflow" / "runs")
             run_dirs = list(run_dir.iterdir())
             self.assertEqual(len(run_dirs), 1)
             run_json = json.loads((run_dirs[0] / "run.json").read_text(encoding="utf-8"))
@@ -651,11 +720,120 @@ class ControllerTests(unittest.TestCase):
                     runner=runner,
                 )
 
-            run_dir = (repo_root / ".ralf" / "runs")
+            run_dir = (repo_root / ".aflow" / "runs")
             run_dirs = list(run_dir.iterdir())
             self.assertEqual(len(run_dirs), 1)
             run_json = json.loads((run_dirs[0] / "run.json").read_text(encoding="utf-8"))
             self.assertIsNone(run_json["effort"])
+
+    def test_unchanged_turns_increment_issues_accumulated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / "plan.md"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+""",
+            )
+
+            def runner(argv, **kwargs):
+                return subprocess.CompletedProcess(argv, 0, stdout="noop", stderr="")
+
+            with self.assertRaises(ControllerError):
+                run_controller(
+                    ControllerConfig(
+                        repo_root=repo_root,
+                        plan_path=plan_path,
+                        harness="codex",
+                        model="gpt-5.4",
+                        stagnation_limit=3,
+                        max_turns=4,
+                    ),
+                    adapter=CodexAdapter(),
+                    runner=runner,
+                )
+
+            run_dir = (repo_root / ".aflow" / "runs")
+            run_dirs = list(run_dir.iterdir())
+            self.assertEqual(len(run_dirs), 1)
+            run_json = json.loads((run_dirs[0] / "run.json").read_text(encoding="utf-8"))
+            self.assertEqual(run_json["issues_accumulated"], 3)
+
+    def test_fatal_nonzero_exit_increments_issues_accumulated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / "plan.md"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+""",
+            )
+
+            def runner(argv, **kwargs):
+                return subprocess.CompletedProcess(argv, 1, stdout="bad", stderr="err")
+
+            with self.assertRaises(ControllerError):
+                run_controller(
+                    ControllerConfig(
+                        repo_root=repo_root,
+                        plan_path=plan_path,
+                        harness="codex",
+                        model="gpt-5.4",
+                    ),
+                    adapter=CodexAdapter(),
+                    runner=runner,
+                )
+
+            run_dir = (repo_root / ".aflow" / "runs")
+            run_dirs = list(run_dir.iterdir())
+            self.assertEqual(len(run_dirs), 1)
+            run_json = json.loads((run_dirs[0] / "run.json").read_text(encoding="utf-8"))
+            self.assertEqual(run_json["issues_accumulated"], 1)
+
+    def test_run_metadata_includes_started_at_and_active_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / "plan.md"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+""",
+            )
+
+            def runner(argv, **kwargs):
+                return subprocess.CompletedProcess(argv, 0, stdout="noop", stderr="")
+
+            with self.assertRaises(ControllerError):
+                run_controller(
+                    ControllerConfig(
+                        repo_root=repo_root,
+                        plan_path=plan_path,
+                        harness="codex",
+                        model="gpt-5.4",
+                        stagnation_limit=1,
+                        max_turns=2,
+                    ),
+                    adapter=CodexAdapter(),
+                    runner=runner,
+                )
+
+            run_dir = (repo_root / ".aflow" / "runs")
+            run_dirs = list(run_dir.iterdir())
+            run_json = json.loads((run_dirs[0] / "run.json").read_text(encoding="utf-8"))
+            self.assertIn("run_started_at", run_json)
+            self.assertIn("active_turn", run_json)
+            self.assertIn("issues_accumulated", run_json)
+            self.assertIn("status_message", run_json)
+            self.assertEqual(run_json["active_turn"], 1)
 
 
 class RetentionTests(unittest.TestCase):
@@ -682,7 +860,7 @@ class EndToEndLauncherTests(unittest.TestCase):
     def test_launcher_completes_with_fake_codex_and_writes_turn_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
-            repo_root = _copy_ralph_repo(tmp_path)
+            repo_root = _copy_aflow_repo(tmp_path)
             resolved_repo_root = repo_root.resolve()
             plan_path = tmp_path / "plan.md"
             completed_plan_path = tmp_path / "completed-plan.md"
@@ -724,10 +902,9 @@ class EndToEndLauncherTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stderr, "")
             self.assertEqual(plan_path.read_text(encoding="utf-8"), completed_plan_path.read_text(encoding="utf-8"))
 
-            run_dirs = sorted((repo_root / ".ralf" / "runs").iterdir())
+            run_dirs = sorted((repo_root / ".aflow" / "runs").iterdir())
             self.assertEqual(len(run_dirs), 1)
             run_dir = run_dirs[0]
             run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
@@ -762,7 +939,7 @@ class EndToEndLauncherTests(unittest.TestCase):
     def test_launcher_with_effort_writes_effort_argv(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
-            repo_root = _copy_ralph_repo(tmp_path)
+            repo_root = _copy_aflow_repo(tmp_path)
             plan_path = tmp_path / "plan.md"
             completed_plan_path = tmp_path / "completed-plan.md"
             count_file = tmp_path / "count.txt"
@@ -805,7 +982,7 @@ class EndToEndLauncherTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
 
-            run_dirs = sorted((repo_root / ".ralf" / "runs").iterdir())
+            run_dirs = sorted((repo_root / ".aflow" / "runs").iterdir())
             run_dir = run_dirs[0]
             run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
             self.assertEqual(run_json["effort"], "high")
@@ -818,7 +995,7 @@ class EndToEndLauncherTests(unittest.TestCase):
     def test_launcher_effort_pi_uses_models_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
-            repo_root = _copy_ralph_repo(tmp_path)
+            repo_root = _copy_aflow_repo(tmp_path)
             plan_path = tmp_path / "plan.md"
             completed_plan_path = tmp_path / "completed-plan.md"
             count_file = tmp_path / "count.txt"
@@ -861,7 +1038,7 @@ class EndToEndLauncherTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
 
-            run_dirs = sorted((repo_root / ".ralf" / "runs").iterdir())
+            run_dirs = sorted((repo_root / ".aflow" / "runs").iterdir())
             turn_dir = run_dirs[0] / "turns" / "turn-001"
             argv = json.loads((turn_dir / "argv.json").read_text(encoding="utf-8"))
             self.assertIn("--models", argv["argv"])
@@ -871,7 +1048,7 @@ class EndToEndLauncherTests(unittest.TestCase):
     def test_launcher_effort_claude_adds_effort_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
-            repo_root = _copy_ralph_repo(tmp_path)
+            repo_root = _copy_aflow_repo(tmp_path)
             plan_path = tmp_path / "plan.md"
             completed_plan_path = tmp_path / "completed-plan.md"
             count_file = tmp_path / "count.txt"
@@ -914,7 +1091,7 @@ class EndToEndLauncherTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
 
-            run_dirs = sorted((repo_root / ".ralf" / "runs").iterdir())
+            run_dirs = sorted((repo_root / ".aflow" / "runs").iterdir())
             turn_dir = run_dirs[0] / "turns" / "turn-001"
             argv = json.loads((turn_dir / "argv.json").read_text(encoding="utf-8"))
             self.assertIn("--effort", argv["argv"])
@@ -923,7 +1100,7 @@ class EndToEndLauncherTests(unittest.TestCase):
     def test_launcher_stops_after_five_unchanged_snapshots_with_fake_pi(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
-            repo_root = _copy_ralph_repo(tmp_path)
+            repo_root = _copy_aflow_repo(tmp_path)
             plan_path = tmp_path / "plan.md"
             count_file = tmp_path / "count.txt"
             _write_plan(
@@ -954,7 +1131,7 @@ class EndToEndLauncherTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 1)
             self.assertIn("checkpoint progress did not change for 5 completed turns", result.stderr)
-            run_dirs = sorted((repo_root / ".ralf" / "runs").iterdir())
+            run_dirs = sorted((repo_root / ".aflow" / "runs").iterdir())
             self.assertEqual(len(run_dirs), 1)
             run_json = json.loads((run_dirs[0] / "run.json").read_text(encoding="utf-8"))
             self.assertEqual(run_json["status"], "failed")
@@ -966,7 +1143,7 @@ class EndToEndLauncherTests(unittest.TestCase):
     def test_launcher_stops_after_fifteen_turns_with_fake_claude(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
-            repo_root = _copy_ralph_repo(tmp_path)
+            repo_root = _copy_aflow_repo(tmp_path)
             plan_path = tmp_path / "plan.md"
             alpha_plan_path = tmp_path / "alpha-plan.md"
             beta_plan_path = tmp_path / "beta-plan.md"
@@ -1017,7 +1194,7 @@ class EndToEndLauncherTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 1)
             self.assertIn("reached max turns limit of 15", result.stderr)
-            run_dirs = sorted((repo_root / ".ralf" / "runs").iterdir())
+            run_dirs = sorted((repo_root / ".aflow" / "runs").iterdir())
             self.assertEqual(len(run_dirs), 1)
             run_json = json.loads((run_dirs[0] / "run.json").read_text(encoding="utf-8"))
             self.assertEqual(run_json["status"], "failed")
@@ -1048,7 +1225,7 @@ class EndToEndLauncherTests(unittest.TestCase):
     def test_launcher_stops_immediately_on_non_zero_fake_harness_exit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
-            repo_root = _copy_ralph_repo(tmp_path)
+            repo_root = _copy_aflow_repo(tmp_path)
             plan_path = tmp_path / "plan.md"
             mutated_plan_path = tmp_path / "mutated-plan.md"
             count_file = tmp_path / "count.txt"
@@ -1090,7 +1267,7 @@ class EndToEndLauncherTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 1)
             self.assertIn("harness 'codex' exited with code 7", result.stderr)
-            run_dirs = sorted((repo_root / ".ralf" / "runs").iterdir())
+            run_dirs = sorted((repo_root / ".aflow" / "runs").iterdir())
             self.assertEqual(len(run_dirs), 1)
             run_json = json.loads((run_dirs[0] / "run.json").read_text(encoding="utf-8"))
             self.assertEqual(run_json["status"], "failed")
@@ -1103,6 +1280,51 @@ class EndToEndLauncherTests(unittest.TestCase):
             self.assertEqual(result_json["status"], "harness-failed")
             self.assertEqual(result_json["returncode"], 7)
             self.assertEqual(result_json["snapshot_after"]["current_checkpoint_name"], "Checkpoint 1: Updated")
+
+    def test_launcher_uses_aflow_runs_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            repo_root = _copy_aflow_repo(tmp_path)
+            plan_path = tmp_path / "plan.md"
+            completed_plan_path = tmp_path / "completed-plan.md"
+            count_file = tmp_path / "count.txt"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+""",
+            )
+            _write_plan(
+                completed_plan_path,
+                """# Plan
+
+### [x] Checkpoint 1: First
+- [x] step one
+""",
+            )
+            for harness in ("codex", "pi", "claude"):
+                _write_fake_harness(repo_root, harness)
+
+            _run_launcher(
+                repo_root,
+                "--harness",
+                "codex",
+                "--model",
+                "gpt-5.4",
+                str(plan_path),
+                env=_launcher_environment(
+                    repo_root,
+                    scenario="success",
+                    plan_path=plan_path,
+                    count_file=count_file,
+                    completed_plan_path=completed_plan_path,
+                ),
+            )
+
+            self.assertTrue((repo_root / ".aflow" / "runs").exists())
+            self.assertFalse((repo_root / ".ralf" / "runs").exists())
 
 
 if __name__ == "__main__":

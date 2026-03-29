@@ -22,7 +22,7 @@ def _positive_int(value: str) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="ralph")
+    parser = argparse.ArgumentParser(prog="aflow")
     parser.add_argument("--harness", required=True, choices=sorted(ADAPTERS))
     parser.add_argument("--model", required=True)
     parser.add_argument("--effort")

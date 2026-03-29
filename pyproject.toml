@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aflow"
+version = "0.1.0"
+description = "Self-contained plan checkpoint controller for codex, pi, and claude"
+readme = "aflow/README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "rich>=13.0.0",
+]
+
+[project.scripts]
+aflow = "aflow.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["aflow"]

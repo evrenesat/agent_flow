@@ -35,7 +35,7 @@ def _write_json(path: Path, payload: dict[str, object]) -> None:
 
 
 def create_run_paths(config: ControllerConfig) -> RunPaths:
-    runs_root = config.repo_root / ".ralf" / "runs"
+    runs_root = config.repo_root / ".aflow" / "runs"
     runs_root.mkdir(parents=True, exist_ok=True)
     run_dir = runs_root / _utc_run_id()
     turns_dir = run_dir / "turns"
@@ -97,6 +97,11 @@ def write_run_metadata(
         "stagnation_turns": state.stagnation_turns if state else 0,
         "last_snapshot": _snapshot_payload(last_snapshot if last_snapshot is not None else (state.last_snapshot if state else None)),
     }
+    if state is not None:
+        payload["run_started_at"] = state.run_started_at.isoformat()
+        payload["active_turn"] = state.active_turn
+        payload["issues_accumulated"] = state.issues_accumulated
+        payload["status_message"] = state.status_message
     if failure_reason is not None:
         payload["failure_reason"] = failure_reason
     _write_json(paths.run_json, payload)

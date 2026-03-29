@@ -1,5 +1,5 @@
 .DS_Store
 temp/
-.ralf/
+.aflow/
 /skills/.system/*
 /codex-ralph-loop-plugin/ralph-loop-claude/*

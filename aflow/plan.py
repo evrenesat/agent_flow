@@ -23,6 +23,8 @@ class PlanSnapshot:
     unchecked_checkpoint_count: int
     current_checkpoint_unchecked_step_count: int
     is_complete: bool
+    total_checkpoint_count: int = 0
+    current_checkpoint_index: int | None = None
 
     @property
     def signature(self) -> tuple[str | None, int, int, bool]:
@@ -106,6 +108,7 @@ def parse_plan_text(text: str, *, source_path: Path) -> ParsedPlan:
             )
 
     unchecked_checkpoint_count = sum(not section.heading_checked for section in sections)
+    total_checkpoint_count = len(sections)
     current_checkpoint = next((section for section in sections if not section.heading_checked), None)
 
     if current_checkpoint is None:
@@ -114,13 +117,18 @@ def parse_plan_text(text: str, *, source_path: Path) -> ParsedPlan:
             unchecked_checkpoint_count=0,
             current_checkpoint_unchecked_step_count=0,
             is_complete=True,
+            total_checkpoint_count=total_checkpoint_count,
+            current_checkpoint_index=None,
         )
     else:
+        current_checkpoint_index = sections.index(current_checkpoint) + 1
         snapshot = PlanSnapshot(
             current_checkpoint_name=current_checkpoint.name,
             unchecked_checkpoint_count=unchecked_checkpoint_count,
             current_checkpoint_unchecked_step_count=current_checkpoint.unchecked_step_count,
             is_complete=False,
+            total_checkpoint_count=total_checkpoint_count,
+            current_checkpoint_index=current_checkpoint_index,
         )
 
     return ParsedPlan(path=source_path, sections=tuple(sections), snapshot=snapshot)
