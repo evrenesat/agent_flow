@@ -1,4 +1,0 @@
-interface:
-  display_name: "RALF"
-  short_description: "Explain Codex RALF installation and usage"
-  default_prompt: "Use $ralf to explain how to install the Codex RALF runtime, how to run ralf-codex on a plan file, and that extra RALF skills are optional."
