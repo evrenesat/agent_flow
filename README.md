@@ -6,7 +6,7 @@ Generic home for shareable agent workflow assets and the source of truth for cus
 
 - `skills/`: Versioned custom skills that can be linked into agent runtimes.
 - `commands/`: Placeholder for future reusable command wrappers.
-- `scripts/`: Generic helper scripts, including the `ralf` runner.
+- `scripts/`: Generic helper scripts, including the `ralf` runner and the universal `ralf-universal` controller.
 - `codex-ralph-loop-plugin/`: Source for the Codex RALF plugin, hidden runtime payload, and install scripts.
 
 ## Skills
@@ -42,6 +42,36 @@ Everything after an explicit plan path is appended verbatim to the generated pla
 By default the script expects Gemini Ralph's setup script at `~/.gemini/extensions/ralph/scripts/setup.sh`. Override that path with `RALPH_SETUP_SCRIPT` if your extension is installed elsewhere.
 
 `scripts/ralf_offf.sh` is not the active runner.
+
+### `ralf-universal`
+A plan-only checkpoint controller for `codex`, `pi`, and `claude`.
+
+**Usage:**
+```bash
+scripts/ralf-universal --harness codex --model gpt-5.4 path/to/plan.md [extra instructions ...]
+```
+
+The wrapper requires both `--harness` and `--model`. Supported harness names are `codex`, `pi`, and `claude`.
+
+It treats the plan file on disk as the source of truth. Each turn rereads the plan and stops only when both of these are true:
+
+- no unchecked checkpoint headings remain
+- no unchecked step checkboxes remain inside checkpoint sections
+
+Default limits:
+
+- max turns: `15`
+- stagnation limit: `5` completed turns with no checkpoint-progress change
+- retained runs: `20`
+
+Run logs live under `.ralf/runs/<run-id>/`. Each run keeps the prompts, argv, stdout/stderr, and per-turn result metadata. Older run directories are pruned automatically so only the newest 20 remain.
+
+This wrapper does not modify the existing Claude, OpenCode, or Codex plugin trees in this repo.
+
+#### Troubleshooting
+- If the harness exits non-zero, the controller stops and prints the saved run log directory.
+- If the plan is inconsistent, for example a checked checkpoint still has unchecked steps, the controller stops before continuing and reports the plan file as invalid.
+- Saved logs are in `.ralf/runs/<run-id>/`.
 
 ## Codex Ralph Loop
 
