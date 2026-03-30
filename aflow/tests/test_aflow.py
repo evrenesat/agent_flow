@@ -18,12 +18,22 @@ from aflow.controller import (
     run_controller,
 )
 from aflow.config import (
+    AflowSection,
     ConfigError,
+    GoTransition,
     HarnessConfig,
     HarnessProfileConfig,
     UserConfig,
+    WorkflowConfig,
+    WorkflowHarnessConfig,
+    WorkflowStepConfig,
+    WorkflowUserConfig,
+    bootstrap_config,
+    find_placeholders,
     load_user_config,
+    load_workflow_config,
     resolve_launch_config,
+    validate_workflow_config,
 )
 from aflow.harnesses.claude import ClaudeAdapter
 from aflow.harnesses.codex import CodexAdapter
@@ -2177,6 +2187,772 @@ model = "gpt-5.4"
             self.assertNotIn("effort", " ".join(argv["argv"]).lower())
             self.assertIn("--approval-mode", argv["argv"])
             self.assertIn("--sandbox=false", argv["argv"])
+
+
+class WorkflowConfigTests(unittest.TestCase):
+    def _write_workflow_config(
+        self, tmpdir: str, text: str
+    ) -> Path:
+        home_dir = Path(tmpdir)
+        config_path = home_dir / ".config" / "aflow" / "aflow.toml"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(text, encoding="utf-8")
+        return config_path
+
+    def _load_with_home(self, tmpdir: str, config_path: Path) -> WorkflowUserConfig:
+        original_home = os.environ.get("HOME")
+        try:
+            os.environ["HOME"] = str(Path(tmpdir))
+            return load_workflow_config()
+        finally:
+            if original_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = original_home
+
+    def test_parse_canonical_workflow_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                """\
+[aflow]
+default_workflow = "simple"
+
+[harness.opencode.profiles.default]
+model = "glm-5-turbo"
+
+[harness.codex.profiles.high]
+model = "gpt-5.4"
+effort = "high"
+
+[workflow.simple.steps.implement_plan]
+profile = "opencode.default"
+prompts = ["implementation_prompt"]
+go = [
+  { to = "END", when = "DONE || MAX_TURNS_REACHED" },
+  { to = "implement_plan" },
+]
+
+[prompts]
+implementation_prompt = "Work from {ACTIVE_PLAN_PATH}."
+""",
+            )
+            config = load_workflow_config(config_path)
+
+            self.assertEqual(config.aflow.default_workflow, "simple")
+            self.assertIn("opencode", config.harnesses)
+            self.assertEqual(
+                config.harnesses["opencode"].profiles["default"].model,
+                "glm-5-turbo",
+            )
+            self.assertEqual(
+                config.harnesses["codex"].profiles["high"].effort,
+                "high",
+            )
+            self.assertIn("simple", config.workflows)
+            self.assertEqual(config.workflows["simple"].first_step, "implement_plan")
+            step = config.workflows["simple"].steps["implement_plan"]
+            self.assertEqual(step.profile, "opencode.default")
+            self.assertEqual(step.prompts, ("implementation_prompt",))
+            self.assertEqual(len(step.go), 2)
+            self.assertEqual(step.go[0].to, "END")
+            self.assertEqual(step.go[0].when, "DONE || MAX_TURNS_REACHED")
+            self.assertEqual(step.go[1].to, "implement_plan")
+            self.assertIsNone(step.go[1].when)
+            self.assertEqual(config.prompts["implementation_prompt"], "Work from {ACTIVE_PLAN_PATH}.")
+
+    def test_parse_multi_step_workflow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                """\
+[aflow]
+default_workflow = "review_loop"
+
+[harness.claude.profiles.opus]
+model = "claude-opus-4"
+
+[harness.opencode.profiles.turbo]
+model = "glm-5-turbo"
+
+[harness.codex.profiles.high]
+model = "gpt-5.4"
+effort = "high"
+
+[workflow.review_loop.steps.review_plan]
+profile = "claude.opus"
+prompts = ["review_prompt"]
+go = [{ to = "implement_plan" }]
+
+[workflow.review_loop.steps.implement_plan]
+profile = "opencode.turbo"
+prompts = ["implementation_prompt"]
+go = [{ to = "review_implementation" }]
+
+[workflow.review_loop.steps.review_implementation]
+profile = "codex.high"
+prompts = ["review_prompt", "fix_plan_prompt"]
+go = [
+  { to = "END", when = "DONE || MAX_TURNS_REACHED" },
+  { to = "implement_plan" },
+]
+
+[prompts]
+review_prompt = "Review the plan."
+implementation_prompt = "Implement from {ACTIVE_PLAN_PATH}."
+fix_plan_prompt = "Write new plan to {NEW_PLAN_PATH}."
+""",
+            )
+            config = load_workflow_config(config_path)
+
+            wf = config.workflows["review_loop"]
+            self.assertEqual(wf.first_step, "review_plan")
+            self.assertEqual(len(wf.steps), 3)
+            self.assertEqual(wf.steps["review_plan"].profile, "claude.opus")
+            self.assertEqual(
+                wf.steps["review_implementation"].prompts,
+                ("review_prompt", "fix_plan_prompt"),
+            )
+
+    def test_parse_rejects_legacy_default_harness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                'default_harness = "codex"\n',
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            self.assertIn("default_harness", str(ctx.exception))
+
+    def test_parse_rejects_legacy_default_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                """\
+[aflow]
+default_model = "gpt-5.4"
+""",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            self.assertIn("default_model", str(ctx.exception))
+
+    def test_parse_rejects_bare_harness_step_selector(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                """\
+[workflow.simple.steps.implement_plan]
+profile = "opencode"
+prompts = ["p1"]
+go = [{ to = "END" }]
+
+[prompts]
+p1 = "do it"
+""",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            self.assertIn("fully qualified", str(ctx.exception))
+
+    def test_parse_rejects_harness_level_model_and_effort(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                """\
+[harness.opencode]
+model = "glm-5-turbo"
+""",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            self.assertIn("model", str(ctx.exception))
+
+    def test_parse_rejects_invalid_condition_not_done(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                """\
+[workflow.simple.steps.implement_plan]
+profile = "opencode.default"
+prompts = ["p1"]
+go = [{ to = "END", when = "NOT_DONE" }]
+
+[harness.opencode.profiles.default]
+model = "m"
+
+[prompts]
+p1 = "do it"
+""",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            self.assertIn("NOT_DONE", str(ctx.exception))
+
+    def test_parse_rejects_invalid_condition_max_iterations_not_reached(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                """\
+[workflow.simple.steps.implement_plan]
+profile = "opencode.default"
+prompts = ["p1"]
+go = [{ to = "END", when = "MAX_ITERATIONS_NOT_REACHED" }]
+
+[harness.opencode.profiles.default]
+model = "m"
+
+[prompts]
+p1 = "do it"
+""",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            self.assertIn("MAX_ITERATIONS_NOT_REACHED", str(ctx.exception))
+
+    def test_parse_rejects_invalid_transition_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                """\
+[workflow.simple.steps.implement_plan]
+profile = "opencode.default"
+prompts = ["p1"]
+go = [{ to = "nonexistent_step" }]
+
+[harness.opencode.profiles.default]
+model = "m"
+
+[prompts]
+p1 = "do it"
+""",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            self.assertIn("nonexistent_step", str(ctx.exception))
+
+    def test_parse_accepts_unconditional_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                """\
+[workflow.simple.steps.implement_plan]
+profile = "opencode.default"
+prompts = ["p1"]
+go = [{ to = "implement_plan" }]
+
+[harness.opencode.profiles.default]
+model = "m"
+
+[prompts]
+p1 = "do it"
+""",
+            )
+            config = load_workflow_config(config_path)
+            step = config.workflows["simple"].steps["implement_plan"]
+            self.assertEqual(len(step.go), 1)
+            self.assertEqual(step.go[0].to, "implement_plan")
+            self.assertIsNone(step.go[0].when)
+
+    def test_parse_accepts_complex_condition_expressions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                """\
+[workflow.simple.steps.s1]
+profile = "opencode.default"
+prompts = ["p1"]
+go = [
+  { to = "END", when = "(DONE || MAX_TURNS_REACHED) && NEW_PLAN_EXISTS" },
+  { to = "s1" },
+]
+
+[harness.opencode.profiles.default]
+model = "m"
+
+[prompts]
+p1 = "do it"
+""",
+            )
+            config = load_workflow_config(config_path)
+            step = config.workflows["simple"].steps["s1"]
+            self.assertEqual(
+                step.go[0].when,
+                "(DONE || MAX_TURNS_REACHED) && NEW_PLAN_EXISTS",
+            )
+
+    def test_prompts_preserve_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                """\
+[workflow.simple.steps.s1]
+profile = "opencode.default"
+prompts = ["alpha", "beta", "gamma"]
+
+[harness.opencode.profiles.default]
+model = "m"
+
+[prompts]
+gamma = "third"
+alpha = "first"
+beta = "second"
+""",
+            )
+            config = load_workflow_config(config_path)
+            step = config.workflows["simple"].steps["s1"]
+            self.assertEqual(step.prompts, ("alpha", "beta", "gamma"))
+
+    def test_go_transitions_preserve_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                """\
+[workflow.simple.steps.s1]
+profile = "opencode.default"
+prompts = ["p"]
+go = [
+  { to = "END", when = "DONE" },
+  { to = "END", when = "MAX_TURNS_REACHED" },
+  { to = "s2" },
+]
+
+[workflow.simple.steps.s2]
+profile = "opencode.default"
+prompts = ["p"]
+go = [{ to = "END" }]
+
+[harness.opencode.profiles.default]
+model = "m"
+
+[prompts]
+p = "do it"
+""",
+            )
+            config = load_workflow_config(config_path)
+            step = config.workflows["simple"].steps["s1"]
+            self.assertEqual(len(step.go), 3)
+            self.assertEqual(step.go[0].to, "END")
+            self.assertEqual(step.go[0].when, "DONE")
+            self.assertEqual(step.go[1].to, "END")
+            self.assertEqual(step.go[1].when, "MAX_TURNS_REACHED")
+            self.assertEqual(step.go[2].to, "s2")
+            self.assertIsNone(step.go[2].when)
+
+    def test_placeholder_detection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                """\
+[aflow]
+default_workflow = "simple"
+
+[harness.opencode.profiles.default]
+model = "FILL_IN_MODEL"
+
+[harness.codex.profiles.high]
+model = "gpt-5.4"
+effort = "high"
+
+[workflow.simple.steps.s1]
+profile = "opencode.default"
+prompts = ["p"]
+
+[prompts]
+p = "do it"
+""",
+            )
+            config = load_workflow_config(config_path)
+            placeholders = find_placeholders(config)
+            self.assertEqual(placeholders, ["harness.opencode.profiles.default.model"])
+
+    def test_placeholder_settings_report_exact_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                """\
+[aflow]
+default_workflow = "simple"
+
+[harness.opencode.profiles.default]
+model = "FILL_IN_MODEL"
+
+[harness.codex.profiles.high]
+model = "FILL_IN_MODEL"
+effort = "high"
+
+[harness.claude.profiles.opus]
+model = "FILL_IN_MODEL"
+effort = "medium"
+
+[workflow.simple.steps.s1]
+profile = "opencode.default"
+prompts = ["p"]
+
+[prompts]
+p = "do it"
+""",
+            )
+            config = load_workflow_config(config_path)
+            placeholders = find_placeholders(config)
+            self.assertEqual(len(placeholders), 3)
+            self.assertIn("harness.claude.profiles.opus.model", placeholders)
+            self.assertIn("harness.codex.profiles.high.model", placeholders)
+            self.assertIn("harness.opencode.profiles.default.model", placeholders)
+
+    def test_bootstrap_template_matches_canonical_schema(self) -> None:
+        from aflow.default_config import STARTER_CONFIG
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "starter.toml"
+            config_path.write_text(STARTER_CONFIG, encoding="utf-8")
+            config = load_workflow_config(config_path)
+
+            self.assertEqual(config.aflow.default_workflow, "simple")
+            self.assertIn("opencode", config.harnesses)
+            self.assertIn("codex", config.harnesses)
+            self.assertEqual(
+                config.harnesses["opencode"].profiles["default"].model,
+                "FILL_IN_MODEL",
+            )
+            self.assertEqual(
+                config.harnesses["codex"].profiles["high"].model,
+                "FILL_IN_MODEL",
+            )
+            self.assertEqual(
+                config.harnesses["codex"].profiles["high"].effort,
+                "high",
+            )
+            self.assertIn("simple", config.workflows)
+            step = config.workflows["simple"].steps["implement_plan"]
+            self.assertEqual(step.profile, "opencode.default")
+            self.assertEqual(step.prompts, ("implementation_prompt",))
+            self.assertEqual(len(step.go), 2)
+            self.assertEqual(step.go[0].to, "END")
+            self.assertEqual(step.go[0].when, "DONE || MAX_TURNS_REACHED")
+            self.assertEqual(step.go[1].to, "implement_plan")
+            self.assertIsNone(step.go[1].when)
+            self.assertIn("implementation_prompt", config.prompts)
+            self.assertNotIn("review_plan", config.prompts)
+
+    def test_bootstrap_creates_config_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "aflow" / "aflow.toml"
+            result = bootstrap_config(config_path)
+            self.assertTrue(result.exists())
+            self.assertEqual(result, config_path)
+
+    def test_bootstrap_does_not_overwrite_existing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "aflow" / "aflow.toml"
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text("existing", encoding="utf-8")
+            result = bootstrap_config(config_path)
+            self.assertEqual(result.read_text(encoding="utf-8"), "existing")
+
+    def test_parse_rejects_unsupported_workflow_level_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                """\
+[workflow.simple]
+start = "review"
+
+[workflow.simple.steps.review]
+profile = "opencode.default"
+prompts = ["p"]
+
+[harness.opencode.profiles.default]
+model = "m"
+
+[prompts]
+p = "x"
+""",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            self.assertIn("workflow.simple", str(ctx.exception))
+            self.assertIn("start", str(ctx.exception))
+
+    def test_parse_rejects_invalid_condition_operator_eq(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                """\
+[workflow.simple.steps.s1]
+profile = "opencode.default"
+prompts = ["p"]
+go = [{ to = "END", when = "DONE == NEW_PLAN_EXISTS" }]
+
+[harness.opencode.profiles.default]
+model = "m"
+
+[prompts]
+p = "x"
+""",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            self.assertIn("==", str(ctx.exception))
+
+    def test_parse_rejects_invalid_condition_operator_plus(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                """\
+[workflow.simple.steps.s1]
+profile = "opencode.default"
+prompts = ["p"]
+go = [{ to = "END", when = "DONE + NEW_PLAN_EXISTS" }]
+
+[harness.opencode.profiles.default]
+model = "m"
+
+[prompts]
+p = "x"
+""",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            self.assertIn("+", str(ctx.exception))
+
+    def test_validate_workflow_config_default_workflow_missing_reports_exact_path(self) -> None:
+        config = WorkflowUserConfig(
+            aflow=AflowSection(default_workflow="nonexistent"),
+            workflows={"simple": WorkflowConfig()},
+        )
+        errors = validate_workflow_config(config)
+        self.assertTrue(any("aflow.default_workflow" in e for e in errors))
+        self.assertTrue(any("nonexistent" in e for e in errors))
+
+    def test_validate_workflow_config_unknown_harness_reports_exact_path(self) -> None:
+        wf = WorkflowConfig(
+            steps={"s1": WorkflowStepConfig(profile="unknown_harness.p1", prompts=("p1",))}
+        )
+        config = WorkflowUserConfig(workflows={"w": wf}, prompts={"p1": "text"})
+        errors = validate_workflow_config(config)
+        self.assertTrue(
+            any("workflow.w.steps.s1.profile" in e for e in errors)
+        )
+
+    def test_validate_workflow_config_unknown_profile_reports_exact_path(self) -> None:
+        wf = WorkflowConfig(
+            steps={"s1": WorkflowStepConfig(profile="opencode.missing", prompts=("p1",))}
+        )
+        config = WorkflowUserConfig(
+            harnesses={"opencode": WorkflowHarnessConfig(profiles={})},
+            workflows={"w": wf},
+            prompts={"p1": "text"},
+        )
+        errors = validate_workflow_config(config)
+        self.assertTrue(
+            any("workflow.w.steps.s1.profile" in e for e in errors)
+        )
+
+    def test_validate_workflow_config_unknown_prompt_reports_exact_path(self) -> None:
+        wf = WorkflowConfig(
+            steps={"s1": WorkflowStepConfig(profile="opencode.default", prompts=("missing_prompt",))}
+        )
+        config = WorkflowUserConfig(
+            harnesses={
+                "opencode": WorkflowHarnessConfig(
+                    profiles={"default": HarnessProfileConfig(model="m")}
+                )
+            },
+            workflows={"w": wf},
+        )
+        errors = validate_workflow_config(config)
+        self.assertTrue(
+            any("workflow.w.steps.s1.prompts[0]" in e for e in errors)
+        )
+
+    def test_parse_accepts_complex_condition_with_negation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                """\
+[workflow.simple.steps.s1]
+profile = "opencode.default"
+prompts = ["p"]
+go = [
+  { to = "END", when = "!(DONE || MAX_TURNS_REACHED) && NEW_PLAN_EXISTS" },
+  { to = "s1" },
+]
+
+[harness.opencode.profiles.default]
+model = "m"
+
+[prompts]
+p = "do it"
+""",
+            )
+            config = load_workflow_config(config_path)
+            step = config.workflows["simple"].steps["s1"]
+            self.assertEqual(
+                step.go[0].when,
+                "!(DONE || MAX_TURNS_REACHED) && NEW_PLAN_EXISTS",
+            )
+
+    def test_validate_workflow_config_default_workflow_missing(self) -> None:
+        config = WorkflowUserConfig(
+            aflow=AflowSection(default_workflow="nonexistent"),
+            workflows={"simple": WorkflowConfig()},
+        )
+        errors = validate_workflow_config(config)
+        self.assertTrue(any("nonexistent" in e for e in errors))
+
+    def test_validate_workflow_config_passes_for_valid_config(self) -> None:
+        wf = WorkflowConfig(
+            steps={"s1": WorkflowStepConfig(profile="opencode.default", prompts=("p1",))}
+        )
+        config = WorkflowUserConfig(
+            aflow=AflowSection(default_workflow="w"),
+            harnesses={
+                "opencode": WorkflowHarnessConfig(
+                    profiles={"default": HarnessProfileConfig(model="m")}
+                )
+            },
+            workflows={"w": wf},
+            prompts={"p1": "text"},
+        )
+        errors = validate_workflow_config(config)
+        self.assertEqual(errors, [])
+
+    def test_load_returns_empty_config_for_missing_file(self) -> None:
+        config = load_workflow_config(Path("/nonexistent/aflow.toml"))
+        self.assertIsNone(config.aflow.default_workflow)
+        self.assertEqual(config.harnesses, {})
+        self.assertEqual(config.workflows, {})
+        self.assertEqual(config.prompts, {})
+
+    def test_parse_rejects_unsupported_top_level_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                """\
+[server]
+port = 8080
+""",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            self.assertIn("server", str(ctx.exception))
+
+    def test_parse_rejects_unsupported_condition_in_when(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                """\
+[workflow.simple.steps.s1]
+profile = "opencode.default"
+prompts = ["p"]
+go = [{ to = "END", when = "DONE && STALEMATE" }]
+
+[harness.opencode.profiles.default]
+model = "m"
+
+[prompts]
+p = "do it"
+""",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            self.assertIn("STALEMATE", str(ctx.exception))
+
+    def test_first_step_is_first_declared(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                """\
+[workflow.simple.steps.review]
+profile = "claude.opus"
+prompts = ["p1"]
+go = [{ to = "implement" }]
+
+[workflow.simple.steps.implement]
+profile = "opencode.default"
+prompts = ["p2"]
+go = [{ to = "END" }]
+
+[harness.claude.profiles.opus]
+model = "m"
+
+[harness.opencode.profiles.default]
+model = "m"
+
+[prompts]
+p1 = "review"
+p2 = "implement"
+""",
+            )
+            config = load_workflow_config(config_path)
+            wf = config.workflows["simple"]
+            self.assertEqual(wf.first_step, "review")
+
+    def test_missing_steps_raises_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                """\
+[workflow.simple]
+""",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            self.assertIn("steps", str(ctx.exception))
+
+    def test_step_missing_profile_raises_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                """\
+[workflow.simple.steps.s1]
+prompts = ["p"]
+
+[prompts]
+p = "do it"
+""",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            self.assertIn("profile", str(ctx.exception))
+
+    def test_step_missing_prompts_raises_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                """\
+[workflow.simple.steps.s1]
+profile = "opencode.default"
+
+[harness.opencode.profiles.default]
+model = "m"
+""",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            self.assertIn("prompts", str(ctx.exception))
+
+    def test_go_missing_to_raises_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                """\
+[workflow.simple.steps.s1]
+profile = "opencode.default"
+prompts = ["p"]
+go = [{ when = "DONE" }]
+
+[harness.opencode.profiles.default]
+model = "m"
+
+[prompts]
+p = "do it"
+""",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            self.assertIn("to", str(ctx.exception))
 
 
 if __name__ == "__main__":
