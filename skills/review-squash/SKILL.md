@@ -1,9 +1,9 @@
 ---
-name: ralf-review-squash
-description: "Review a completed autonomous RALF handoff, compare the full accumulated implementation against the original plan, and either squash the whole handoff into one final commit or create a focused fix plan for the remaining failed checkpoints or behaviors."
+name: review-squash
+description: "Review a completed autonomous AFlow plan, compare the full accumulated implementation against the original plan, and either squash the whole handoff into one final commit or create a focused fix plan for the remaining failed checkpoints or behaviors."
 ---
 
-# RALF Review Squash
+#  Review Squash AFlow Implementation
 
 Use this skill only for the final review pass of work produced under a RALF plan that includes `Git Tracking`.
 

@@ -1,9 +1,9 @@
 ---
-name: ralf-handoff-plan
-description: "Create a strict RALF checkpoint handoff plan for coding work that will be implemented by another model, tool, or later session. Use when the user explicitly wants the RALF pattern or a checkpoint-based handoff plan, and persist the finished plan under the current project's plans directory."
+name: aflow-plan
+description: "Create a strict AFlow checkpoint handoff plan for coding work that will be implemented by another model, tool, or later session. Use when the user explicitly wants the RALF pattern or a checkpoint-based handoff plan, and persist the finished plan under the current project's plans directory."
 ---
 
-# RALF Handoff Plan
+# AFlow Handoff Plan
 
 Use this skill only for RALF-style planning.
 

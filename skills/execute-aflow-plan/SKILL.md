@@ -1,9 +1,9 @@
 ---
-name: ralf-execute
-description: "Execute an existing RALF plan autonomously across the whole plan. Use when an agent must resume from the first unchecked checkpoint, use a fresh agent or fresh thread boundary for each checkpoint, keep the plan file synchronized with verified progress, and continue until the plan is complete."
+name: execute-aflow-plan
+description: "Execute an existing  AFlow plan autonomously across the whole plan. Use when an agent must resume from the first unchecked checkpoint, use a fresh agent or fresh thread boundary for each checkpoint, keep the plan file synchronized with verified progress, and continue until the plan is complete."
 ---
 
-# RALF Execute
+#  Execute AFlow Plan
 
 Use this skill only to execute an existing RALF plan autonomously. Treat `ralf` and `ralph` as equivalent spellings.
 
