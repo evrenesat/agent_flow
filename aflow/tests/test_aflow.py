@@ -45,6 +45,7 @@ from aflow.workflow import (
     resolve_profile,
     run_workflow,
 )
+from aflow.cli import build_parser, main
 from aflow.harnesses.claude import ClaudeAdapter
 from aflow.harnesses.codex import CodexAdapter
 from aflow.harnesses.gemini import GeminiAdapter
@@ -54,7 +55,6 @@ from aflow.harnesses.base import HarnessInvocation
 from aflow.plan import PlanParseError, PlanSnapshot, load_plan
 from aflow.run_state import ControllerConfig, ControllerState
 from aflow.runlog import create_run_paths, prune_old_runs
-from aflow.cli import build_parser
 from aflow.status import build_banner, BannerRenderer
 
 
@@ -189,16 +189,156 @@ def _run_launcher(repo_root: Path, *args: str, env: dict[str, str]) -> subproces
     )
 
 
-class CLITests(unittest.TestCase):
+class WorkflowCliTests(unittest.TestCase):
     def test_prog_name_is_aflow(self) -> None:
         parser = build_parser()
         self.assertEqual(parser.prog, "aflow")
 
-    def test_parser_allows_optional_harness_model_and_profile(self) -> None:
+    def test_parser_accepts_workflow_flag(self) -> None:
+        args = build_parser().parse_args(["--workflow", "simple", "plan.md"])
+        self.assertEqual(args.workflow, "simple")
+
+    def test_parser_workflow_defaults_to_none(self) -> None:
         args = build_parser().parse_args(["plan.md"])
-        self.assertIsNone(args.harness)
-        self.assertIsNone(args.model)
-        self.assertIsNone(args.profile)
+        self.assertIsNone(args.workflow)
+
+    def test_parser_no_legacy_flags(self) -> None:
+        parser = build_parser()
+        action_names = {a.dest for a in parser._actions}
+        self.assertNotIn("harness", action_names)
+        self.assertNotIn("model", action_names)
+        self.assertNotIn("effort", action_names)
+        self.assertNotIn("profile", action_names)
+        self.assertNotIn("stagnation_limit", action_names)
+
+    def test_cli_bootstraps_missing_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir)
+            original_home = os.environ.get("HOME")
+            try:
+                os.environ["HOME"] = str(home_dir)
+                result = main(["plan.md"])
+            finally:
+                if original_home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = original_home
+
+            config_file = home_dir / ".config" / "aflow" / "aflow.toml"
+            self.assertTrue(config_file.exists())
+            self.assertEqual(result, 1)
+
+    def test_cli_rejects_missing_default_workflow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir)
+            _write_config(
+                home_dir,
+                """\
+[aflow]
+
+[workflow.simple.steps.implement_plan]
+profile = "opencode.default"
+prompts = ["p"]
+go = [{ to = "END" }]
+
+[harness.opencode.profiles.default]
+model = "m"
+
+[prompts]
+p = "do it"
+""",
+            )
+            original_home = os.environ.get("HOME")
+            try:
+                os.environ["HOME"] = str(home_dir)
+                result = main(["plan.md"])
+            finally:
+                if original_home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = original_home
+
+            self.assertEqual(result, 1)
+
+    def test_cli_workflow_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir)
+            _write_config(
+                home_dir,
+                """\
+[aflow]
+default_workflow = "simple"
+
+[workflow.simple.steps.implement_plan]
+profile = "opencode.default"
+prompts = ["p"]
+go = [{ to = "END" }]
+
+[workflow.other.steps.review]
+profile = "opencode.default"
+prompts = ["p"]
+go = [{ to = "END" }]
+
+[harness.opencode.profiles.default]
+model = "m"
+
+[prompts]
+p = "do it"
+""",
+            )
+            plan_path = Path(tmpdir) / "plan.md"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [x] Checkpoint 1: First
+- [x] step one
+""",
+            )
+            original_home = os.environ.get("HOME")
+            try:
+                os.environ["HOME"] = str(home_dir)
+                result = main(["--workflow", "other", str(plan_path)])
+            finally:
+                if original_home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = original_home
+
+            self.assertEqual(result, 0)
+
+    def test_cli_rejects_unknown_workflow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir)
+            _write_config(
+                home_dir,
+                """\
+[aflow]
+default_workflow = "simple"
+
+[workflow.simple.steps.implement_plan]
+profile = "opencode.default"
+prompts = ["p"]
+go = [{ to = "END" }]
+
+[harness.opencode.profiles.default]
+model = "m"
+
+[prompts]
+p = "do it"
+""",
+            )
+            original_home = os.environ.get("HOME")
+            try:
+                os.environ["HOME"] = str(home_dir)
+                result = main(["--workflow", "nonexistent", "plan.md"])
+            finally:
+                if original_home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = original_home
+
+            self.assertEqual(result, 1)
 
 
 class PlanParserTests(unittest.TestCase):
@@ -311,18 +451,6 @@ class PlanParserTests(unittest.TestCase):
             parsed = load_plan(plan_path)
             self.assertTrue(parsed.snapshot.is_complete)
             self.assertIsNone(parsed.snapshot.current_checkpoint_index)
-
-
-class EffortParsingTests(unittest.TestCase):
-    def test_parse_with_effort(self) -> None:
-        from aflow.cli import parse_args
-        args = parse_args(["--harness", "codex", "--model", "gpt-5.4", "--effort", "high", "plan.md"])
-        self.assertEqual(args.effort, "high")
-
-    def test_parse_without_effort(self) -> None:
-        from aflow.cli import parse_args
-        args = parse_args(["--harness", "codex", "--model", "gpt-5.4", "plan.md"])
-        self.assertIsNone(args.effort)
 
 
 class ConfigResolutionTests(unittest.TestCase):
@@ -785,12 +913,6 @@ class AdaptersTests(unittest.TestCase):
 
         self.assertNotIn("--model", invocation.argv)
         self.assertEqual(invocation.argv[0], "gemini")
-
-    def test_parser_accepts_opencode_and_gemini(self) -> None:
-        from aflow.cli import parse_args
-        for harness in ("opencode", "gemini"):
-            args = parse_args(["--harness", harness, "--model", "m", "plan.md"])
-            self.assertEqual(args.harness, harness)
 
 
 class ControllerTests(unittest.TestCase):
@@ -4143,6 +4265,262 @@ class WorkflowRuntimeTests(unittest.TestCase):
             self.assertEqual(result.turns_completed, 0)
             self.assertTrue(result.final_snapshot.is_complete)
             self.assertEqual(call_count[0], 0)
+
+
+class WorkflowArtifactTests(unittest.TestCase):
+    def test_run_json_includes_workflow_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            config_dir = repo_root
+            plan_path = repo_root / "plan.md"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [x] Checkpoint 1: First
+- [x] step one
+""",
+            )
+
+            wf_config = WorkflowUserConfig(
+                harnesses={
+                    "codex": WorkflowHarnessConfig(
+                        profiles={"default": HarnessProfileConfig(model="gpt-5.4")}
+                    )
+                },
+                workflows={
+                    "simple": WorkflowConfig(
+                        steps={
+                            "implement_plan": WorkflowStepConfig(
+                                profile="codex.default",
+                                prompts=("p",),
+                                go=(GoTransition(to="END"),),
+                            )
+                        },
+                        first_step="implement_plan",
+                    )
+                },
+                prompts={"p": "Work."},
+            )
+
+            result = run_workflow(
+                ControllerConfig(
+                    repo_root=repo_root,
+                    plan_path=plan_path,
+                    max_turns=3,
+                ),
+                wf_config,
+                "simple",
+                config_dir=config_dir,
+            )
+
+            run_dir = result.run_dir
+            run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+            self.assertEqual(run_json["workflow_name"], "simple")
+            self.assertEqual(run_json["original_plan_path"], str(plan_path))
+            self.assertEqual(run_json["status"], "completed")
+
+    def test_turn_artifacts_include_workflow_step_and_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            config_dir = repo_root
+            plan_path = repo_root / "plan.md"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+""",
+            )
+
+            def runner(argv, **kwargs):
+                _write_plan(
+                    plan_path,
+                    """# Plan
+
+### [x] Checkpoint 1: First
+- [x] step one
+""",
+                )
+                return subprocess.CompletedProcess(argv, 0, "ok", "")
+
+            wf_config = WorkflowUserConfig(
+                harnesses={
+                    "codex": WorkflowHarnessConfig(
+                        profiles={"default": HarnessProfileConfig(model="gpt-5.4")}
+                    )
+                },
+                workflows={
+                    "simple": WorkflowConfig(
+                        steps={
+                            "implement_plan": WorkflowStepConfig(
+                                profile="codex.default",
+                                prompts=("p",),
+                                go=(
+                                    GoTransition(to="END", when="DONE || MAX_TURNS_REACHED"),
+                                    GoTransition(to="implement_plan"),
+                                ),
+                            )
+                        },
+                        first_step="implement_plan",
+                    )
+                },
+                prompts={"p": "Work."},
+            )
+
+            result = run_workflow(
+                ControllerConfig(
+                    repo_root=repo_root,
+                    plan_path=plan_path,
+                    max_turns=5,
+                ),
+                wf_config,
+                "simple",
+                config_dir=config_dir,
+                adapter=CodexAdapter(),
+                runner=runner,
+            )
+
+            turn_dir = result.run_dir / "turns" / "turn-001"
+            result_json = json.loads((turn_dir / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(result_json["step_name"], "implement_plan")
+            self.assertEqual(result_json["selector"], "codex.default")
+            self.assertEqual(result_json["conditions"]["DONE"], True)
+            self.assertEqual(result_json["conditions"]["NEW_PLAN_EXISTS"], False)
+            self.assertEqual(result_json["chosen_transition"], "END")
+
+    def test_turn_artifacts_include_plan_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            config_dir = repo_root
+            plan_path = repo_root / "plan.md"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+- [ ] step two
+""",
+            )
+
+            def runner(argv, **kwargs):
+                _write_plan(
+                    plan_path,
+                    """# Plan
+
+### [x] Checkpoint 1: First
+- [x] step one
+- [x] step two
+""",
+                )
+                return subprocess.CompletedProcess(argv, 0, "ok", "")
+
+            wf_config = WorkflowUserConfig(
+                harnesses={
+                    "codex": WorkflowHarnessConfig(
+                        profiles={"default": HarnessProfileConfig(model="gpt-5.4")}
+                    )
+                },
+                workflows={
+                    "simple": WorkflowConfig(
+                        steps={
+                            "implement_plan": WorkflowStepConfig(
+                                profile="codex.default",
+                                prompts=("p",),
+                                go=(
+                                    GoTransition(to="END", when="DONE || MAX_TURNS_REACHED"),
+                                    GoTransition(to="implement_plan"),
+                                ),
+                            )
+                        },
+                        first_step="implement_plan",
+                    )
+                },
+                prompts={"p": "Work."},
+            )
+
+            result = run_workflow(
+                ControllerConfig(
+                    repo_root=repo_root,
+                    plan_path=plan_path,
+                    max_turns=5,
+                ),
+                wf_config,
+                "simple",
+                config_dir=config_dir,
+                adapter=CodexAdapter(),
+                runner=runner,
+            )
+
+            turn_dir = result.run_dir / "turns" / "turn-001"
+            result_json = json.loads((turn_dir / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(result_json["original_plan_path"], str(plan_path))
+            self.assertIn("active_plan_path", result_json)
+            self.assertIn("new_plan_path", result_json)
+
+    def test_run_json_records_workflow_step_on_active_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            config_dir = repo_root
+            plan_path = repo_root / "plan.md"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+""",
+            )
+
+            def runner(argv, **kwargs):
+                return subprocess.CompletedProcess(argv, 0, "noop", "")
+
+            wf_config = WorkflowUserConfig(
+                harnesses={
+                    "codex": WorkflowHarnessConfig(
+                        profiles={"default": HarnessProfileConfig(model="gpt-5.4")}
+                    )
+                },
+                workflows={
+                    "simple": WorkflowConfig(
+                        steps={
+                            "implement_plan": WorkflowStepConfig(
+                                profile="codex.default",
+                                prompts=("p",),
+                                go=(
+                                    GoTransition(to="END", when="DONE"),
+                                    GoTransition(to="implement_plan"),
+                                ),
+                            )
+                        },
+                        first_step="implement_plan",
+                    )
+                },
+                prompts={"p": "Work."},
+            )
+
+            with self.assertRaises(WorkflowError):
+                run_workflow(
+                    ControllerConfig(
+                        repo_root=repo_root,
+                        plan_path=plan_path,
+                        max_turns=2,
+                    ),
+                    wf_config,
+                    "simple",
+                    config_dir=config_dir,
+                    adapter=CodexAdapter(),
+                    runner=runner,
+                )
+
+            run_dir = repo_root / ".aflow" / "runs"
+            run_dirs = sorted(run_dir.iterdir())
+            self.assertEqual(len(run_dirs), 1)
+            run_json = json.loads((run_dirs[0] / "run.json").read_text(encoding="utf-8"))
+            self.assertEqual(run_json["workflow_name"], "simple")
+            self.assertEqual(run_json["current_step_name"], "implement_plan")
 
 
 if __name__ == "__main__":

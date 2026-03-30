@@ -46,11 +46,16 @@ def _checkpoint_display(snapshot: PlanSnapshot) -> str:
 
 def build_banner(
     *,
-    config_harness: str,
-    config_model: str | None,
-    config_effort: str | None,
+    workflow_name: str | None = None,
+    current_step_name: str | None = None,
+    config_harness: str | None = None,
+    config_model: str | None = None,
+    config_effort: str | None = None,
     config_max_turns: int,
     config_plan_path: Path,
+    original_plan_path: Path | None = None,
+    active_plan_path: Path | None = None,
+    new_plan_path: Path | None = None,
     state: ControllerState,
 ) -> Panel | None:
     if not _RICH_AVAILABLE:
@@ -61,15 +66,39 @@ def build_banner(
     table.add_column()
 
     table.add_row("Elapsed", _elapsed(state.run_started_at))
-    table.add_row("Harness", config_harness)
-    table.add_row("Model", config_model or "default")
-    table.add_row("Effort", config_effort or "none")
+
+    if workflow_name is not None:
+        table.add_row("Workflow", workflow_name)
+    if current_step_name is not None:
+        table.add_row("Step", current_step_name)
+
+    if config_harness is not None:
+        table.add_row("Harness", config_harness)
+    if config_model is not None:
+        table.add_row("Model", config_model)
+    elif workflow_name is None:
+        table.add_row("Model", "default")
+    if config_effort is not None:
+        table.add_row("Effort", config_effort)
+    elif workflow_name is None:
+        table.add_row("Effort", "none")
+
     table.add_row("Checkpoint", _checkpoint_display(snapshot))
     name = snapshot.current_checkpoint_name or "-"
     table.add_row("Name", name)
     table.add_row("Turn", f"{state.active_turn}/{config_max_turns}")
     table.add_row("Issues", str(state.issues_accumulated))
-    table.add_row("Plan", str(config_plan_path))
+
+    if original_plan_path is not None:
+        table.add_row("Original Plan", original_plan_path.name)
+    if active_plan_path is not None:
+        table.add_row("Active Plan", active_plan_path.name)
+    if new_plan_path is not None:
+        table.add_row("Generated Plan", new_plan_path.name)
+
+    if workflow_name is None:
+        table.add_row("Plan", str(config_plan_path))
+
     table.add_row("Status", state.status_message)
 
     title = Text("aflow", style="bold magenta")
@@ -80,11 +109,16 @@ class BannerRenderer:
     def __init__(
         self,
         *,
-        config_harness: str,
-        config_model: str | None,
-        config_effort: str | None,
+        config_harness: str | None = None,
+        config_model: str | None = None,
+        config_effort: str | None = None,
         config_max_turns: int,
         config_plan_path: Path,
+        workflow_name: str | None = None,
+        current_step_name: str | None = None,
+        original_plan_path: Path | None = None,
+        active_plan_path: Path | None = None,
+        new_plan_path: Path | None = None,
         console: Console | None = None,
     ) -> None:
         self._config_harness = config_harness
@@ -92,20 +126,33 @@ class BannerRenderer:
         self._config_effort = config_effort
         self._config_max_turns = config_max_turns
         self._config_plan_path = config_plan_path
+        self._workflow_name = workflow_name
+        self._current_step_name = current_step_name
+        self._original_plan_path = original_plan_path
+        self._active_plan_path = active_plan_path
+        self._new_plan_path = new_plan_path
         self._console = console or _STDERR_CONSOLE
         self._live: Live | None = None
 
-    def start(self, state: ControllerState) -> None:
-        if not _RICH_AVAILABLE:
-            return
-        panel = build_banner(
+    def _build(self, state: ControllerState) -> Panel | None:
+        return build_banner(
+            workflow_name=self._workflow_name,
+            current_step_name=self._current_step_name,
             config_harness=self._config_harness,
             config_model=self._config_model,
             config_effort=self._config_effort,
             config_max_turns=self._config_max_turns,
             config_plan_path=self._config_plan_path,
+            original_plan_path=self._original_plan_path,
+            active_plan_path=self._active_plan_path,
+            new_plan_path=self._new_plan_path,
             state=state,
         )
+
+    def start(self, state: ControllerState) -> None:
+        if not _RICH_AVAILABLE:
+            return
+        panel = self._build(state)
         if panel is None:
             return
         self._live = Live(panel, console=self._console, refresh_per_second=1)
@@ -114,14 +161,7 @@ class BannerRenderer:
     def update(self, state: ControllerState) -> None:
         if self._live is None or not _RICH_AVAILABLE:
             return
-        panel = build_banner(
-            config_harness=self._config_harness,
-            config_model=self._config_model,
-            config_effort=self._config_effort,
-            config_max_turns=self._config_max_turns,
-            config_plan_path=self._config_plan_path,
-            state=state,
-        )
+        panel = self._build(state)
         if panel is None:
             return
         self._live.update(panel)
@@ -129,14 +169,7 @@ class BannerRenderer:
     def stop(self, state: ControllerState) -> None:
         if self._live is None or not _RICH_AVAILABLE:
             return
-        panel = build_banner(
-            config_harness=self._config_harness,
-            config_model=self._config_model,
-            config_effort=self._config_effort,
-            config_max_turns=self._config_max_turns,
-            config_plan_path=self._config_plan_path,
-            state=state,
-        )
+        panel = self._build(state)
         if panel is None:
             return
         self._live.update(panel)

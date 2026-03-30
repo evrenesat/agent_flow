@@ -4,14 +4,18 @@ import argparse
 from pathlib import Path
 import sys
 
-from .config import ConfigError, load_user_config, resolve_launch_config
-from .controller import ControllerError, run_controller
-from .harnesses import ADAPTERS
+from .config import (
+    ConfigError,
+    bootstrap_config,
+    find_placeholders,
+    load_workflow_config,
+    validate_workflow_config,
+)
+from .workflow import WorkflowError, run_workflow
 from .run_state import ControllerConfig
 
 
 DEFAULT_MAX_TURNS = 15
-DEFAULT_STAGNATION_LIMIT = 5
 DEFAULT_KEEP_RUNS = 20
 
 
@@ -24,12 +28,8 @@ def _positive_int(value: str) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aflow")
-    parser.add_argument("--harness", choices=sorted(ADAPTERS))
-    parser.add_argument("--model")
-    parser.add_argument("--effort")
-    parser.add_argument("--profile")
+    parser.add_argument("--workflow")
     parser.add_argument("--max-turns", type=_positive_int, default=DEFAULT_MAX_TURNS)
-    parser.add_argument("--stagnation-limit", type=_positive_int, default=DEFAULT_STAGNATION_LIMIT)
     parser.add_argument("--keep-runs", type=_positive_int, default=DEFAULT_KEEP_RUNS)
     parser.add_argument("plan_file")
     parser.add_argument("extra_instructions", nargs=argparse.REMAINDER)
@@ -46,39 +46,61 @@ def main(argv: list[str] | None = None) -> int:
     plan_path = Path(args.plan_file).expanduser().resolve()
     extra_instructions = tuple(token for token in args.extra_instructions if token != "--")
     try:
-        user_config = load_user_config()
-        resolved = resolve_launch_config(
-            user_config,
-            harness=args.harness,
-            model=args.model,
-            effort=args.effort,
-            profile=args.profile,
-        )
+        config_path = bootstrap_config()
+        workflow_config = load_workflow_config(config_path)
     except ConfigError as exc:
         print(exc, file=sys.stderr)
         return 1
 
-    adapter = ADAPTERS[resolved.harness]
-    if resolved.effort is not None and not adapter.supports_effort:
+    placeholders = find_placeholders(workflow_config)
+    if placeholders:
+        keys = "\n".join(f"  {k}" for k in placeholders)
         print(
-            f"warning: harness '{adapter.name}' ignores --effort; continuing without an effort flag",
+            f"Config bootstrapped. Fill in the following model values before running:\n{keys}",
             file=sys.stderr,
         )
+        return 1
+
+    validation_errors = validate_workflow_config(workflow_config)
+    if validation_errors:
+        errors = "\n".join(f"  {e}" for e in validation_errors)
+        print(
+            f"Config validation errors:\n{errors}",
+            file=sys.stderr,
+        )
+        return 1
+
+    workflow_name = args.workflow or workflow_config.aflow.default_workflow
+    if workflow_name is None:
+        print(
+            "No workflow specified and no default_workflow set in config.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if workflow_name not in workflow_config.workflows:
+        print(
+            f"Workflow '{workflow_name}' not found in config.",
+            file=sys.stderr,
+        )
+        return 1
+
     config = ControllerConfig(
         repo_root=repo_root,
         plan_path=plan_path,
-        harness=resolved.harness,
-        model=resolved.model,
         max_turns=args.max_turns,
-        stagnation_limit=args.stagnation_limit,
         keep_runs=args.keep_runs,
         extra_instructions=extra_instructions,
-        effort=resolved.effort,
     )
 
     try:
-        run_controller(config)
-    except ControllerError as exc:
+        run_workflow(
+            config,
+            workflow_config,
+            workflow_name,
+            config_dir=config_path.parent,
+        )
+    except WorkflowError as exc:
         print(exc.summary, file=sys.stderr)
         return 1
     return 0

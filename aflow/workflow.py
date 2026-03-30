@@ -357,13 +357,17 @@ def _run_process(
     )
 
 
-def _make_banner(config: ControllerConfig) -> BannerRenderer:
+def _make_banner(
+    config: ControllerConfig,
+    *,
+    workflow_name: str | None = None,
+    original_plan_path: Path | None = None,
+) -> BannerRenderer:
     return BannerRenderer(
-        config_harness=config.harness,
-        config_model=config.model,
-        config_effort=config.effort,
         config_max_turns=config.max_turns,
         config_plan_path=config.plan_path,
+        workflow_name=workflow_name,
+        original_plan_path=original_plan_path,
     )
 
 
@@ -376,6 +380,9 @@ class WorkflowContext:
     max_turns: int
     current_step_name: str
     workflow_name: str
+
+
+
 
 
 def run_workflow(
@@ -402,10 +409,13 @@ def run_workflow(
     run_paths = create_run_paths(config)
     state = ControllerState(last_snapshot=PlanSnapshot(None, 0, 0, False))
     state.status_message = "initializing"
-    write_run_metadata(run_paths, config, state, status="initializing")
+    write_run_metadata(
+        run_paths, config, state, status="initializing",
+        workflow_name=workflow_name, original_plan_path=original_plan_path,
+    )
 
     if banner is None:
-        banner = _make_banner(config)
+        banner = _make_banner(config, workflow_name=workflow_name, original_plan_path=original_plan_path)
     banner.start(state)
 
     try:
@@ -418,12 +428,18 @@ def run_workflow(
             run_dir=run_paths.run_dir,
             snapshot=PlanSnapshot(None, 0, 0, False),
         )
-        write_run_metadata(run_paths, config, state, status="failed", failure_reason=summary)
+        write_run_metadata(
+            run_paths, config, state, status="failed", failure_reason=summary,
+            workflow_name=workflow_name, original_plan_path=original_plan_path,
+        )
         raise WorkflowError(summary, run_dir=run_paths.run_dir) from exc
 
     original_snapshot = parsed_plan.snapshot
     state.last_snapshot = original_snapshot
-    write_run_metadata(run_paths, config, state, status="running", last_snapshot=original_snapshot)
+    write_run_metadata(
+        run_paths, config, state, status="running", last_snapshot=original_snapshot,
+        workflow_name=workflow_name, original_plan_path=original_plan_path,
+    )
     banner.update(state)
 
     done = original_snapshot.is_complete
@@ -436,7 +452,10 @@ def run_workflow(
             final_snapshot=original_snapshot,
             issues_accumulated=state.issues_accumulated,
         )
-        write_run_metadata(run_paths, config, state, status="completed", last_snapshot=original_snapshot)
+        write_run_metadata(
+            run_paths, config, state, status="completed", last_snapshot=original_snapshot,
+            workflow_name=workflow_name, original_plan_path=original_plan_path,
+        )
         return result
 
     use_popen = runner is None
@@ -444,8 +463,11 @@ def run_workflow(
     for turn_number in range(1, config.max_turns + 1):
         state.active_turn = turn_number
         state.status_message = f"running turn {turn_number}: step {current_step_name}"
-        banner.update(state)
-        write_run_metadata(run_paths, config, state, status="running", last_snapshot=state.last_snapshot)
+        write_run_metadata(
+            run_paths, config, state, status="running", last_snapshot=state.last_snapshot,
+            workflow_name=workflow_name, original_plan_path=original_plan_path,
+            current_step_name=current_step_name, active_plan_path=active_plan_path,
+        )
 
         try:
             current_plan = load_plan(original_plan_path)
@@ -457,7 +479,11 @@ def run_workflow(
                 run_dir=run_paths.run_dir,
                 snapshot=state.last_snapshot,
             )
-            write_run_metadata(run_paths, config, state, status="failed", failure_reason=summary)
+            write_run_metadata(
+                run_paths, config, state, status="failed", failure_reason=summary,
+                workflow_name=workflow_name, original_plan_path=original_plan_path,
+                current_step_name=current_step_name, active_plan_path=active_plan_path,
+            )
             raise WorkflowError(summary, run_dir=run_paths.run_dir) from exc
 
         done = current_plan.snapshot.is_complete
@@ -495,6 +521,14 @@ def run_workflow(
             effort=resolved.effort,
         )
 
+        banner._current_step_name = current_step_name
+        banner._active_plan_path = active_plan_path
+        banner._new_plan_path = new_plan_path
+        banner._config_harness = resolved.harness_name
+        banner._config_model = resolved.model
+        banner._config_effort = resolved.effort
+        banner.update(state)
+
         snapshot_before = state.last_snapshot
 
         if use_popen:
@@ -527,6 +561,10 @@ def run_workflow(
                 snapshot_after=None,
                 status="plan-invalid",
                 error=str(exc),
+                step_name=current_step_name, selector=step.profile,
+                original_plan_path=original_plan_path, active_plan_path=active_plan_path,
+                new_plan_path=new_plan_path,
+                conditions={"DONE": done, "NEW_PLAN_EXISTS": False, "MAX_TURNS_REACHED": turn_number >= config.max_turns},
             )
             summary = _format_failure(
                 reason=str(exc),
@@ -534,12 +572,10 @@ def run_workflow(
                 snapshot=snapshot_before,
             )
             write_run_metadata(
-                run_paths,
-                config,
-                state,
-                status="failed",
-                failure_reason=summary,
+                run_paths, config, state, status="failed", failure_reason=summary,
                 turns_completed=state.turns_completed,
+                workflow_name=workflow_name, original_plan_path=original_plan_path,
+                current_step_name=current_step_name, active_plan_path=active_plan_path,
             )
             banner.stop(state)
             raise WorkflowError(summary, run_dir=run_paths.run_dir) from exc
@@ -557,6 +593,10 @@ def run_workflow(
                 snapshot_before=snapshot_before,
                 snapshot_after=post_snapshot,
                 status="harness-failed",
+                step_name=current_step_name, selector=step.profile,
+                original_plan_path=original_plan_path, active_plan_path=active_plan_path,
+                new_plan_path=new_plan_path,
+                conditions={"DONE": post_snapshot.is_complete, "NEW_PLAN_EXISTS": False, "MAX_TURNS_REACHED": turn_number >= config.max_turns},
             )
             summary = _format_failure(
                 reason=f"harness '{invocation.label}' exited with code {completed.returncode}",
@@ -564,16 +604,73 @@ def run_workflow(
                 snapshot=post_snapshot,
             )
             write_run_metadata(
-                run_paths,
-                config,
-                state,
-                status="failed",
-                failure_reason=summary,
+                run_paths, config, state, status="failed", failure_reason=summary,
                 turns_completed=state.turns_completed,
                 last_snapshot=post_snapshot,
+                workflow_name=workflow_name, original_plan_path=original_plan_path,
+                current_step_name=current_step_name, active_plan_path=active_plan_path,
             )
             banner.stop(state)
             raise WorkflowError(summary, run_dir=run_paths.run_dir)
+
+        state.last_snapshot = post_snapshot
+        state.turns_completed += 1
+
+        done = post_snapshot.is_complete
+        new_plan_exists = new_plan_path.is_file()
+
+        if new_plan_exists:
+            active_plan_path = new_plan_path
+
+        max_turns_reached = turn_number >= config.max_turns
+
+        conditions = {
+            "DONE": done,
+            "NEW_PLAN_EXISTS": new_plan_exists,
+            "MAX_TURNS_REACHED": max_turns_reached,
+        }
+
+        transition_target: str | None = None
+        try:
+            transition_target = pick_transition(
+                step.go,
+                step_path=step_path,
+                done=done,
+                new_plan_exists=new_plan_exists,
+                max_turns_reached=max_turns_reached,
+            )
+        except WorkflowError as exc:
+            state.status_message = "failed"
+            state.issues_accumulated += 1
+            write_turn_artifacts(
+                run_paths,
+                turn_number=turn_number,
+                invocation=invocation,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+                returncode=completed.returncode,
+                snapshot_before=snapshot_before,
+                snapshot_after=post_snapshot,
+                status="transition-failed",
+                step_name=current_step_name, selector=step.profile,
+                original_plan_path=original_plan_path, active_plan_path=active_plan_path,
+                new_plan_path=new_plan_path,
+                conditions=conditions,
+            )
+            summary = _format_failure(
+                reason=exc.summary,
+                run_dir=run_paths.run_dir,
+                snapshot=state.last_snapshot,
+            )
+            write_run_metadata(
+                run_paths, config, state, status="failed", failure_reason=summary,
+                turns_completed=state.turns_completed,
+                last_snapshot=state.last_snapshot,
+                workflow_name=workflow_name, original_plan_path=original_plan_path,
+                current_step_name=current_step_name, active_plan_path=active_plan_path,
+            )
+            banner.stop(state)
+            raise WorkflowError(summary, run_dir=run_paths.run_dir) from exc
 
         write_turn_artifacts(
             run_paths,
@@ -584,56 +681,23 @@ def run_workflow(
             returncode=completed.returncode,
             snapshot_before=snapshot_before,
             snapshot_after=post_snapshot,
-            status="completed" if post_snapshot.is_complete else "running",
+            status="completed" if done else "running",
+            step_name=current_step_name, selector=step.profile,
+            original_plan_path=original_plan_path, active_plan_path=active_plan_path,
+            new_plan_path=new_plan_path,
+            conditions=conditions,
+            chosen_transition=transition_target,
         )
 
-        state.last_snapshot = post_snapshot
-        state.turns_completed += 1
         write_run_metadata(
-            run_paths,
-            config,
-            state,
-            status="running",
+            run_paths, config, state, status="running",
             last_snapshot=post_snapshot,
             turns_completed=state.turns_completed,
+            workflow_name=workflow_name, original_plan_path=original_plan_path,
+            current_step_name=current_step_name, active_plan_path=active_plan_path,
         )
 
-        done = post_snapshot.is_complete
-        new_plan_exists = new_plan_path.is_file()
-
-        if new_plan_exists:
-            active_plan_path = new_plan_path
-
-        max_turns_reached = turn_number >= config.max_turns
-
-        try:
-            target = pick_transition(
-                step.go,
-                step_path=step_path,
-                done=done,
-                new_plan_exists=new_plan_exists,
-                max_turns_reached=max_turns_reached,
-            )
-        except WorkflowError as exc:
-            state.status_message = "failed"
-            summary = _format_failure(
-                reason=exc.summary,
-                run_dir=run_paths.run_dir,
-                snapshot=state.last_snapshot,
-            )
-            write_run_metadata(
-                run_paths,
-                config,
-                state,
-                status="failed",
-                failure_reason=summary,
-                turns_completed=state.turns_completed,
-                last_snapshot=state.last_snapshot,
-            )
-            banner.stop(state)
-            raise WorkflowError(summary, run_dir=run_paths.run_dir) from exc
-
-        if target == "END":
+        if transition_target == "END":
             state.status_message = "completed"
             result = ControllerRunResult(
                 run_dir=run_paths.run_dir,
@@ -642,18 +706,17 @@ def run_workflow(
                 issues_accumulated=state.issues_accumulated,
             )
             write_run_metadata(
-                run_paths,
-                config,
-                state,
-                status="completed",
+                run_paths, config, state, status="completed",
                 last_snapshot=post_snapshot,
                 turns_completed=state.turns_completed,
+                workflow_name=workflow_name, original_plan_path=original_plan_path,
+                current_step_name=current_step_name, active_plan_path=active_plan_path,
             )
             prune_old_runs(run_paths.runs_root, config.keep_runs)
             banner.stop(state)
             return result
 
-        current_step_name = target
+        current_step_name = transition_target
 
     state.status_message = "failed"
     summary = _format_failure(
@@ -662,13 +725,11 @@ def run_workflow(
         snapshot=state.last_snapshot,
     )
     write_run_metadata(
-        run_paths,
-        config,
-        state,
-        status="failed",
-        failure_reason=summary,
+        run_paths, config, state, status="failed", failure_reason=summary,
         last_snapshot=state.last_snapshot,
         turns_completed=state.turns_completed,
+        workflow_name=workflow_name, original_plan_path=original_plan_path,
+        current_step_name=current_step_name, active_plan_path=active_plan_path,
     )
     prune_old_runs(run_paths.runs_root, config.keep_runs)
     banner.stop(state)

@@ -80,6 +80,10 @@ def write_run_metadata(
     failure_reason: str | None = None,
     last_snapshot: PlanSnapshot | None = None,
     turns_completed: int | None = None,
+    workflow_name: str | None = None,
+    current_step_name: str | None = None,
+    original_plan_path: Path | None = None,
+    active_plan_path: Path | None = None,
 ) -> None:
     payload: dict[str, object] = {
         "repo_root": str(paths.repo_root),
@@ -97,6 +101,14 @@ def write_run_metadata(
         "stagnation_turns": state.stagnation_turns if state else 0,
         "last_snapshot": _snapshot_payload(last_snapshot if last_snapshot is not None else (state.last_snapshot if state else None)),
     }
+    if workflow_name is not None:
+        payload["workflow_name"] = workflow_name
+    if current_step_name is not None:
+        payload["current_step_name"] = current_step_name
+    if original_plan_path is not None:
+        payload["original_plan_path"] = str(original_plan_path)
+    if active_plan_path is not None:
+        payload["active_plan_path"] = str(active_plan_path)
     if state is not None:
         payload["run_started_at"] = state.run_started_at.isoformat()
         payload["active_turn"] = state.active_turn
@@ -119,6 +131,13 @@ def write_turn_artifacts(
     snapshot_after: PlanSnapshot | None,
     status: str,
     error: str | None = None,
+    step_name: str | None = None,
+    selector: str | None = None,
+    original_plan_path: Path | None = None,
+    active_plan_path: Path | None = None,
+    new_plan_path: Path | None = None,
+    conditions: dict[str, bool] | None = None,
+    chosen_transition: str | None = None,
 ) -> Path:
     turn_dir = paths.turns_dir / f"turn-{turn_number:03d}"
     turn_dir.mkdir(parents=False, exist_ok=False)
@@ -137,6 +156,20 @@ def write_turn_artifacts(
         "snapshot_before": snapshot_before.to_dict(),
         "snapshot_after": _snapshot_payload(snapshot_after),
     }
+    if step_name is not None:
+        result_payload["step_name"] = step_name
+    if selector is not None:
+        result_payload["selector"] = selector
+    if original_plan_path is not None:
+        result_payload["original_plan_path"] = str(original_plan_path)
+    if active_plan_path is not None:
+        result_payload["active_plan_path"] = str(active_plan_path)
+    if new_plan_path is not None:
+        result_payload["new_plan_path"] = str(new_plan_path)
+    if conditions is not None:
+        result_payload["conditions"] = conditions
+    if chosen_transition is not None:
+        result_payload["chosen_transition"] = chosen_transition
     if error is not None:
         result_payload["error"] = error
     _write_json(turn_dir / "result.json", result_payload)
