@@ -91,15 +91,10 @@ def write_run_metadata(
         "run_dir": str(paths.run_dir),
         "status": status,
         "plan_path": str(config.plan_path),
-        "harness": config.harness,
-        "model": config.model,
-        "effort": config.effort,
         "max_turns": config.max_turns,
-        "stagnation_limit": config.stagnation_limit,
         "keep_runs": config.keep_runs,
         "extra_instructions": list(config.extra_instructions),
         "turns_completed": turns_completed if turns_completed is not None else (state.turns_completed if state else 0),
-        "stagnation_turns": state.stagnation_turns if state else 0,
         "last_snapshot": _snapshot_payload(last_snapshot if last_snapshot is not None else (state.last_snapshot if state else None)),
     }
     if workflow_name is not None:
@@ -115,7 +110,6 @@ def write_run_metadata(
     if state is not None:
         payload["run_started_at"] = state.run_started_at.isoformat()
         payload["active_turn"] = state.active_turn
-        payload["issues_accumulated"] = state.issues_accumulated
         payload["status_message"] = state.status_message
     if failure_reason is not None:
         payload["failure_reason"] = failure_reason

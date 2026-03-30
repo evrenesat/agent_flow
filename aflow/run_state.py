@@ -11,13 +11,9 @@ from .plan import PlanSnapshot
 class ControllerConfig:
     repo_root: Path
     plan_path: Path
-    harness: str = "opencode"
-    model: str | None = None
     max_turns: int = 15
-    stagnation_limit: int = 5
     keep_runs: int = 20
     extra_instructions: tuple[str, ...] = ()
-    effort: str | None = None
 
 
 @dataclass
@@ -28,7 +24,6 @@ class ControllerState:
     run_started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     active_turn: int = 0
     status_message: str = "initializing"
-    stagnation_turns: int = 0
 
 
 @dataclass(frozen=True)

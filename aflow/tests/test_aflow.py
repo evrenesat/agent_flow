@@ -972,6 +972,69 @@ p1 = "do it"
                 load_workflow_config(config_path)
             self.assertIn("nonexistent_step", str(ctx.exception))
 
+    def test_parse_rejects_empty_prompts_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                """\
+[workflow.simple.steps.s1]
+profile = "opencode.default"
+prompts = []
+go = [{ to = "END" }]
+
+[harness.opencode.profiles.default]
+model = "m"
+
+[prompts]
+""",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            self.assertIn("prompts", str(ctx.exception))
+            self.assertIn("empty", str(ctx.exception))
+
+    def test_parse_rejects_missing_go(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                """\
+[workflow.simple.steps.s1]
+profile = "opencode.default"
+prompts = ["p"]
+
+[harness.opencode.profiles.default]
+model = "m"
+
+[prompts]
+p = "do it"
+""",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            self.assertIn("go", str(ctx.exception))
+
+    def test_parse_rejects_empty_go_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                """\
+[workflow.simple.steps.s1]
+profile = "opencode.default"
+prompts = ["p"]
+go = []
+
+[harness.opencode.profiles.default]
+model = "m"
+
+[prompts]
+p = "do it"
+""",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            self.assertIn("go", str(ctx.exception))
+            self.assertIn("empty", str(ctx.exception))
+
     def test_parse_accepts_unconditional_transition(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = self._write_workflow_config(
@@ -1030,6 +1093,7 @@ p1 = "do it"
 [workflow.simple.steps.s1]
 profile = "opencode.default"
 prompts = ["alpha", "beta", "gamma"]
+go = [{ to = "END" }]
 
 [harness.opencode.profiles.default]
 model = "m"
@@ -1098,6 +1162,7 @@ effort = "high"
 [workflow.simple.steps.s1]
 profile = "opencode.default"
 prompts = ["p"]
+go = [{ to = "END" }]
 
 [prompts]
 p = "do it"
@@ -1129,6 +1194,7 @@ effort = "medium"
 [workflow.simple.steps.s1]
 profile = "opencode.default"
 prompts = ["p"]
+go = [{ to = "END" }]
 
 [prompts]
 p = "do it"
