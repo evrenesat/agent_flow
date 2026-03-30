@@ -1352,7 +1352,7 @@ class SkillDocsTests(unittest.TestCase):
     def test_skill_files_do_not_contain_workflow_placeholders(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         placeholders = ('{ORIGINAL_PLAN_PATH}', '{ACTIVE_PLAN_PATH}', '{NEW_PLAN_PATH}')
-        for skill_name in ('aflow-plan', 'review-squash', 'execute-aflow-plan'):
+        for skill_name in ('aflow-plan', 'review-squash', 'execute-aflow-plan', 'execute-aflow-checkpoint', 'review-aflow-checkpoint'):
             skill_path = repo_root / 'skills' / skill_name / 'SKILL.md'
             text = skill_path.read_text(encoding='utf-8')
             for placeholder in placeholders:
@@ -1362,6 +1362,8 @@ class SkillDocsTests(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[2]
         example_text = (repo_root / 'plans' / 'example.toml').read_text(encoding='utf-8')
         assert 'review-squash' in example_text
+        assert 'review-aflow-checkpoint' in example_text
+        assert 'execute-aflow-checkpoint' in example_text
         typo = '-'.join(('revive', 'squash'))
         assert typo not in example_text
 if __name__ == '__main__':

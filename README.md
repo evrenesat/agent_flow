@@ -223,8 +223,10 @@ Older run directories are pruned automatically. The default retention is `20` ru
 This repo also ships optional skills under `skills/`. They are static guidance files that a harness can inject around workflow prompts.
 
 - `aflow-plan` - static guidance for writing aflow-compatible checkpoint plans
-- `review-squash` - static guidance for final review and focused fix-plan creation
-- `execute-aflow-plan` - lightweight reinforcement for plan-driven execution
+- `execute-aflow-plan` - lightweight reinforcement for autonomous plan-driven execution across all remaining checkpoints
+- `execute-aflow-checkpoint` - checkpoint-scoped execution that implements one checkpoint and then stops
+- `review-squash` - final review for completed autonomous runs, including whole-handoff squash or fix-plan creation
+- `review-aflow-checkpoint` - checkpoint-scoped review for the latest checkpoint attempt
 
 The workflow config is where the plan-path placeholders belong. The skills themselves stay free of workflow template variables.
 
