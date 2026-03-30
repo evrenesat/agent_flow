@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .base import HarnessAdapter, HarnessInvocation
+from .base import HarnessAdapter, HarnessInvocation as HarnessInvocation
 from .claude import ClaudeAdapter
 from .codex import CodexAdapter
 from .gemini import GeminiAdapter
@@ -17,6 +17,8 @@ ADAPTERS: dict[str, HarnessAdapter] = {
     "opencode": OpencodeAdapter(),
     "pi": PiAdapter(),
 }
+
+__all__ = ["ADAPTERS", "HarnessAdapter", "HarnessInvocation", "get_adapter"]
 
 
 def get_adapter(name: str) -> HarnessAdapter:

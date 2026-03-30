@@ -5,15 +5,12 @@ import re
 import subprocess
 import threading
 import time
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 from .config import (
-    ConfigError,
     GoTransition,
-    HarnessProfileConfig,
     WorkflowStepConfig,
     WorkflowUserConfig,
 )
@@ -26,6 +23,8 @@ from .status import BannerRenderer
 
 
 VALID_CONDITION_SYMBOLS = frozenset({"DONE", "NEW_PLAN_EXISTS", "MAX_TURNS_REACHED"})
+PROCESS_POLL_INTERVAL_SECONDS = 0.05
+BANNER_REFRESH_INTERVAL_SECONDS = 1.0
 
 
 class WorkflowError(RuntimeError):
@@ -370,9 +369,15 @@ def _run_process(
     t_out.start()
     t_err.start()
 
-    while proc.poll() is None:
-        time.sleep(1)
-        banner.update(state)
+    next_banner_update_at = time.monotonic() + BANNER_REFRESH_INTERVAL_SECONDS
+    while True:
+        try:
+            proc.wait(timeout=PROCESS_POLL_INTERVAL_SECONDS)
+            break
+        except subprocess.TimeoutExpired:
+            if time.monotonic() >= next_banner_update_at:
+                banner.update(state)
+                next_banner_update_at = time.monotonic() + BANNER_REFRESH_INTERVAL_SECONDS
 
     t_out.join()
     t_err.join()
@@ -397,20 +402,6 @@ def _make_banner(
         workflow_name=workflow_name,
         original_plan_path=original_plan_path,
     )
-
-
-@dataclass(frozen=True)
-class WorkflowContext:
-    original_plan_path: Path
-    active_plan_path: Path
-    new_plan_path: Path
-    turn_number: int
-    max_turns: int
-    current_step_name: str
-    workflow_name: str
-
-
-
 
 
 def run_workflow(

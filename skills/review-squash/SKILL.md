@@ -5,11 +5,11 @@ description: "Review a completed autonomous AFlow plan, compare the full accumul
 
 #  Review Squash AFlow Implementation
 
-Use this skill only for the final review pass of work produced under a RALF plan that includes `Git Tracking`. It is meant to be installed as a static skill and driven by prompt context from the workflow engine.
+Use this skill only for the final review pass of work produced under a aflow plan that includes `Git Tracking`. It is meant to be installed as a static skill and driven by prompt context from the workflow engine.
 
 ## Behavior
 
-- Load the active original RALF plan before reviewing code or history.
+- Load the active original aflow plan before reviewing code or history.
 - If the prompt already names the original plan, use that directly. Otherwise fall back to the repo's original-plan selection rules.
 - Assume the happy path is a completed autonomous run. Review the whole accumulated handoff, not just one checkpoint batch.
 - Treat files under `plans/` as architect or reviewer-owned artifacts. If an implementation commit modifies plan files unexpectedly, reject that work unless the user explicitly asked for plan-file commits from the implementer.
@@ -18,7 +18,7 @@ Use this skill only for the final review pass of work produced under a RALF plan
 - If the original plan still has unchecked checkpoints, do not repurpose this skill for routine checkpoint review. Rerun the autonomous executor unless the user explicitly asks for a different workflow.
 - If the full accumulated work is acceptable, approve and squash once at the whole-plan level.
 - If the full accumulated work is not acceptable, do not squash. Create a focused fix plan for the failed checkpoints or behaviors instead of a whole-plan redo.
-- Treat `ralf` and `ralph` as equivalent spellings.
+- Treat `aflow` as the canonical spelling.
 - Compact `DEVLOG.md` to one handoff entry only when a squash actually happens and multiple handoff entries exist.
 
 ## Core Rule
@@ -27,7 +27,7 @@ The original plan file is the source of truth for long-lived review state. Fix p
 
 ## Required Inputs
 
-Before reviewing or squashing, identify the active original RALF plan under `plans/in-progress/`.
+Before reviewing or squashing, identify the active original aflow plan under `plans/in-progress/`.
 
 Selection rules:
 
@@ -75,7 +75,7 @@ If the accumulated work looks correct:
 If the accumulated work is not acceptable:
 
 1. Do not squash commits.
-2. Create a new RALF fix plan that covers only the failed checkpoints or behaviors against the current `HEAD`.
+2. Create a new aflow fix plan that covers only the failed checkpoints or behaviors against the current `HEAD`.
 3. Ensure `plans/in-progress/` exists before writing the fix plan. Create it if it does not exist.
 4. Use the filename format `original-plan-name-fix-cpN-v01.md` when the rejection is anchored to one checkpoint. If multiple checkpoints are involved, use a similarly descriptive focused name.
 5. The fix plan must be self-contained and must not require the implementer to read prior chat context.
@@ -89,7 +89,7 @@ If the accumulated work is not acceptable:
 
 ## Stop And Escalate If
 
-- no original RALF plan with `Git Tracking` can be found
+- no original aflow plan with `Git Tracking` can be found
 - the current branch does not match the plan's `Plan Branch`
 - `Pre-Handoff Base HEAD` is missing or no longer reachable
 - the original plan is still mid-flight and the correct next action is to resume the autonomous executor

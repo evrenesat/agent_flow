@@ -26,15 +26,6 @@ class PlanSnapshot:
     total_checkpoint_count: int = 0
     current_checkpoint_index: int | None = None
 
-    @property
-    def signature(self) -> tuple[str | None, int, int, bool]:
-        return (
-            self.current_checkpoint_name,
-            self.unchecked_checkpoint_count,
-            self.current_checkpoint_unchecked_step_count,
-            self.is_complete,
-        )
-
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
 

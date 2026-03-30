@@ -1,1 +1,1 @@
-"""aflow - self-contained plan checkpoint controller."""
+"""aflow workflow runner."""

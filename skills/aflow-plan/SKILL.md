@@ -1,11 +1,11 @@
 ---
 name: aflow-plan
-description: "Create a strict AFlow checkpoint handoff plan for coding work that will be implemented by another model, tool, or later session. Use when the user explicitly wants the RALF pattern or a checkpoint-based handoff plan."
+description: "Create a strict AFlow checkpoint handoff plan for coding work that will be implemented by another model, tool, or later session. Use when the user explicitly wants the aflow pattern or a checkpoint-based handoff plan."
 ---
 
 # AFlow Handoff Plan
 
-Use this skill only for RALF-style planning. It is designed to be installed as a static skill and driven by prompt context from the workflow engine or harness.
+Use this skill only for aflow-style planning. It is designed to be installed as a static skill and driven by prompt context from the workflow engine or harness.
 
 ## Behavior
 
@@ -20,8 +20,8 @@ Use this skill only for RALF-style planning. It is designed to be installed as a
 - Treat the original handoff plan as the long-lived ledger under `plans/in-progress/` until the handoff is complete.
 - Treat reviewer-created fix plans as temporary overlays for rejected work, not replacements for the original plan's long-lived state.
 - Make the final plan self-sufficient. It should not rely on a separate heavy executor skill to supply missing workflow details later.
-- Treat `ralf` and `ralph` as equivalent spellings.
-- If the user asks for planning but does not want RALF, do not use this skill.
+- Treat `aflow` as the canonical spelling.
+- If the user asks for planning but does not want aflow, do not use this skill.
 
 ## Core Rule
 
@@ -29,7 +29,7 @@ The plan must be decision complete. The implementer should not need to choose be
 
 ## Required Plan Sections
 
-Every final RALF plan must include these sections in substance, even if headers are adapted slightly for readability:
+Every final aflow plan must include these sections in substance, even if headers are adapted slightly for readability:
 
 1. `Summary`
 2. `Git Tracking`
@@ -43,7 +43,7 @@ Every final RALF plan must include these sections in substance, even if headers 
 
 Do not omit any of them when they are needed to prevent implementation drift.
 
-## RALF Output Contract
+## aflow Output Contract
 
 Produce a strict checkpoint plan for cross-model or later-session handoff.
 
@@ -212,7 +212,7 @@ Requirements:
 
 ## Documentation Coverage Rule
 
-Every final RALF plan must evaluate whether the change warrants documentation updates and, when it does, assign those updates to the relevant checkpoint(s).
+Every final aflow plan must evaluate whether the change warrants documentation updates and, when it does, assign those updates to the relevant checkpoint(s).
 
 Required guidance:
 
@@ -237,7 +237,7 @@ Before finalizing the plan, gather the same requirement clarity you would for an
 
 ## Plan File Persistence
 
-For every plan generated with this skill, persist the final RALF plan to disk.
+For every plan generated with this skill, persist the final aflow plan to disk.
 
 Rules:
 
