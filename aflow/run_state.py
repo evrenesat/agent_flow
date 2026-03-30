@@ -12,7 +12,7 @@ class ControllerConfig:
     repo_root: Path
     plan_path: Path
     harness: str
-    model: str
+    model: str | None
     max_turns: int = 15
     stagnation_limit: int = 5
     keep_runs: int = 20

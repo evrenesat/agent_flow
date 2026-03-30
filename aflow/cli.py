@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 import sys
 
+from .config import ConfigError, load_user_config, resolve_launch_config
 from .controller import ControllerError, run_controller
 from .harnesses import ADAPTERS
 from .run_state import ControllerConfig
@@ -23,9 +24,10 @@ def _positive_int(value: str) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aflow")
-    parser.add_argument("--harness", required=True, choices=sorted(ADAPTERS))
-    parser.add_argument("--model", required=True)
+    parser.add_argument("--harness", choices=sorted(ADAPTERS))
+    parser.add_argument("--model")
     parser.add_argument("--effort")
+    parser.add_argument("--profile")
     parser.add_argument("--max-turns", type=_positive_int, default=DEFAULT_MAX_TURNS)
     parser.add_argument("--stagnation-limit", type=_positive_int, default=DEFAULT_STAGNATION_LIMIT)
     parser.add_argument("--keep-runs", type=_positive_int, default=DEFAULT_KEEP_RUNS)
@@ -43,8 +45,21 @@ def main(argv: list[str] | None = None) -> int:
     repo_root = Path(__file__).resolve().parents[1]
     plan_path = Path(args.plan_file).expanduser().resolve()
     extra_instructions = tuple(token for token in args.extra_instructions if token != "--")
-    adapter = ADAPTERS[args.harness]
-    if args.effort is not None and not adapter.supports_effort:
+    try:
+        user_config = load_user_config()
+        resolved = resolve_launch_config(
+            user_config,
+            harness=args.harness,
+            model=args.model,
+            effort=args.effort,
+            profile=args.profile,
+        )
+    except ConfigError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+
+    adapter = ADAPTERS[resolved.harness]
+    if resolved.effort is not None and not adapter.supports_effort:
         print(
             f"warning: harness '{adapter.name}' ignores --effort; continuing without an effort flag",
             file=sys.stderr,
@@ -52,13 +67,13 @@ def main(argv: list[str] | None = None) -> int:
     config = ControllerConfig(
         repo_root=repo_root,
         plan_path=plan_path,
-        harness=args.harness,
-        model=args.model,
+        harness=resolved.harness,
+        model=resolved.model,
         max_turns=args.max_turns,
         stagnation_limit=args.stagnation_limit,
         keep_runs=args.keep_runs,
         extra_instructions=extra_instructions,
-        effort=args.effort,
+        effort=resolved.effort,
     )
 
     try:

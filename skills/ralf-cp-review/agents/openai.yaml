@@ -1,4 +1,0 @@
-interface:
-  display_name: "RALF CP Review"
-  short_description: "Review one RALF checkpoint batch and update the original plan"
-  default_prompt: "Use $ralf-cp-review to review the current RALF checkpoint batch, update the original plan if the checkpoint is approved, or create or replace one focused fix plan if changes are still required."

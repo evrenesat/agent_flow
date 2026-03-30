@@ -13,7 +13,7 @@ class CodexAdapter:
         self,
         *,
         repo_root: Path,
-        model: str,
+        model: str | None,
         system_prompt: str,
         user_prompt: str,
         effort: str | None = None,
@@ -25,9 +25,9 @@ class CodexAdapter:
             "--dangerously-bypass-approvals-and-sandbox",
             "-C",
             str(repo_root),
-            "--model",
-            model,
         ]
+        if model is not None:
+            argv.extend(["--model", model])
         if effort is not None:
             argv.extend(["-c", f'model_reasoning_effort=\'"{effort}"\''])
         argv.append(effective_prompt)

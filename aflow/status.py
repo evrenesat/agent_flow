@@ -47,7 +47,7 @@ def _checkpoint_display(snapshot: PlanSnapshot) -> str:
 def build_banner(
     *,
     config_harness: str,
-    config_model: str,
+    config_model: str | None,
     config_effort: str | None,
     config_max_turns: int,
     config_plan_path: Path,
@@ -62,7 +62,7 @@ def build_banner(
 
     table.add_row("Elapsed", _elapsed(state.run_started_at))
     table.add_row("Harness", config_harness)
-    table.add_row("Model", config_model)
+    table.add_row("Model", config_model or "default")
     table.add_row("Effort", config_effort or "none")
     table.add_row("Checkpoint", _checkpoint_display(snapshot))
     name = snapshot.current_checkpoint_name or "-"
@@ -81,7 +81,7 @@ class BannerRenderer:
         self,
         *,
         config_harness: str,
-        config_model: str,
+        config_model: str | None,
         config_effort: str | None,
         config_max_turns: int,
         config_plan_path: Path,

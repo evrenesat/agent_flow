@@ -13,7 +13,7 @@ class GeminiAdapter:
         self,
         *,
         repo_root: Path,
-        model: str,
+        model: str | None,
         system_prompt: str,
         user_prompt: str,
         effort: str | None = None,
@@ -21,17 +21,18 @@ class GeminiAdapter:
         effective_prompt = "\n\n".join((system_prompt, user_prompt))
         return HarnessInvocation(
             label=self.name,
-            argv=(
-                "gemini",
-                "--prompt",
-                effective_prompt,
-                "--model",
-                model,
-                "--approval-mode",
-                "yolo",
-                "--sandbox=false",
-                "--output-format",
-                "text",
+            argv=tuple(
+                [
+                    "gemini",
+                    "--prompt",
+                    effective_prompt,
+                    *([] if model is None else ["--model", model]),
+                    "--approval-mode",
+                    "yolo",
+                    "--sandbox=false",
+                    "--output-format",
+                    "text",
+                ]
             ),
             env={},
             prompt_mode="prefix-system-into-user-prompt",

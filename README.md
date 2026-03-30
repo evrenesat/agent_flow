@@ -17,19 +17,47 @@ That gives you the `aflow` command on your `PATH`.
 From an installed tool:
 
 ```bash
-aflow --harness codex --model gpt-5.4 path/to/plan.md [extra instructions ...]
+aflow path/to/plan.md [extra instructions ...]
+aflow --harness codex path/to/plan.md
+aflow --harness codex --profile turbo path/to/plan.md
 aflow --harness codex --model gpt-5.4 --effort high path/to/plan.md
 aflow --harness opencode --model zai-coding-plan/glm-5-turbo path/to/plan.md
-aflow --harness gemini --model gemini-2.5-pro path/to/plan.md
+aflow --harness gemini path/to/plan.md
 ```
 
 From a source checkout:
 
 ```bash
-python3 -m aflow --harness codex --model gpt-5.4 path/to/plan.md
+uv run python -m aflow path/to/plan.md
 ```
 
-`--harness` and `--model` are required. Supported harnesses are `claude`, `codex`, `gemini`, `opencode`, and `pi`.
+`--harness`, `--model`, and `--profile` are all optional. Supported harnesses are `claude`, `codex`, `gemini`, `opencode`, and `pi`.
+
+If `--harness` is omitted, `aflow` uses `default_harness` from config when it exists. If no model resolves after config is merged, `aflow` leaves the harness model flag out and the harness CLI uses its own default model.
+
+## Config
+
+`aflow` reads `~/.config/aflow/aflow.toml` when it exists.
+
+Precedence is `CLI > profile > harness defaults > global`, and in this release the only global key is `default_harness`.
+
+`--profile` is resolved under the selected harness only. It does not change which harness is used.
+
+```toml
+default_harness = "opencode"
+
+[harness.opencode]
+model = "zai-coding-plan/glm-4.7"
+
+[harness.opencode.profiles.turbo]
+model = "zai-coding-plan/glm-5-turbo"
+
+[harness.codex]
+model = "gpt-5.4"
+effort = "high"
+```
+
+Use `model` and `effort` keys only. Leave a key out when it is unset.
 
 ## What It Does
 
@@ -63,7 +91,9 @@ Pass `--effort <level>` to request a specific reasoning effort from the underlyi
 | opencode | no extra flag | ignored, warning emitted |
 | gemini | no extra flag | ignored, warning emitted |
 
-Effort values are passed through as-is. Validation is left to the harness CLI. The `opencode` and `gemini` harnesses do not support effort tuning; when `--effort` is passed for those harnesses, `aflow` prints a single warning to stderr and continues without an effort flag.
+Effort values are passed through as-is. Validation is left to the harness CLI. When no model resolves, `aflow` leaves the model flag out so the harness CLI can use its own default model. For `pi`, if effort resolves without a model, `aflow` passes `--thinking <effort>` instead of inventing a model string.
+
+The `opencode` and `gemini` harnesses do not support effort tuning; when `--effort` is passed for those harnesses, `aflow` prints a single warning to stderr and continues without an effort flag.
 
 ## Non-interactive and Full-Permission Mode
 
@@ -92,6 +122,7 @@ Each run stores:
 - stdout and stderr
 - per-turn result metadata
 - live status state such as `run_started_at`, `active_turn`, `issues_accumulated`, and `status_message`
+- `model: null` when the model is left unresolved
 
 Older run directories are pruned automatically.
 
@@ -113,7 +144,7 @@ From the perspective of a Python tool package, the important paths are:
 - `skills/`: optional workflow assets shipped alongside the tool
 - `plans/`: saved working plans and handoff artifacts
 
-The source entrypoint should not be a root-level executable named `aflow`, because that path is already occupied by the `aflow/` package directory. For source checkouts, `python3 -m aflow` is the clean package-native entrypoint. For installed use, the console script from `pyproject.toml` is the real entrypoint.
+The source entrypoint should not be a root-level executable named `aflow`, because that path is already occupied by the `aflow/` package directory. For source checkouts, `uv run python -m aflow` is the clean package-native entrypoint. For installed use, the console script from `pyproject.toml` is the real entrypoint.
 
 ## Troubleshooting
 

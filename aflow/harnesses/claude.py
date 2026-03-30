@@ -13,7 +13,7 @@ class ClaudeAdapter:
         self,
         *,
         repo_root: Path,
-        model: str,
+        model: str | None,
         system_prompt: str,
         user_prompt: str,
         effort: str | None = None,
@@ -23,9 +23,9 @@ class ClaudeAdapter:
             "-p",
             "--system-prompt",
             system_prompt,
-            "--model",
-            model,
         ]
+        if model is not None:
+            argv.extend(["--model", model])
         if effort is not None:
             argv.extend(["--effort", effort])
         argv.extend([

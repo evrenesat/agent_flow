@@ -24,7 +24,7 @@ class HarnessAdapter(Protocol):
         self,
         *,
         repo_root: Path,
-        model: str,
+        model: str | None,
         system_prompt: str,
         user_prompt: str,
         effort: str | None = None,

@@ -1,4 +1,0 @@
-interface:
-  display_name: "RALF CP Execute"
-  short_description: "Execute one RALF checkpoint with the plan treated as read-only"
-  default_prompt: "Use $ralf-cp-execute to implement the named checkpoint, or the first unchecked checkpoint by default, verify it, create the checkpoint commit, and stop without editing the plan."

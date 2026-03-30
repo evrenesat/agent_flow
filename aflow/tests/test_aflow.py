@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 import shutil
@@ -15,6 +16,14 @@ from aflow.controller import (
     build_system_prompt,
     build_user_prompt,
     run_controller,
+)
+from aflow.config import (
+    ConfigError,
+    HarnessConfig,
+    HarnessProfileConfig,
+    UserConfig,
+    load_user_config,
+    resolve_launch_config,
 )
 from aflow.harnesses.claude import ClaudeAdapter
 from aflow.harnesses.codex import CodexAdapter
@@ -35,6 +44,13 @@ ALL_HARNESSES = ("claude", "codex", "gemini", "opencode", "pi")
 
 def _write_plan(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
+
+
+def _write_config(home_dir: Path, text: str) -> Path:
+    config_path = home_dir / ".config" / "aflow" / "aflow.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(text, encoding="utf-8")
+    return config_path
 
 
 def _copy_aflow_repo(tmp_path: Path) -> Path:
@@ -114,6 +130,7 @@ def _launcher_environment(
     scenario: str,
     plan_path: Path,
     count_file: Path,
+    home_dir: Path | None = None,
     completed_plan_path: Path | None = None,
     alpha_plan_path: Path | None = None,
     beta_plan_path: Path | None = None,
@@ -122,6 +139,8 @@ def _launcher_environment(
 ) -> dict[str, str]:
     env = os.environ.copy()
     env["PATH"] = f"{repo_root / 'bin'}:{env['PATH']}"
+    if home_dir is not None:
+        env["HOME"] = str(home_dir.resolve())
     env["FAKE_SCENARIO"] = scenario
     env["FAKE_PLAN_PATH"] = str(plan_path.resolve())
     env["FAKE_COUNT_FILE"] = str(count_file.resolve())
@@ -140,7 +159,7 @@ def _launcher_environment(
 
 def _run_launcher(repo_root: Path, *args: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["python3", "-m", "aflow", *args],
+        [sys.executable, "-m", "aflow", *args],
         cwd=repo_root,
         env=env,
         capture_output=True,
@@ -153,6 +172,12 @@ class CLITests(unittest.TestCase):
     def test_prog_name_is_aflow(self) -> None:
         parser = build_parser()
         self.assertEqual(parser.prog, "aflow")
+
+    def test_parser_allows_optional_harness_model_and_profile(self) -> None:
+        args = build_parser().parse_args(["plan.md"])
+        self.assertIsNone(args.harness)
+        self.assertIsNone(args.model)
+        self.assertIsNone(args.profile)
 
 
 class PlanParserTests(unittest.TestCase):
@@ -279,6 +304,128 @@ class EffortParsingTests(unittest.TestCase):
         self.assertIsNone(args.effort)
 
 
+class ConfigResolutionTests(unittest.TestCase):
+    def test_configless_invocation_without_harness_fails(self) -> None:
+        with self.assertRaises(ConfigError) as ctx:
+            resolve_launch_config(
+                UserConfig(),
+                harness=None,
+                model="gpt-5.4",
+                effort=None,
+                profile=None,
+            )
+
+        self.assertIn("--harness is required unless default_harness is configured", str(ctx.exception))
+
+    def test_configless_invocation_without_model_with_explicit_harness_keeps_model_unresolved(self) -> None:
+        resolved = resolve_launch_config(
+            UserConfig(),
+            harness="codex",
+            model=None,
+            effort=None,
+            profile=None,
+        )
+
+        self.assertEqual(resolved.harness, "codex")
+        self.assertIsNone(resolved.model)
+        self.assertIsNone(resolved.effort)
+
+    def test_profile_overrides_harness_defaults(self) -> None:
+        config = UserConfig(
+            default_harness="codex",
+            harnesses={
+                "codex": HarnessConfig(
+                    model="gpt-5.4",
+                    effort="low",
+                    profiles={
+                        "turbo": HarnessProfileConfig(
+                            model="gpt-5.4-turbo",
+                            effort="high",
+                        )
+                    },
+                )
+            },
+        )
+
+        resolved = resolve_launch_config(
+            config,
+            harness=None,
+            model=None,
+            effort=None,
+            profile="turbo",
+        )
+
+        self.assertEqual(resolved.harness, "codex")
+        self.assertEqual(resolved.model, "gpt-5.4-turbo")
+        self.assertEqual(resolved.effort, "high")
+
+    def test_cli_model_overrides_profile_and_harness_defaults(self) -> None:
+        config = UserConfig(
+            default_harness="codex",
+            harnesses={
+                "codex": HarnessConfig(
+                    model="gpt-5.4",
+                    effort="low",
+                    profiles={
+                        "turbo": HarnessProfileConfig(
+                            model="gpt-5.4-turbo",
+                            effort="high",
+                        )
+                    },
+                )
+            },
+        )
+
+        resolved = resolve_launch_config(
+            config,
+            harness=None,
+            model="gpt-5.4-explicit",
+            effort=None,
+            profile="turbo",
+        )
+
+        self.assertEqual(resolved.model, "gpt-5.4-explicit")
+        self.assertEqual(resolved.effort, "high")
+
+    def test_unknown_profile_raises_clear_error(self) -> None:
+        config = UserConfig(
+            default_harness="codex",
+            harnesses={
+                "codex": HarnessConfig(
+                    model="gpt-5.4",
+                )
+            },
+        )
+
+        with self.assertRaises(ConfigError) as ctx:
+            resolve_launch_config(
+                config,
+                harness=None,
+                model=None,
+                effort=None,
+                profile="missing",
+            )
+
+        self.assertIn("unknown profile 'missing' for harness 'codex'", str(ctx.exception))
+
+    def test_invalid_config_file_raises_clear_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir)
+            original_home = os.environ.get("HOME")
+            try:
+                _write_config(home_dir, "default_harness = [not valid toml")
+                os.environ["HOME"] = str(home_dir)
+                with self.assertRaises(ConfigError) as ctx:
+                    load_user_config()
+            finally:
+                if original_home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = original_home
+
+        self.assertIn(str(home_dir / ".config" / "aflow" / "aflow.toml"), str(ctx.exception))
+
+
 class AdaptersTests(unittest.TestCase):
     def test_codex_without_effort(self) -> None:
         adapter = CodexAdapter()
@@ -332,6 +479,18 @@ class AdaptersTests(unittest.TestCase):
             effort="low",
         )
         self.assertEqual(invocation.argv[-1], "PROMPT\n\nINSTRUCTIONS")
+
+    def test_codex_without_model_omits_model_flag(self) -> None:
+        adapter = CodexAdapter()
+        invocation = adapter.build_invocation(
+            repo_root=Path("/repo"),
+            model=None,
+            system_prompt="SYSTEM",
+            user_prompt="USER",
+        )
+
+        self.assertNotIn("--model", invocation.argv)
+        self.assertEqual(invocation.argv[-1], "SYSTEM\n\nUSER")
 
     def test_pi_without_effort(self) -> None:
         adapter = PiAdapter()
@@ -387,6 +546,35 @@ class AdaptersTests(unittest.TestCase):
         self.assertIn("--models", invocation.argv)
         self.assertNotIn("--model", invocation.argv)
 
+    def test_pi_without_model_and_with_effort_uses_thinking_flag(self) -> None:
+        adapter = PiAdapter()
+        invocation = adapter.build_invocation(
+            repo_root=Path("/repo"),
+            model=None,
+            system_prompt="SYSTEM",
+            user_prompt="USER",
+            effort="high",
+        )
+
+        argv = invocation.argv
+        self.assertIn("--thinking", argv)
+        self.assertIn("high", argv)
+        self.assertNotIn("--models", argv)
+        self.assertNotIn("--model", argv)
+
+    def test_pi_without_model_and_without_effort_omits_model_flags(self) -> None:
+        adapter = PiAdapter()
+        invocation = adapter.build_invocation(
+            repo_root=Path("/repo"),
+            model=None,
+            system_prompt="SYSTEM",
+            user_prompt="USER",
+        )
+
+        self.assertNotIn("--model", invocation.argv)
+        self.assertNotIn("--models", invocation.argv)
+        self.assertNotIn("--thinking", invocation.argv)
+
     def test_claude_without_effort(self) -> None:
         adapter = ClaudeAdapter()
         invocation = adapter.build_invocation(
@@ -430,6 +618,18 @@ class AdaptersTests(unittest.TestCase):
         self.assertIn("low", argv)
         effort_index = argv.index("--effort")
         self.assertEqual(argv[effort_index + 1], "low")
+
+    def test_claude_without_model_omits_model_flag(self) -> None:
+        adapter = ClaudeAdapter()
+        invocation = adapter.build_invocation(
+            repo_root=Path("/repo"),
+            model=None,
+            system_prompt="SYSTEM",
+            user_prompt="USER",
+        )
+
+        self.assertNotIn("--model", invocation.argv)
+        self.assertEqual(invocation.argv[0], "claude")
 
     def test_opencode_without_effort(self) -> None:
         adapter = OpencodeAdapter()
@@ -484,6 +684,18 @@ class AdaptersTests(unittest.TestCase):
                 "SYSTEM\n\nUSER",
             ),
         )
+
+    def test_opencode_without_model_omits_model_flag(self) -> None:
+        adapter = OpencodeAdapter()
+        invocation = adapter.build_invocation(
+            repo_root=Path("/repo"),
+            model=None,
+            system_prompt="SYSTEM",
+            user_prompt="USER",
+        )
+
+        self.assertNotIn("--model", invocation.argv)
+        self.assertEqual(invocation.argv[0], "opencode")
 
     def test_gemini_without_effort(self) -> None:
         adapter = GeminiAdapter()
@@ -540,6 +752,18 @@ class AdaptersTests(unittest.TestCase):
                 "text",
             ),
         )
+
+    def test_gemini_without_model_omits_model_flag(self) -> None:
+        adapter = GeminiAdapter()
+        invocation = adapter.build_invocation(
+            repo_root=Path("/repo"),
+            model=None,
+            system_prompt="SYSTEM",
+            user_prompt="USER",
+        )
+
+        self.assertNotIn("--model", invocation.argv)
+        self.assertEqual(invocation.argv[0], "gemini")
 
     def test_parser_accepts_opencode_and_gemini(self) -> None:
         from aflow.cli import parse_args
@@ -846,6 +1070,37 @@ class ControllerTests(unittest.TestCase):
             run_json = json.loads((run_dirs[0] / "run.json").read_text(encoding="utf-8"))
             self.assertIsNone(run_json["effort"])
 
+    def test_run_json_records_null_model_when_omitted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / "plan.md"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [x] Checkpoint 1: First
+- [x] step one
+""",
+            )
+
+            result = run_controller(
+                ControllerConfig(
+                    repo_root=repo_root,
+                    plan_path=plan_path,
+                    harness="codex",
+                    model=None,
+                ),
+                adapter=CodexAdapter(),
+                runner=None,
+            )
+
+            self.assertEqual(result.turns_completed, 0)
+            run_dir = repo_root / ".aflow" / "runs"
+            run_dirs = list(run_dir.iterdir())
+            self.assertEqual(len(run_dirs), 1)
+            run_json = json.loads((run_dirs[0] / "run.json").read_text(encoding="utf-8"))
+            self.assertIsNone(run_json["model"])
+
     def test_unchanged_turns_increment_issues_accumulated(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = Path(tmpdir)
@@ -1059,6 +1314,24 @@ class LazyBannerTests(unittest.TestCase):
         finally:
             status_mod._RICH_AVAILABLE = original
 
+    def test_banner_renders_default_model_label(self) -> None:
+        from rich.console import Console
+
+        state = ControllerState(last_snapshot=PlanSnapshot(None, 0, 0, False))
+        panel = build_banner(
+            config_harness="codex",
+            config_model=None,
+            config_effort=None,
+            config_max_turns=15,
+            config_plan_path=Path("/fake/plan.md"),
+            state=state,
+        )
+
+        self.assertIsNotNone(panel)
+        console = Console(record=True, width=80)
+        console.print(panel)
+        self.assertIn("default", console.export_text())
+
 
 class RetentionTests(unittest.TestCase):
     def test_retention_prune_old_runs_keeps_newest_twenty_directories(self) -> None:
@@ -1159,6 +1432,239 @@ class EndToEndLauncherTests(unittest.TestCase):
             self.assertIn(f"Plan file: {resolved_plan_path}", (turn_dir / "user-prompt.txt").read_text(encoding="utf-8"))
             self.assertEqual((turn_dir / "stdout.txt").read_text(encoding="utf-8").strip(), "codex turn 1")
             self.assertTrue((turn_dir / "result.json").is_file())
+
+    def test_launcher_uses_config_default_harness_and_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            repo_root = _copy_aflow_repo(tmp_path)
+            home_dir = tmp_path / "home"
+            home_dir.mkdir()
+            _write_config(
+                home_dir,
+                """default_harness = "codex"
+
+[harness.codex]
+model = "gpt-5.4"
+""",
+            )
+            plan_path = tmp_path / "plan.md"
+            completed_plan_path = tmp_path / "completed-plan.md"
+            count_file = tmp_path / "count.txt"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+""",
+            )
+            _write_plan(
+                completed_plan_path,
+                """# Plan
+
+### [x] Checkpoint 1: First
+- [x] step one
+""",
+            )
+            for harness in ALL_HARNESSES:
+                _write_fake_harness(repo_root, harness)
+
+            result = _run_launcher(
+                repo_root,
+                str(plan_path),
+                env=_launcher_environment(
+                    repo_root,
+                    scenario="success",
+                    plan_path=plan_path,
+                    count_file=count_file,
+                    completed_plan_path=completed_plan_path,
+                    home_dir=home_dir,
+                ),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            run_dirs = sorted((repo_root / ".aflow" / "runs").iterdir())
+            run_dir = run_dirs[0]
+            run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+            self.assertEqual(run_json["harness"], "codex")
+            self.assertEqual(run_json["model"], "gpt-5.4")
+
+            turn_dir = run_dir / "turns" / "turn-001"
+            argv = json.loads((turn_dir / "argv.json").read_text(encoding="utf-8"))
+            self.assertIn("--model", argv["argv"])
+            self.assertIn("gpt-5.4", argv["argv"])
+
+    def test_launcher_with_explicit_harness_and_no_model_omits_model_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            repo_root = _copy_aflow_repo(tmp_path)
+            home_dir = tmp_path / "home"
+            home_dir.mkdir()
+            plan_path = tmp_path / "plan.md"
+            completed_plan_path = tmp_path / "completed-plan.md"
+            count_file = tmp_path / "count.txt"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+""",
+            )
+            _write_plan(
+                completed_plan_path,
+                """# Plan
+
+### [x] Checkpoint 1: First
+- [x] step one
+""",
+            )
+            for harness in ALL_HARNESSES:
+                _write_fake_harness(repo_root, harness)
+
+            result = _run_launcher(
+                repo_root,
+                "--harness",
+                "codex",
+                str(plan_path),
+                env=_launcher_environment(
+                    repo_root,
+                    scenario="success",
+                    plan_path=plan_path,
+                    count_file=count_file,
+                    completed_plan_path=completed_plan_path,
+                    home_dir=home_dir,
+                ),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            run_dirs = sorted((repo_root / ".aflow" / "runs").iterdir())
+            run_dir = run_dirs[0]
+            run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+            self.assertIsNone(run_json["model"])
+
+            turn_dir = run_dir / "turns" / "turn-001"
+            argv = json.loads((turn_dir / "argv.json").read_text(encoding="utf-8"))
+            self.assertNotIn("--model", argv["argv"])
+
+    def test_launcher_succeeds_with_profile_turbo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            repo_root = _copy_aflow_repo(tmp_path)
+            home_dir = tmp_path / "home"
+            home_dir.mkdir()
+            _write_config(
+                home_dir,
+                """default_harness = "codex"
+
+[harness.codex]
+model = "gpt-5.4"
+effort = "low"
+
+[harness.codex.profiles.turbo]
+model = "gpt-5.4-turbo"
+effort = "high"
+""",
+            )
+            plan_path = tmp_path / "plan.md"
+            completed_plan_path = tmp_path / "completed-plan.md"
+            count_file = tmp_path / "count.txt"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+""",
+            )
+            _write_plan(
+                completed_plan_path,
+                """# Plan
+
+### [x] Checkpoint 1: First
+- [x] step one
+""",
+            )
+            for harness in ALL_HARNESSES:
+                _write_fake_harness(repo_root, harness)
+
+            result = _run_launcher(
+                repo_root,
+                "--profile",
+                "turbo",
+                str(plan_path),
+                env=_launcher_environment(
+                    repo_root,
+                    scenario="success",
+                    plan_path=plan_path,
+                    count_file=count_file,
+                    completed_plan_path=completed_plan_path,
+                    home_dir=home_dir,
+                ),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            run_dirs = sorted((repo_root / ".aflow" / "runs").iterdir())
+            run_dir = run_dirs[0]
+            run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+            self.assertEqual(run_json["harness"], "codex")
+            self.assertEqual(run_json["model"], "gpt-5.4-turbo")
+            self.assertEqual(run_json["effort"], "high")
+
+            turn_dir = run_dir / "turns" / "turn-001"
+            argv = json.loads((turn_dir / "argv.json").read_text(encoding="utf-8"))
+            self.assertIn("--model", argv["argv"])
+            self.assertIn("gpt-5.4-turbo", argv["argv"])
+            self.assertIn("-c", argv["argv"])
+            self.assertIn("model_reasoning_effort='\"high\"'", argv["argv"])
+
+    def test_launcher_fails_when_profile_missing_for_resolved_harness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            repo_root = _copy_aflow_repo(tmp_path)
+            home_dir = tmp_path / "home"
+            home_dir.mkdir()
+            _write_config(
+                home_dir,
+                """default_harness = "codex"
+
+[harness.codex]
+model = "gpt-5.4"
+""",
+            )
+            plan_path = tmp_path / "plan.md"
+            count_file = tmp_path / "count.txt"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+""",
+            )
+            for harness in ALL_HARNESSES:
+                _write_fake_harness(repo_root, harness)
+
+            result = _run_launcher(
+                repo_root,
+                "--profile",
+                "turbo",
+                str(plan_path),
+                env=_launcher_environment(
+                    repo_root,
+                    scenario="success",
+                    plan_path=plan_path,
+                    count_file=count_file,
+                    home_dir=home_dir,
+                ),
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("unknown profile 'turbo' for harness 'codex'", result.stderr)
+            self.assertFalse((repo_root / ".aflow" / "runs").exists())
 
     def test_launcher_with_effort_writes_effort_argv(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

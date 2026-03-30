@@ -13,7 +13,7 @@ class PiAdapter:
         self,
         *,
         repo_root: Path,
-        model: str,
+        model: str | None,
         system_prompt: str,
         user_prompt: str,
         effort: str | None = None,
@@ -24,10 +24,12 @@ class PiAdapter:
             "--system-prompt",
             system_prompt,
         ]
-        if effort is not None:
+        if model is not None and effort is not None:
             argv.extend(["--models", f"{model}:{effort}"])
-        else:
+        elif model is not None:
             argv.extend(["--model", model])
+        elif effort is not None:
+            argv.extend(["--thinking", effort])
         argv.extend(["--tools", "read,bash,edit,write,grep,find,ls"])
         argv.append(user_prompt)
         return HarnessInvocation(
