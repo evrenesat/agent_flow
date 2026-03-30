@@ -38,6 +38,7 @@ from aflow.cli import build_parser, main
 from aflow.harnesses.claude import ClaudeAdapter
 from aflow.harnesses.codex import CodexAdapter
 from aflow.harnesses.gemini import GeminiAdapter
+from aflow.harnesses.kiro import KiroAdapter
 from aflow.harnesses.opencode import OpencodeAdapter
 from aflow.harnesses.pi import PiAdapter
 from aflow.harnesses.base import HarnessInvocation
@@ -660,6 +661,77 @@ class AdaptersTests(unittest.TestCase):
 
         self.assertNotIn("--model", invocation.argv)
         self.assertEqual(invocation.argv[0], "gemini")
+
+    def test_kiro_without_effort(self) -> None:
+        adapter = KiroAdapter()
+        invocation = adapter.build_invocation(
+            repo_root=Path("/repo"),
+            model="kiro-model",
+            system_prompt="SYSTEM",
+            user_prompt="USER",
+        )
+
+        self.assertFalse(adapter.supports_effort)
+        self.assertEqual(
+            invocation.argv,
+            (
+                "kiro-cli",
+                "chat",
+                "--no-interactive",
+                "--trust-all-tools",
+                "--model",
+                "kiro-model",
+                "SYSTEM\n\nUSER",
+            ),
+        )
+        self.assertEqual(invocation.prompt_mode, "prefix-system-into-user-prompt")
+        self.assertEqual(invocation.effective_prompt, "SYSTEM\n\nUSER")
+
+    def test_kiro_without_model_omits_model_flag(self) -> None:
+        adapter = KiroAdapter()
+        invocation = adapter.build_invocation(
+            repo_root=Path("/repo"),
+            model=None,
+            system_prompt="SYSTEM",
+            user_prompt="USER",
+        )
+
+        self.assertNotIn("--model", invocation.argv)
+        self.assertEqual(
+            invocation.argv,
+            (
+                "kiro-cli",
+                "chat",
+                "--no-interactive",
+                "--trust-all-tools",
+                "SYSTEM\n\nUSER",
+            ),
+        )
+
+    def test_kiro_ignores_effort(self) -> None:
+        adapter = KiroAdapter()
+        invocation = adapter.build_invocation(
+            repo_root=Path("/repo"),
+            model="kiro-model",
+            system_prompt="SYSTEM",
+            user_prompt="USER",
+            effort="high",
+        )
+
+        self.assertFalse(adapter.supports_effort)
+        self.assertNotIn("effort", " ".join(invocation.argv).lower())
+        self.assertEqual(
+            invocation.argv,
+            (
+                "kiro-cli",
+                "chat",
+                "--no-interactive",
+                "--trust-all-tools",
+                "--model",
+                "kiro-model",
+                "SYSTEM\n\nUSER",
+            ),
+        )
 
 
 class LazyBannerTests(unittest.TestCase):
@@ -3171,6 +3243,91 @@ p = "Work from {ACTIVE_PLAN_PATH}."
             self.assertEqual(run_json["status"], "completed")
             self.assertEqual(run_json["workflow_name"], "simple")
             self.assertEqual(run_json["turns_completed"], 1)
+
+    def test_kiro_workflow_invokes_chat_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            repo_root = _copy_aflow_repo(tmp_path)
+            home_dir = tmp_path / "home"
+            home_dir.mkdir()
+
+            _write_config(
+                home_dir,
+                """\
+[aflow]
+default_workflow = "simple"
+
+[harness.kiro.profiles.default]
+model = "kiro-model"
+
+[workflow.simple.steps.implement_plan]
+profile = "kiro.default"
+prompts = ["p"]
+go = [
+  { to = "END", when = "DONE || MAX_TURNS_REACHED" },
+  { to = "implement_plan" },
+]
+
+[prompts]
+p = "Work from {ACTIVE_PLAN_PATH}."
+""",
+            )
+
+            plan_path = tmp_path / "plan.md"
+            completed_plan_path = tmp_path / "completed.md"
+            count_file = tmp_path / "count.txt"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+""",
+            )
+            _write_plan(
+                completed_plan_path,
+                """# Plan
+
+### [x] Checkpoint 1: First
+- [x] step one
+""",
+            )
+            _write_workflow_harness_script(repo_root, "kiro-cli")
+
+            result = _run_workflow_launcher(
+                repo_root,
+                str(plan_path),
+                env=_workflow_test_env(
+                    repo_root,
+                    scenario="complete",
+                    plan_path=plan_path,
+                    count_file=count_file,
+                    home_dir=home_dir,
+                    completed_plan_path=completed_plan_path,
+                ),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            run_dirs = sorted((repo_root / ".aflow" / "runs").iterdir())
+            self.assertEqual(len(run_dirs), 1)
+            run_json = json.loads((run_dirs[0] / "run.json").read_text(encoding="utf-8"))
+            self.assertEqual(run_json["status"], "completed")
+            self.assertEqual(run_json["turns_completed"], 1)
+
+            turn_dir = run_dirs[0] / "turns" / "turn-001"
+            turn_result = json.loads((turn_dir / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(turn_result["selector"], "kiro.default")
+
+            argv_json = json.loads((turn_dir / "argv.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                argv_json["argv"][:4],
+                [
+                    "kiro-cli",
+                    "chat",
+                    "--no-interactive",
+                    "--trust-all-tools",
+                ],
+            )
 
     def test_reviewer_created_plan_becomes_active_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "aflow"
 version = "0.1.0"
-description = "Self-contained plan checkpoint controller for claude, codex, gemini, opencode, and pi"
+description = "Self-contained plan checkpoint controller for claude, codex, gemini, kiro, opencode, and pi"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

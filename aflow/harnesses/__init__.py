@@ -4,6 +4,7 @@ from .base import HarnessAdapter, HarnessInvocation
 from .claude import ClaudeAdapter
 from .codex import CodexAdapter
 from .gemini import GeminiAdapter
+from .kiro import KiroAdapter
 from .opencode import OpencodeAdapter
 from .pi import PiAdapter
 
@@ -12,6 +13,7 @@ ADAPTERS: dict[str, HarnessAdapter] = {
     "claude": ClaudeAdapter(),
     "codex": CodexAdapter(),
     "gemini": GeminiAdapter(),
+    "kiro": KiroAdapter(),
     "opencode": OpencodeAdapter(),
     "pi": PiAdapter(),
 }

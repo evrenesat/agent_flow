@@ -1,6 +1,6 @@
 # aflow
 
-`aflow` is a plan-driven workflow runner for `codex`, `claude`, `opencode`, `pi`, and `gemini`. It reads a checkpoint plan from disk, runs one fresh harness process per workflow step, and follows explicit transition rules to decide what happens next.
+`aflow` is a plan-driven workflow runner for `codex`, `claude`, `gemini`, `kiro`, `opencode`, and `pi`. It reads a checkpoint plan from disk, runs one fresh harness process per workflow step, and follows explicit transition rules to decide what happens next.
 
 ## Install
 
@@ -58,6 +58,9 @@ effort = "high"
 model = "FILL_IN_MODEL"
 effort = "medium"
 
+[harness.kiro.profiles.default]
+model = "FILL_IN_MODEL"
+
 [workflow.simple.steps.implement_plan]
 profile = "opencode.default"
 prompts = ["implementation_prompt"]
@@ -91,7 +94,7 @@ review_squash = "Review progress against {ORIGINAL_PLAN_PATH}. Write new plan to
 make_review_plan = "Create the next plan at {NEW_PLAN_PATH}. Use {ACTIVE_PLAN_PATH} as input."
 ```
 
-Supported harnesses are `claude`, `codex`, `gemini`, `opencode`, and `pi`.
+Supported harnesses are `claude`, `codex`, `gemini`, `kiro`, `opencode`, and `pi`.
 
 ### Config Rules
 
@@ -135,7 +138,10 @@ Each harness uses a documented headless mode with full permissions:
 - `gemini` uses `--prompt` (not positional query), `--approval-mode yolo`, and `--sandbox=false`
 - `codex` uses `exec` with `--dangerously-bypass-approvals-and-sandbox`
 - `claude` uses `-p` with `--permission-mode bypassPermissions` and `--dangerously-skip-permissions`
+- `kiro` uses `chat` with `--no-interactive` and `--trust-all-tools`
 - `pi` uses `--print` with a `--tools` list
+
+Kiro currently uses its default agent in `aflow`, so there is no profile-level `agent` setting yet.
 
 ## Limits
 
