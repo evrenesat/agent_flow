@@ -135,6 +135,17 @@ def _make_banner(config: ControllerConfig) -> BannerRenderer:
     )
 
 
+def _record_snapshot(state: ControllerState, snapshot: PlanSnapshot) -> None:
+    changed = snapshot.signature != state.last_snapshot.signature
+    if changed:
+        state.stagnation_turns = 0
+    else:
+        state.stagnation_turns += 1
+        state.issues_accumulated += 1
+    state.last_snapshot = snapshot
+    state.turns_completed += 1
+
+
 def run_controller(
     config: ControllerConfig,
     *,
@@ -290,7 +301,7 @@ def run_controller(
             status="completed" if post_snapshot.is_complete else "running",
         )
 
-        state.record_snapshot(post_snapshot)
+        _record_snapshot(state, post_snapshot)
         write_run_metadata(
             run_paths,
             config,

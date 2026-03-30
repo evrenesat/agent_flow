@@ -35,11 +35,22 @@ from aflow.config import (
     resolve_launch_config,
     validate_workflow_config,
 )
+from aflow.workflow import (
+    WorkflowError,
+    evaluate_condition,
+    generate_new_plan_path,
+    pick_transition,
+    render_prompt,
+    render_step_prompts,
+    resolve_profile,
+    run_workflow,
+)
 from aflow.harnesses.claude import ClaudeAdapter
 from aflow.harnesses.codex import CodexAdapter
 from aflow.harnesses.gemini import GeminiAdapter
 from aflow.harnesses.opencode import OpencodeAdapter
 from aflow.harnesses.pi import PiAdapter
+from aflow.harnesses.base import HarnessInvocation
 from aflow.plan import PlanParseError, PlanSnapshot, load_plan
 from aflow.run_state import ControllerConfig, ControllerState
 from aflow.runlog import create_run_paths, prune_old_runs
@@ -2953,6 +2964,1185 @@ p = "do it"
             with self.assertRaises(ConfigError) as ctx:
                 load_workflow_config(config_path)
             self.assertIn("to", str(ctx.exception))
+
+
+class WorkflowRuntimeTests(unittest.TestCase):
+    def test_prompt_rendering_supports_inline_and_file_uri_templates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            prompt_file = config_dir / "custom_prompt.txt"
+            prompt_file.write_text("File content with {ACTIVE_PLAN_PATH}", encoding="utf-8")
+            original = config_dir / "plan.md"
+            new_plan = config_dir / "plan-cp01-v01.md"
+            active = config_dir / "plan.md"
+
+            result = render_prompt(
+                "file://custom_prompt.txt",
+                config_dir=config_dir,
+                original_plan_path=original,
+                new_plan_path=new_plan,
+                active_plan_path=active,
+            )
+            self.assertEqual(result, f"File content with {active}")
+
+            result_inline = render_prompt(
+                "Work from {ACTIVE_PLAN_PATH}. New: {NEW_PLAN_PATH}. Original: {ORIGINAL_PLAN_PATH}",
+                config_dir=config_dir,
+                original_plan_path=original,
+                new_plan_path=new_plan,
+                active_plan_path=active,
+            )
+            self.assertEqual(result_inline, f"Work from {active}. New: {new_plan}. Original: {original}")
+
+    def test_prompt_rendering_rejects_missing_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            with self.assertRaises(WorkflowError) as ctx:
+                render_prompt(
+                    "file://nonexistent.txt",
+                    config_dir=config_dir,
+                    original_plan_path=Path("/fake/plan.md"),
+                    new_plan_path=Path("/fake/new.md"),
+                    active_plan_path=Path("/fake/plan.md"),
+                )
+            self.assertIn("not found", str(ctx.exception))
+
+    def test_render_step_prompts_unknown_key_raises(self) -> None:
+        step = WorkflowStepConfig(profile="opencode.default", prompts=("missing_key",))
+        config = WorkflowUserConfig(prompts={})
+        with self.assertRaises(WorkflowError) as ctx:
+            render_step_prompts(
+                step,
+                config,
+                config_dir=Path("/cfg"),
+                original_plan_path=Path("/p.md"),
+                new_plan_path=Path("/n.md"),
+                active_plan_path=Path("/a.md"),
+            )
+        self.assertIn("missing_key", str(ctx.exception))
+
+    def test_render_step_prompts_joins_multiple_prompts(self) -> None:
+        step = WorkflowStepConfig(profile="opencode.default", prompts=("p1", "p2"))
+        config = WorkflowUserConfig(prompts={"p1": "First {ORIGINAL_PLAN_PATH}", "p2": "Second {ACTIVE_PLAN_PATH}"})
+        result = render_step_prompts(
+            step,
+            config,
+            config_dir=Path("/cfg"),
+            original_plan_path=Path("/orig.md"),
+            new_plan_path=Path("/new.md"),
+            active_plan_path=Path("/active.md"),
+        )
+        self.assertEqual(result, "First /orig.md\n\nSecond /active.md")
+
+    def test_new_plan_path_increments_version_for_checkpoint_anchor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            parent = Path(tmpdir)
+            original = parent / "plan.md"
+            original.write_text("dummy", encoding="utf-8")
+
+            p1 = generate_new_plan_path(original, checkpoint_index=1)
+            self.assertEqual(p1.name, "plan-cp01-v01.md")
+
+            p1.touch()
+            p2 = generate_new_plan_path(original, checkpoint_index=1)
+            self.assertEqual(p2.name, "plan-cp01-v02.md")
+
+            p2.touch()
+            p3 = generate_new_plan_path(original, checkpoint_index=1)
+            self.assertEqual(p3.name, "plan-cp01-v03.md")
+
+            p4 = generate_new_plan_path(original, checkpoint_index=2)
+            self.assertEqual(p4.name, "plan-cp02-v01.md")
+
+    def test_new_plan_path_uses_correct_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            parent = Path(tmpdir)
+            original = parent / "plan.markdown"
+            original.write_text("dummy", encoding="utf-8")
+            p1 = generate_new_plan_path(original, checkpoint_index=1)
+            self.assertEqual(p1.name, "plan-cp01-v01.markdown")
+
+    def test_new_plan_path_none_checkpoint_uses_one(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            parent = Path(tmpdir)
+            original = parent / "plan.md"
+            original.write_text("dummy", encoding="utf-8")
+            p1 = generate_new_plan_path(original, checkpoint_index=None)
+            self.assertEqual(p1.name, "plan-cp01-v01.md")
+
+    def test_condition_parsing_simple_symbols(self) -> None:
+        self.assertTrue(evaluate_condition("DONE", done=True, new_plan_exists=False, max_turns_reached=False))
+        self.assertFalse(evaluate_condition("DONE", done=False, new_plan_exists=False, max_turns_reached=False))
+        self.assertTrue(evaluate_condition("NEW_PLAN_EXISTS", done=False, new_plan_exists=True, max_turns_reached=False))
+        self.assertTrue(evaluate_condition("MAX_TURNS_REACHED", done=False, new_plan_exists=False, max_turns_reached=True))
+
+    def test_condition_parsing_or(self) -> None:
+        self.assertTrue(evaluate_condition("DONE || MAX_TURNS_REACHED", done=True, new_plan_exists=False, max_turns_reached=False))
+        self.assertTrue(evaluate_condition("DONE || MAX_TURNS_REACHED", done=False, new_plan_exists=False, max_turns_reached=True))
+        self.assertFalse(evaluate_condition("DONE || MAX_TURNS_REACHED", done=False, new_plan_exists=False, max_turns_reached=False))
+
+    def test_condition_parsing_and(self) -> None:
+        self.assertTrue(evaluate_condition("DONE && NEW_PLAN_EXISTS", done=True, new_plan_exists=True, max_turns_reached=False))
+        self.assertFalse(evaluate_condition("DONE && NEW_PLAN_EXISTS", done=True, new_plan_exists=False, max_turns_reached=False))
+
+    def test_condition_parsing_negation(self) -> None:
+        self.assertTrue(evaluate_condition("!DONE", done=False, new_plan_exists=False, max_turns_reached=False))
+        self.assertFalse(evaluate_condition("!DONE", done=True, new_plan_exists=False, max_turns_reached=False))
+
+    def test_condition_parsing_parentheses(self) -> None:
+        self.assertTrue(evaluate_condition("(DONE || MAX_TURNS_REACHED) && NEW_PLAN_EXISTS", done=True, new_plan_exists=True, max_turns_reached=False))
+        self.assertFalse(evaluate_condition("(DONE || MAX_TURNS_REACHED) && NEW_PLAN_EXISTS", done=False, new_plan_exists=False, max_turns_reached=False))
+
+    def test_condition_parsing_complex(self) -> None:
+        expr = "!(DONE || MAX_TURNS_REACHED) && NEW_PLAN_EXISTS"
+        self.assertTrue(evaluate_condition(expr, done=False, new_plan_exists=True, max_turns_reached=False))
+        self.assertFalse(evaluate_condition(expr, done=True, new_plan_exists=True, max_turns_reached=False))
+
+    def test_ordered_transitions_first_match_wins(self) -> None:
+        transitions = (
+            GoTransition(to="END", when="DONE"),
+            GoTransition(to="END", when="MAX_TURNS_REACHED"),
+            GoTransition(to="step2"),
+        )
+        self.assertEqual(pick_transition(transitions, step_path="workflow.w.steps.s", done=True, new_plan_exists=False, max_turns_reached=False), "END")
+        self.assertEqual(pick_transition(transitions, step_path="workflow.w.steps.s", done=False, new_plan_exists=False, max_turns_reached=True), "END")
+        self.assertEqual(pick_transition(transitions, step_path="workflow.w.steps.s", done=False, new_plan_exists=False, max_turns_reached=False), "step2")
+
+    def test_ordered_transitions_unconditional_fallback(self) -> None:
+        transitions = (
+            GoTransition(to="END", when="DONE"),
+            GoTransition(to="step2"),
+        )
+        self.assertEqual(pick_transition(transitions, step_path="workflow.w.steps.s", done=False, new_plan_exists=False, max_turns_reached=False), "step2")
+        self.assertEqual(pick_transition(transitions, step_path="workflow.w.steps.s", done=True, new_plan_exists=False, max_turns_reached=False), "END")
+
+    def test_pick_transition_no_match_raises(self) -> None:
+        transitions = (
+            GoTransition(to="END", when="DONE"),
+            GoTransition(to="END", when="NEW_PLAN_EXISTS"),
+        )
+        with self.assertRaises(WorkflowError) as ctx:
+            pick_transition(transitions, step_path="workflow.w.steps.s", done=False, new_plan_exists=False, max_turns_reached=False)
+        self.assertIn("no transition matched", str(ctx.exception))
+
+    def test_resolve_profile_success(self) -> None:
+        config = WorkflowUserConfig(
+            harnesses={
+                "opencode": WorkflowHarnessConfig(
+                    profiles={"default": HarnessProfileConfig(model="m", effort="high")}
+                )
+            },
+        )
+        result = resolve_profile("opencode.default", config, step_path="workflow.w.steps.s")
+        self.assertEqual(result.harness_name, "opencode")
+        self.assertEqual(result.profile_name, "default")
+        self.assertEqual(result.model, "m")
+        self.assertEqual(result.effort, "high")
+
+    def test_resolve_profile_unknown_harness_raises(self) -> None:
+        config = WorkflowUserConfig()
+        with self.assertRaises(WorkflowError) as ctx:
+            resolve_profile("unknown.default", config, step_path="workflow.w.steps.s")
+        self.assertIn("unknown harness", str(ctx.exception))
+
+    def test_resolve_profile_unknown_profile_raises(self) -> None:
+        config = WorkflowUserConfig(
+            harnesses={"opencode": WorkflowHarnessConfig(profiles={})}
+        )
+        with self.assertRaises(WorkflowError) as ctx:
+            resolve_profile("opencode.missing", config, step_path="workflow.w.steps.s")
+        self.assertIn("unknown profile", str(ctx.exception))
+
+    def test_resolve_profile_bare_selector_raises(self) -> None:
+        config = WorkflowUserConfig()
+        with self.assertRaises(WorkflowError) as ctx:
+            resolve_profile("opencode", config, step_path="workflow.w.steps.s")
+        self.assertIn("fully qualified", str(ctx.exception))
+
+    def test_workflow_ends_only_via_end_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            config_dir = repo_root
+            plan_path = repo_root / "plan.md"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+""",
+            )
+
+            wf_config = WorkflowUserConfig(
+                harnesses={
+                    "codex": WorkflowHarnessConfig(
+                        profiles={"default": HarnessProfileConfig(model="gpt-5.4")}
+                    )
+                },
+                workflows={
+                    "simple": WorkflowConfig(
+                        steps={
+                            "implement_plan": WorkflowStepConfig(
+                                profile="codex.default",
+                                prompts=("implementation_prompt",),
+                                go=(
+                                    GoTransition(to="END", when="DONE || MAX_TURNS_REACHED"),
+                                    GoTransition(to="implement_plan"),
+                                ),
+                            )
+                        },
+                        first_step="implement_plan",
+                    )
+                },
+                prompts={"implementation_prompt": "Work from {ACTIVE_PLAN_PATH}."},
+            )
+
+            call_count = 0
+
+            def runner(argv, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                _write_plan(
+                    plan_path,
+                    """# Plan
+
+### [x] Checkpoint 1: First
+- [x] step one
+""",
+                )
+                return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+            controller_config = ControllerConfig(
+                repo_root=repo_root,
+                plan_path=plan_path,
+                max_turns=5,
+            )
+
+            result = run_workflow(
+                controller_config,
+                wf_config,
+                "simple",
+                config_dir=config_dir,
+                adapter=CodexAdapter(),
+                runner=runner,
+            )
+
+            self.assertEqual(result.turns_completed, 1)
+            self.assertTrue(result.final_snapshot.is_complete)
+            self.assertEqual(call_count, 1)
+
+    def test_workflow_loops_implementer_steps_without_stagnation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            config_dir = repo_root
+            plan_path = repo_root / "plan.md"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+- [ ] step two
+""",
+            )
+
+            wf_config = WorkflowUserConfig(
+                harnesses={
+                    "codex": WorkflowHarnessConfig(
+                        profiles={"default": HarnessProfileConfig(model="gpt-5.4")}
+                    )
+                },
+                workflows={
+                    "simple": WorkflowConfig(
+                        steps={
+                            "implement_plan": WorkflowStepConfig(
+                                profile="codex.default",
+                                prompts=("implementation_prompt",),
+                                go=(
+                                    GoTransition(to="END", when="DONE || MAX_TURNS_REACHED"),
+                                    GoTransition(to="implement_plan"),
+                                ),
+                            )
+                        },
+                        first_step="implement_plan",
+                    )
+                },
+                prompts={"implementation_prompt": "Work from {ACTIVE_PLAN_PATH}."},
+            )
+
+            call_count = 0
+
+            def runner(argv, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    _write_plan(
+                        plan_path,
+                        """# Plan
+
+### [ ] Checkpoint 1: First
+- [x] step one
+- [ ] step two
+""",
+                    )
+                elif call_count == 2:
+                    _write_plan(
+                        plan_path,
+                        """# Plan
+
+### [x] Checkpoint 1: First
+- [x] step one
+- [x] step two
+""",
+                    )
+                return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+            controller_config = ControllerConfig(
+                repo_root=repo_root,
+                plan_path=plan_path,
+                max_turns=5,
+            )
+
+            result = run_workflow(
+                controller_config,
+                wf_config,
+                "simple",
+                config_dir=config_dir,
+                adapter=CodexAdapter(),
+                runner=runner,
+            )
+
+            self.assertEqual(result.turns_completed, 2)
+            self.assertTrue(result.final_snapshot.is_complete)
+            self.assertEqual(call_count, 2)
+
+    def test_active_plan_updates_only_when_generated_file_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            config_dir = repo_root
+            plan_path = repo_root / "plan.md"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+""",
+            )
+
+            active_plan_paths: list[Path] = []
+
+            def runner(argv, **kwargs):
+                user_prompt_text = kwargs.get("capture_output", False)
+                return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+            wf_config = WorkflowUserConfig(
+                harnesses={
+                    "codex": WorkflowHarnessConfig(
+                        profiles={"default": HarnessProfileConfig(model="gpt-5.4")}
+                    )
+                },
+                workflows={
+                    "loop": WorkflowConfig(
+                        steps={
+                            "review": WorkflowStepConfig(
+                                profile="codex.default",
+                                prompts=("review_prompt",),
+                                go=(GoTransition(to="implement"),),
+                            ),
+                            "implement": WorkflowStepConfig(
+                                profile="codex.default",
+                                prompts=("impl_prompt",),
+                                go=(
+                                    GoTransition(to="END", when="DONE || MAX_TURNS_REACHED"),
+                                    GoTransition(to="review"),
+                                ),
+                            ),
+                        },
+                        first_step="review",
+                    )
+                },
+                prompts={
+                    "review_prompt": "Review. New plan: {NEW_PLAN_PATH}. Active: {ACTIVE_PLAN_PATH}.",
+                    "impl_prompt": "Implement. New plan: {NEW_PLAN_PATH}. Active: {ACTIVE_PLAN_PATH}.",
+                },
+            )
+
+            turn_number = [0]
+            captured_prompts: list[str] = []
+
+            def capturing_runner(argv, **kwargs):
+                turn_number[0] += 1
+                if turn_number[0] == 1:
+                    _write_plan(
+                        plan_path,
+                        """# Plan
+
+### [x] Checkpoint 1: First
+- [x] step one
+""",
+                    )
+                return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+            controller_config = ControllerConfig(
+                repo_root=repo_root,
+                plan_path=plan_path,
+                max_turns=5,
+            )
+
+            run_workflow(
+                controller_config,
+                wf_config,
+                "loop",
+                config_dir=config_dir,
+                adapter=CodexAdapter(),
+                runner=capturing_runner,
+            )
+
+    def test_active_plan_remains_unchanged_when_review_does_not_create_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            config_dir = repo_root
+            plan_path = repo_root / "plan.md"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+- [ ] step two
+""",
+            )
+
+            captured_active_paths: list[str] = []
+
+            def capturing_runner(argv, **kwargs):
+                prompt_text = " ".join(argv)
+                import re
+                match = re.search(r"Active: (\S+)", prompt_text)
+                if match:
+                    captured = match.group(1).rstrip(".")
+                    captured_active_paths.append(captured)
+                return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+            wf_config = WorkflowUserConfig(
+                harnesses={
+                    "codex": WorkflowHarnessConfig(
+                        profiles={"default": HarnessProfileConfig(model="gpt-5.4")}
+                    )
+                },
+                workflows={
+                    "loop": WorkflowConfig(
+                        steps={
+                            "review": WorkflowStepConfig(
+                                profile="codex.default",
+                                prompts=("review_prompt",),
+                                go=(GoTransition(to="implement"),),
+                            ),
+                            "implement": WorkflowStepConfig(
+                                profile="codex.default",
+                                prompts=("impl_prompt",),
+                                go=(
+                                    GoTransition(to="END", when="DONE || MAX_TURNS_REACHED"),
+                                    GoTransition(to="review"),
+                                ),
+                            ),
+                        },
+                        first_step="review",
+                    )
+                },
+                prompts={
+                    "review_prompt": "Active: {ACTIVE_PLAN_PATH}. New: {NEW_PLAN_PATH}.",
+                    "impl_prompt": "Active: {ACTIVE_PLAN_PATH}. New: {NEW_PLAN_PATH}.",
+                },
+            )
+
+            controller_config = ControllerConfig(
+                repo_root=repo_root,
+                plan_path=plan_path,
+                max_turns=4,
+            )
+
+            run_workflow(
+                controller_config,
+                wf_config,
+                "loop",
+                config_dir=config_dir,
+                adapter=CodexAdapter(),
+                runner=capturing_runner,
+            )
+
+            for p in captured_active_paths:
+                self.assertEqual(str(plan_path), p)
+
+    def test_active_plan_updates_when_generated_file_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            config_dir = repo_root
+            plan_path = repo_root / "plan.md"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+""",
+            )
+
+            captured_active_paths: list[str] = []
+            turn_counter = [0]
+
+            def capturing_runner(argv, **kwargs):
+                turn_counter[0] += 1
+                prompt_text = " ".join(argv)
+                import re as re_mod
+                match = re_mod.search(r"Active: (\S+)", prompt_text)
+                if match:
+                    captured_active_paths.append(match.group(1).rstrip("."))
+                if turn_counter[0] == 1:
+                    new_path = repo_root / "plan-cp01-v01.md"
+                    new_path.write_text("# Generated plan", encoding="utf-8")
+                    _write_plan(
+                        plan_path,
+                        """# Plan
+
+### [x] Checkpoint 1: First
+- [x] step one
+""",
+                    )
+                return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+            wf_config = WorkflowUserConfig(
+                harnesses={
+                    "codex": WorkflowHarnessConfig(
+                        profiles={"default": HarnessProfileConfig(model="gpt-5.4")}
+                    )
+                },
+                workflows={
+                    "loop": WorkflowConfig(
+                        steps={
+                            "review": WorkflowStepConfig(
+                                profile="codex.default",
+                                prompts=("review_prompt",),
+                                go=(GoTransition(to="implement"),),
+                            ),
+                            "implement": WorkflowStepConfig(
+                                profile="codex.default",
+                                prompts=("impl_prompt",),
+                                go=(
+                                    GoTransition(to="END", when="DONE || MAX_TURNS_REACHED"),
+                                    GoTransition(to="review"),
+                                ),
+                            ),
+                        },
+                        first_step="review",
+                    )
+                },
+                prompts={
+                    "review_prompt": "Active: {ACTIVE_PLAN_PATH}. New: {NEW_PLAN_PATH}.",
+                    "impl_prompt": "Active: {ACTIVE_PLAN_PATH}.",
+                },
+            )
+
+            controller_config = ControllerConfig(
+                repo_root=repo_root,
+                plan_path=plan_path,
+                max_turns=5,
+            )
+
+            run_workflow(
+                controller_config,
+                wf_config,
+                "loop",
+                config_dir=config_dir,
+                adapter=CodexAdapter(),
+                runner=capturing_runner,
+            )
+
+            self.assertEqual(len(captured_active_paths), 2)
+            self.assertEqual(captured_active_paths[0], str(plan_path))
+            expected_new = str(repo_root / "plan-cp01-v01.md")
+            self.assertEqual(captured_active_paths[1], expected_new)
+
+    def test_workflow_multistep_review_and_implement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            config_dir = repo_root
+            plan_path = repo_root / "plan.md"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+""",
+            )
+
+            call_order: list[str] = []
+
+            def capturing_runner(argv, **kwargs):
+                call_order.append(argv[0])
+                _write_plan(
+                    plan_path,
+                    """# Plan
+
+### [x] Checkpoint 1: First
+- [x] step one
+""",
+                )
+                return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+            wf_config = WorkflowUserConfig(
+                harnesses={
+                    "claude": WorkflowHarnessConfig(
+                        profiles={"opus": HarnessProfileConfig(model="claude-opus-4")}
+                    ),
+                    "opencode": WorkflowHarnessConfig(
+                        profiles={"turbo": HarnessProfileConfig(model="glm-5-turbo")}
+                    ),
+                },
+                workflows={
+                    "review_loop": WorkflowConfig(
+                        steps={
+                            "review_plan": WorkflowStepConfig(
+                                profile="claude.opus",
+                                prompts=("review_prompt",),
+                                go=(GoTransition(to="implement_plan"),),
+                            ),
+                            "implement_plan": WorkflowStepConfig(
+                                profile="opencode.turbo",
+                                prompts=("impl_prompt",),
+                                go=(
+                                    GoTransition(to="END", when="DONE || MAX_TURNS_REACHED"),
+                                    GoTransition(to="review_plan"),
+                                ),
+                            ),
+                        },
+                        first_step="review_plan",
+                    )
+                },
+                prompts={
+                    "review_prompt": "Review the plan.",
+                    "impl_prompt": "Implement from {ACTIVE_PLAN_PATH}.",
+                },
+            )
+
+            controller_config = ControllerConfig(
+                repo_root=repo_root,
+                plan_path=plan_path,
+                max_turns=5,
+            )
+
+            result = run_workflow(
+                controller_config,
+                wf_config,
+                "review_loop",
+                config_dir=config_dir,
+                runner=capturing_runner,
+            )
+
+            self.assertEqual(result.turns_completed, 2)
+            self.assertTrue(result.final_snapshot.is_complete)
+            self.assertEqual(call_order, ["claude", "opencode"])
+
+    def test_workflow_max_turns_routing_to_end(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            config_dir = repo_root
+            plan_path = repo_root / "plan.md"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+""",
+            )
+
+            def runner(argv, **kwargs):
+                return subprocess.CompletedProcess(argv, 0, stdout="noop", stderr="")
+
+            wf_config = WorkflowUserConfig(
+                harnesses={
+                    "codex": WorkflowHarnessConfig(
+                        profiles={"default": HarnessProfileConfig(model="gpt-5.4")}
+                    )
+                },
+                workflows={
+                    "simple": WorkflowConfig(
+                        steps={
+                            "implement_plan": WorkflowStepConfig(
+                                profile="codex.default",
+                                prompts=("p",),
+                                go=(
+                                    GoTransition(to="END", when="DONE || MAX_TURNS_REACHED"),
+                                    GoTransition(to="implement_plan"),
+                                ),
+                            )
+                        },
+                        first_step="implement_plan",
+                    )
+                },
+                prompts={"p": "Work."},
+            )
+
+            controller_config = ControllerConfig(
+                repo_root=repo_root,
+                plan_path=plan_path,
+                max_turns=3,
+            )
+
+            result = run_workflow(
+                controller_config,
+                wf_config,
+                "simple",
+                config_dir=config_dir,
+                adapter=CodexAdapter(),
+                runner=runner,
+            )
+
+            self.assertEqual(result.turns_completed, 3)
+            self.assertFalse(result.final_snapshot.is_complete)
+
+    def test_workflow_no_matching_transition_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            config_dir = repo_root
+            plan_path = repo_root / "plan.md"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+""",
+            )
+
+            def runner(argv, **kwargs):
+                return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+            wf_config = WorkflowUserConfig(
+                harnesses={
+                    "codex": WorkflowHarnessConfig(
+                        profiles={"default": HarnessProfileConfig(model="gpt-5.4")}
+                    )
+                },
+                workflows={
+                    "simple": WorkflowConfig(
+                        steps={
+                            "implement_plan": WorkflowStepConfig(
+                                profile="codex.default",
+                                prompts=("p",),
+                                go=(
+                                    GoTransition(to="END", when="DONE"),
+                                ),
+                            )
+                        },
+                        first_step="implement_plan",
+                    )
+                },
+                prompts={"p": "Work."},
+            )
+
+            controller_config = ControllerConfig(
+                repo_root=repo_root,
+                plan_path=plan_path,
+                max_turns=3,
+            )
+
+            with self.assertRaises(WorkflowError) as ctx:
+                run_workflow(
+                    controller_config,
+                    wf_config,
+                    "simple",
+                    config_dir=config_dir,
+                    adapter=CodexAdapter(),
+                    runner=runner,
+                )
+            self.assertIn("no transition matched", str(ctx.exception))
+            self.assertIn("workflow.simple.steps.implement_plan", str(ctx.exception))
+            self.assertIn("DONE=False", str(ctx.exception))
+
+    def test_workflow_no_matching_transition_writes_failed_run_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            config_dir = repo_root
+            plan_path = repo_root / "plan.md"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+- [ ] step two
+""",
+            )
+
+            call_count = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    _write_plan(
+                        plan_path,
+                        """# Plan
+
+### [ ] Checkpoint 1: First
+- [x] step one
+- [ ] step two
+""",
+                    )
+                return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+            wf_config = WorkflowUserConfig(
+                harnesses={
+                    "codex": WorkflowHarnessConfig(
+                        profiles={"default": HarnessProfileConfig(model="gpt-5.4")}
+                    )
+                },
+                workflows={
+                    "loop": WorkflowConfig(
+                        steps={
+                            "review": WorkflowStepConfig(
+                                profile="codex.default",
+                                prompts=("p",),
+                                go=(GoTransition(to="implement"),),
+                            ),
+                            "implement": WorkflowStepConfig(
+                                profile="codex.default",
+                                prompts=("p",),
+                                go=(
+                                    GoTransition(to="END", when="DONE"),
+                                ),
+                            ),
+                        },
+                        first_step="review",
+                    )
+                },
+                prompts={"p": "Work."},
+            )
+
+            controller_config = ControllerConfig(
+                repo_root=repo_root,
+                plan_path=plan_path,
+                max_turns=5,
+            )
+
+            with self.assertRaises(WorkflowError) as ctx:
+                run_workflow(
+                    controller_config,
+                    wf_config,
+                    "loop",
+                    config_dir=config_dir,
+                    adapter=CodexAdapter(),
+                    runner=runner,
+                )
+
+            self.assertIn("workflow.loop.steps.implement", str(ctx.exception))
+            run_dir = ctx.exception.run_dir
+            self.assertIsNotNone(run_dir)
+            assert run_dir is not None
+            run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+            self.assertEqual(run_json["status"], "failed")
+            self.assertIn(run_json["failure_reason"], str(ctx.exception))
+            self.assertEqual(run_json["turns_completed"], 2)
+            self.assertEqual(run_json["last_snapshot"]["current_checkpoint_name"], "Checkpoint 1: First")
+
+    def test_workflow_done_reflects_original_plan_not_fix_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            config_dir = repo_root
+            plan_path = repo_root / "plan.md"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+""",
+            )
+
+            fix_plan = repo_root / "plan-cp01-v01.md"
+            _write_plan(
+                fix_plan,
+                """# Plan
+
+### [x] Checkpoint 1: First
+- [x] step one
+""",
+            )
+
+            turn_counter = [0]
+            ended_at_turn = [0]
+
+            def runner(argv, **kwargs):
+                turn_counter[0] += 1
+                ended_at_turn[0] = turn_counter[0]
+                return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+            wf_config = WorkflowUserConfig(
+                harnesses={
+                    "codex": WorkflowHarnessConfig(
+                        profiles={"default": HarnessProfileConfig(model="gpt-5.4")}
+                    )
+                },
+                workflows={
+                    "simple": WorkflowConfig(
+                        steps={
+                            "implement_plan": WorkflowStepConfig(
+                                profile="codex.default",
+                                prompts=("p",),
+                                go=(
+                                    GoTransition(to="END", when="DONE"),
+                                    GoTransition(to="implement_plan"),
+                                ),
+                            )
+                        },
+                        first_step="implement_plan",
+                    )
+                },
+                prompts={"p": "Work."},
+            )
+
+            controller_config = ControllerConfig(
+                repo_root=repo_root,
+                plan_path=plan_path,
+                max_turns=5,
+            )
+
+            with self.assertRaises(WorkflowError):
+                run_workflow(
+                    controller_config,
+                    wf_config,
+                    "simple",
+                    config_dir=config_dir,
+                    adapter=CodexAdapter(),
+                    runner=runner,
+                )
+
+            self.assertEqual(ended_at_turn[0], 5)
+
+    def test_workflow_missing_workflow_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / "plan.md"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+""",
+            )
+
+            controller_config = ControllerConfig(
+                repo_root=repo_root,
+                plan_path=plan_path,
+                max_turns=1,
+            )
+
+            with self.assertRaises(WorkflowError) as ctx:
+                run_workflow(
+                    controller_config,
+                    WorkflowUserConfig(),
+                    "nonexistent",
+                    config_dir=repo_root,
+                )
+            self.assertIn("not found", str(ctx.exception))
+
+    def test_workflow_extra_instructions_appended(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            config_dir = repo_root
+            plan_path = repo_root / "plan.md"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+""",
+            )
+
+            captured_user_prompts: list[str] = []
+
+            class CapturingAdapter:
+                name = "codex"
+                supports_effort = False
+
+                def build_invocation(self, *, repo_root, model, system_prompt, user_prompt, effort=None):
+                    captured_user_prompts.append(user_prompt)
+                    return HarnessInvocation(
+                        label="codex",
+                        argv=("codex", "run", user_prompt),
+                        env={},
+                        prompt_mode="prefix-system-into-user-prompt",
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        effective_prompt=f"{system_prompt}\n\n{user_prompt}" if system_prompt else user_prompt,
+                    )
+
+            wf_config = WorkflowUserConfig(
+                harnesses={
+                    "codex": WorkflowHarnessConfig(
+                        profiles={"default": HarnessProfileConfig(model="gpt-5.4")}
+                    )
+                },
+                workflows={
+                    "simple": WorkflowConfig(
+                        steps={
+                            "implement_plan": WorkflowStepConfig(
+                                profile="codex.default",
+                                prompts=("p",),
+                                go=(
+                                    GoTransition(to="END", when="DONE || MAX_TURNS_REACHED"),
+                                    GoTransition(to="implement_plan"),
+                                ),
+                            )
+                        },
+                        first_step="implement_plan",
+                    )
+                },
+                prompts={"p": "Work from {ACTIVE_PLAN_PATH}."},
+            )
+
+            controller_config = ControllerConfig(
+                repo_root=repo_root,
+                plan_path=plan_path,
+                max_turns=1,
+                extra_instructions=("be careful", "use tests"),
+            )
+
+            run_workflow(
+                controller_config,
+                wf_config,
+                "simple",
+                config_dir=config_dir,
+                adapter=CapturingAdapter(),
+                runner=lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, "", ""),
+            )
+
+            self.assertEqual(len(captured_user_prompts), 1)
+            self.assertIn("Work from", captured_user_prompts[0])
+            self.assertIn("be careful use tests", captured_user_prompts[0])
+
+    def test_workflow_harness_failure_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            config_dir = repo_root
+            plan_path = repo_root / "plan.md"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+""",
+            )
+
+            def runner(argv, **kwargs):
+                return subprocess.CompletedProcess(argv, 1, stdout="bad", stderr="err")
+
+            wf_config = WorkflowUserConfig(
+                harnesses={
+                    "codex": WorkflowHarnessConfig(
+                        profiles={"default": HarnessProfileConfig(model="gpt-5.4")}
+                    )
+                },
+                workflows={
+                    "simple": WorkflowConfig(
+                        steps={
+                            "implement_plan": WorkflowStepConfig(
+                                profile="codex.default",
+                                prompts=("p",),
+                                go=(
+                                    GoTransition(to="END", when="DONE"),
+                                    GoTransition(to="implement_plan"),
+                                ),
+                            )
+                        },
+                        first_step="implement_plan",
+                    )
+                },
+                prompts={"p": "Work."},
+            )
+
+            controller_config = ControllerConfig(
+                repo_root=repo_root,
+                plan_path=plan_path,
+                max_turns=3,
+            )
+
+            with self.assertRaises(WorkflowError) as ctx:
+                run_workflow(
+                    controller_config,
+                    wf_config,
+                    "simple",
+                    config_dir=config_dir,
+                    adapter=CodexAdapter(),
+                    runner=runner,
+                )
+            self.assertIn("exited with code 1", str(ctx.exception))
+
+    def test_workflow_already_complete_returns_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            config_dir = repo_root
+            plan_path = repo_root / "plan.md"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [x] Checkpoint 1: First
+- [x] step one
+""",
+            )
+
+            call_count = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                return subprocess.CompletedProcess(argv, 0, "ok", "")
+
+            wf_config = WorkflowUserConfig(
+                harnesses={
+                    "codex": WorkflowHarnessConfig(
+                        profiles={"default": HarnessProfileConfig(model="gpt-5.4")}
+                    )
+                },
+                workflows={
+                    "simple": WorkflowConfig(
+                        steps={
+                            "implement_plan": WorkflowStepConfig(
+                                profile="codex.default",
+                                prompts=("p",),
+                                go=(GoTransition(to="END"),),
+                            )
+                        },
+                        first_step="implement_plan",
+                    )
+                },
+                prompts={"p": "Work."},
+            )
+
+            controller_config = ControllerConfig(
+                repo_root=repo_root,
+                plan_path=plan_path,
+                max_turns=3,
+            )
+
+            result = run_workflow(
+                controller_config,
+                wf_config,
+                "simple",
+                config_dir=config_dir,
+                adapter=CodexAdapter(),
+                runner=runner,
+            )
+
+            self.assertEqual(result.turns_completed, 0)
+            self.assertTrue(result.final_snapshot.is_complete)
+            self.assertEqual(call_count[0], 0)
 
 
 if __name__ == "__main__":
