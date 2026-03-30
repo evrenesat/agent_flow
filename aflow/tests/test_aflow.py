@@ -1637,25 +1637,67 @@ p = "do it"
 class WorkflowRuntimeTests(unittest.TestCase):
     def test_prompt_rendering_supports_inline_and_file_uri_templates(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_dir = Path(tmpdir)
-            prompt_file = config_dir / "custom_prompt.txt"
-            prompt_file.write_text("File content with {ACTIVE_PLAN_PATH}", encoding="utf-8")
-            original = config_dir / "plan.md"
-            new_plan = config_dir / "plan-cp01-v01.md"
-            active = config_dir / "plan.md"
+            root = Path(tmpdir)
+            config_dir = root / "config"
+            working_dir = root / "cwd"
+            config_dir.mkdir()
+            working_dir.mkdir()
+
+            config_prompt = config_dir / "relative.txt"
+            config_prompt.write_text(
+                "Config content with {ACTIVE_PLAN_PATH}",
+                encoding="utf-8",
+            )
+            absolute_prompt = root / "absolute" / "path.txt"
+            absolute_prompt.parent.mkdir()
+            absolute_prompt.write_text(
+                "Absolute content with {ORIGINAL_PLAN_PATH}",
+                encoding="utf-8",
+            )
+            cwd_prompt = working_dir / "relative.txt"
+            cwd_prompt.write_text(
+                "Cwd content with {NEW_PLAN_PATH}",
+                encoding="utf-8",
+            )
+
+            original = root / "plan.md"
+            new_plan = root / "plan-cp01-v01.md"
+            active = root / "active.md"
 
             result = render_prompt(
-                "file://custom_prompt.txt",
+                "file://relative.txt",
                 config_dir=config_dir,
+                working_dir=working_dir,
                 original_plan_path=original,
                 new_plan_path=new_plan,
                 active_plan_path=active,
             )
-            self.assertEqual(result, f"File content with {active}")
+            self.assertEqual(result, f"Config content with {active}")
+
+            absolute_result = render_prompt(
+                f"file://{absolute_prompt}",
+                config_dir=config_dir,
+                working_dir=working_dir,
+                original_plan_path=original,
+                new_plan_path=new_plan,
+                active_plan_path=active,
+            )
+            self.assertEqual(absolute_result, f"Absolute content with {original}")
+
+            cwd_result = render_prompt(
+                "file://./relative.txt",
+                config_dir=config_dir,
+                working_dir=working_dir,
+                original_plan_path=original,
+                new_plan_path=new_plan,
+                active_plan_path=active,
+            )
+            self.assertEqual(cwd_result, f"Cwd content with {new_plan}")
 
             result_inline = render_prompt(
                 "Work from {ACTIVE_PLAN_PATH}. New: {NEW_PLAN_PATH}. Original: {ORIGINAL_PLAN_PATH}",
                 config_dir=config_dir,
+                working_dir=working_dir,
                 original_plan_path=original,
                 new_plan_path=new_plan,
                 active_plan_path=active,
@@ -1664,16 +1706,21 @@ class WorkflowRuntimeTests(unittest.TestCase):
 
     def test_prompt_rendering_rejects_missing_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_dir = Path(tmpdir)
+            root = Path(tmpdir)
+            config_dir = root / "config"
+            working_dir = root / "cwd"
+            config_dir.mkdir()
+            working_dir.mkdir()
             with self.assertRaises(WorkflowError) as ctx:
                 render_prompt(
-                    "file://nonexistent.txt",
+                    "file://./nonexistent.txt",
                     config_dir=config_dir,
+                    working_dir=working_dir,
                     original_plan_path=Path("/fake/plan.md"),
                     new_plan_path=Path("/fake/new.md"),
                     active_plan_path=Path("/fake/plan.md"),
                 )
-            self.assertIn("not found", str(ctx.exception))
+            self.assertIn(str(working_dir / "nonexistent.txt"), str(ctx.exception))
 
     def test_render_step_prompts_unknown_key_raises(self) -> None:
         step = WorkflowStepConfig(profile="opencode.default", prompts=("missing_key",))
@@ -1683,6 +1730,7 @@ class WorkflowRuntimeTests(unittest.TestCase):
                 step,
                 config,
                 config_dir=Path("/cfg"),
+                working_dir=Path("/cwd"),
                 original_plan_path=Path("/p.md"),
                 new_plan_path=Path("/n.md"),
                 active_plan_path=Path("/a.md"),
@@ -1696,6 +1744,7 @@ class WorkflowRuntimeTests(unittest.TestCase):
             step,
             config,
             config_dir=Path("/cfg"),
+            working_dir=Path("/cwd"),
             original_plan_path=Path("/orig.md"),
             new_plan_path=Path("/new.md"),
             active_plan_path=Path("/active.md"),
@@ -3570,6 +3619,24 @@ p = "Work."
             run_json = json.loads((run_dirs[0] / "run.json").read_text(encoding="utf-8"))
             self.assertEqual(run_json["status"], "completed")
             self.assertEqual(run_json["turns_completed"], 3)
+
+
+class SkillDocsTests(unittest.TestCase):
+    def test_skill_files_do_not_contain_workflow_placeholders(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        placeholders = ("{ORIGINAL_PLAN_PATH}", "{ACTIVE_PLAN_PATH}", "{NEW_PLAN_PATH}")
+        for skill_name in ("aflow-plan", "review-squash", "execute-aflow-plan"):
+            skill_path = repo_root / "skills" / skill_name / "SKILL.md"
+            text = skill_path.read_text(encoding="utf-8")
+            for placeholder in placeholders:
+                self.assertNotIn(placeholder, text, f"{skill_name} still contains {placeholder}")
+
+    def test_example_plan_uses_review_squash_spelling(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        example_text = (repo_root / "plans" / "example.toml").read_text(encoding="utf-8")
+        self.assertIn("review-squash", example_text)
+        typo = "-".join(("revive", "squash"))
+        self.assertNotIn(typo, example_text)
 
 
 if __name__ == "__main__":

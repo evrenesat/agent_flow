@@ -43,6 +43,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     repo_root = Path(__file__).resolve().parents[1]
+    working_dir = Path.cwd()
     plan_path = Path(args.plan_file).expanduser().resolve()
     extra_instructions = tuple(token for token in args.extra_instructions if token != "--")
     try:
@@ -99,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
             workflow_config,
             workflow_name,
             config_dir=config_path.parent,
+            working_dir=working_dir,
         )
     except WorkflowError as exc:
         print(exc.summary, file=sys.stderr)

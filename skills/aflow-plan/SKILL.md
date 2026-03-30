@@ -1,14 +1,16 @@
 ---
 name: aflow-plan
-description: "Create a strict AFlow checkpoint handoff plan for coding work that will be implemented by another model, tool, or later session. Use when the user explicitly wants the RALF pattern or a checkpoint-based handoff plan, and persist the finished plan under the current project's plans directory."
+description: "Create a strict AFlow checkpoint handoff plan for coding work that will be implemented by another model, tool, or later session. Use when the user explicitly wants the RALF pattern or a checkpoint-based handoff plan."
 ---
 
 # AFlow Handoff Plan
 
-Use this skill only for RALF-style planning.
+Use this skill only for RALF-style planning. It is designed to be installed as a static skill and driven by prompt context from the workflow engine or harness.
 
 ## Behavior
 
+- Treat prompt-supplied concrete plan context as authoritative when it is present.
+- If the prompt does not give a concrete path and there is exactly one safe target in the repo, use that narrow fallback. Otherwise stop and ask.
 - Ask targeted questions about scope, constraints, dependencies, tradeoffs, and acceptance criteria.
 - Confirm risky assumptions before locking the final plan.
 - Keep questions concise and sequenced.
@@ -17,6 +19,7 @@ Use this skill only for RALF-style planning.
 - Make the plan durable under crash, rerun, and later-session handoff. A fresh agent or thread must be able to resume from disk without relying on prior chat context.
 - Treat the original handoff plan as the long-lived ledger under `plans/in-progress/` until the handoff is complete.
 - Treat reviewer-created fix plans as temporary overlays for rejected work, not replacements for the original plan's long-lived state.
+- Make the final plan self-sufficient. It should not rely on a separate heavy executor skill to supply missing workflow details later.
 - Treat `ralf` and `ralph` as equivalent spellings.
 - If the user asks for planning but does not want RALF, do not use this skill.
 

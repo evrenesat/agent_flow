@@ -1,36 +1,80 @@
 # aflow
 
-`aflow` is a plan-driven workflow runner for `codex`, `claude`, `gemini`, `kiro`, `opencode`, and `pi`. It reads a checkpoint plan from disk, runs one fresh harness process per workflow step, and follows explicit transition rules to decide what happens next.
+`aflow` runs checkpoint-based coding plans through existing agent CLIs such as Codex, Claude, Gemini, Kiro, OpenCode, and Pi.
+
+It does not call provider APIs directly. It shells out to the harnesses you already use and have access to. The main use case is a stricter loop where a stronger model plans or reviews, a cheaper model implements the current checkpoint, and the run keeps moving until the original plan is done or the workflow reaches `END`.
 
 ## Install
 
-Install it as a tool with `uv`:
+Requires Python `3.11+`.
+
+Install with `uv`:
 
 ```bash
-uv tool install /Users/evren/code/agent_flow
+uv tool install git+https://github.com/evrenesat/agent_flow.git
 ```
 
-That gives you the `aflow` command on your `PATH`.
+That exposes the `aflow` command on your `PATH`.
 
-## Usage
-
-```bash
-aflow path/to/plan.md [extra instructions ...]
-aflow --workflow review_loop path/to/plan.md
-aflow --max-turns 10 path/to/plan.md
-```
-
-If `--workflow` is omitted, `aflow` uses `default_workflow` from config.
-
-From a source checkout:
+If you are working from a local checkout, you can also run:
 
 ```bash
 uv run python -m aflow path/to/plan.md
 ```
 
+## Usage
+
+```bash
+aflow path/to/plan.md
+aflow --workflow review_loop path/to/plan.md
+aflow --max-turns 10 path/to/plan.md
+aflow path/to/plan.md -- keep edits small and update docs if behavior changes
+```
+
+If `--workflow` is omitted, `aflow` uses `aflow.default_workflow` from config.
+
+## Why This Exists
+
+Some provider subscriptions and free monthly allowances are tied to the provider's own CLI or harness rather than an API budget. `aflow` is for that setup.
+
+Instead of building around direct API calls, `aflow` lets you:
+
+- keep planning and review with a stronger profile
+- delegate checkpoint-sized implementation work to a cheaper profile
+- carry state through a plan file on disk instead of chat history
+- enforce an explicit transition loop instead of an open-ended agent session
+
+## Plan Format
+
+`aflow` reads a Markdown plan from disk and derives progress from checkpoint headings plus unchecked task items inside each checkpoint.
+
+Minimal example:
+
+```md
+# Plan
+
+### [ ] Checkpoint 1: Wire The CLI
+- [ ] add the command entrypoint
+- [ ] cover it with tests
+
+### [ ] Checkpoint 2: Update Docs
+- [ ] document the final behavior
+```
+
+Current parser rules:
+
+- Checkpoint headings must start with `### [ ] Checkpoint ...` or `### [x] Checkpoint ...`.
+- Only task items under a checkpoint section count toward that checkpoint's remaining work.
+- A checked checkpoint heading cannot contain unchecked task items.
+- If no checkpoint sections are found, the run fails before starting.
+
 ## First Run
 
-When `~/.config/aflow/aflow.toml` does not exist, `aflow` creates a starter config with placeholder model values. Fill those in before running:
+`aflow` reads `~/.config/aflow/aflow.toml`.
+
+If that file does not exist, `aflow` writes a starter config and exits. The starter config includes placeholder model values that must be filled in before the first real run.
+
+Example:
 
 ```bash
 aflow path/to/plan.md
@@ -41,148 +85,159 @@ aflow path/to/plan.md
 
 ## Config
 
-`aflow` reads `~/.config/aflow/aflow.toml`. The config defines harness profiles, named workflows, step transitions, and prompt templates.
+Config is standard TOML. The current schema has four top-level sections:
+
+- `aflow`
+- `harness`
+- `workflow`
+- `prompts`
+
+Example:
 
 ```toml
 [aflow]
-default_workflow = "simple"
+default_workflow = "review_loop"
 
-[harness.opencode.profiles.default]
+[harness.opencode.profiles.implement]
 model = "zai-coding-plan/glm-4.7"
 
-[harness.codex.profiles.high]
+[harness.codex.profiles.review]
 model = "gpt-5.4"
 effort = "high"
 
-[harness.claude.profiles.opus]
-model = "FILL_IN_MODEL"
-effort = "medium"
-
-[harness.kiro.profiles.default]
-model = "FILL_IN_MODEL"
-
-[workflow.simple.steps.implement_plan]
-profile = "opencode.default"
-prompts = ["implementation_prompt"]
-go = [
-  { to = "END", when = "DONE || MAX_TURNS_REACHED" },
-  { to = "implement_plan" },
-]
-
 [workflow.review_loop.steps.review_plan]
-profile = "claude.opus"
-prompts = ["review_prompt"]
+profile = "codex.review"
+prompts = ["review_plan"]
 go = [{ to = "implement_plan" }]
 
 [workflow.review_loop.steps.implement_plan]
-profile = "opencode.default"
+profile = "opencode.implement"
 prompts = ["implementation_prompt"]
-go = [{ to = "review_implementation" }]
-
-[workflow.review_loop.steps.review_implementation]
-profile = "codex.high"
-prompts = ["review_squash", "make_review_plan"]
 go = [
   { to = "END", when = "DONE || MAX_TURNS_REACHED" },
+  { to = "review_plan", when = "NEW_PLAN_EXISTS" },
   { to = "implement_plan" },
 ]
 
 [prompts]
-implementation_prompt = "Work from {ACTIVE_PLAN_PATH}. Re-read the plan from disk before acting."
-review_prompt = "Review the plan at {ORIGINAL_PLAN_PATH} for weak spots."
-review_squash = "Review progress against {ORIGINAL_PLAN_PATH}. Write new plan to {NEW_PLAN_PATH}."
-make_review_plan = "Create the next plan at {NEW_PLAN_PATH}. Use {ACTIVE_PLAN_PATH} as input."
+review_plan = "Review the plan at {ORIGINAL_PLAN_PATH}. If tighter follow-up work is needed, write it to {NEW_PLAN_PATH}."
+implementation_prompt = "Work from {ACTIVE_PLAN_PATH}. Re-read it from disk before acting."
 ```
 
-Supported harnesses are `claude`, `codex`, `gemini`, `kiro`, `opencode`, and `pi`.
+Config rules that matter in practice:
 
-### Config Rules
+- A step `profile` must be fully qualified as `harness.profile`.
+- Profile tables support `model` and optional `effort`.
+- There is no harness-level `model` or `effort` setting outside profiles.
+- A workflow starts at the first declared step in `workflow.<name>.steps`.
+- `prompts` must be a non-empty array of prompt keys.
+- Prompt values can be inline text or `file://` paths in three forms: absolute (`file:///...`), config-relative (`file://path/to/file.txt`), or cwd-relative (`file://./path/to/file.txt`).
+- `go` transitions are checked in declaration order. First match wins.
+- Supported condition symbols are `DONE`, `NEW_PLAN_EXISTS`, and `MAX_TURNS_REACHED`.
+- Boolean expressions support `&&`, `||`, `!`, and parentheses.
+- A transition without `when` is an unconditional fallback.
 
-- Every step `profile` must be fully qualified: `harness.profile`, not a bare harness name.
-- `model` is the only supported model key. `default_model` is not accepted.
-- Harness-level `model` and `effort` are not supported. Put them under profiles.
-- `prompts` values can be inline text or `file://` URIs relative to the config directory.
-- Prompt templates support `{ORIGINAL_PLAN_PATH}`, `{NEW_PLAN_PATH}`, and `{ACTIVE_PLAN_PATH}`.
-- `go` transitions are evaluated in declaration order. First match wins.
-- Condition symbols: `DONE`, `NEW_PLAN_EXISTS`, `MAX_TURNS_REACHED`.
-- Boolean operators: `&&`, `||`, `!`, parentheses.
-- A missing `when` is an unconditional fallback.
+Prompt templates support these placeholders:
 
-## What It Does
+- `{ORIGINAL_PLAN_PATH}`
+- `{ACTIVE_PLAN_PATH}`
+- `{NEW_PLAN_PATH}`
 
-`aflow` reads a checkpoint plan from disk, evaluates the first step of the selected workflow, runs one harness process for that step, then follows `go` transitions to pick the next step or `END`.
+Those placeholders belong in workflow prompt templates. The bundled skills under `skills/` are static guidance files that a harness can inject around those prompts, not places to author unresolved workflow variables.
 
-- `ORIGINAL_PLAN_PATH` is always the user-supplied plan file. It never changes.
-- `DONE` is computed from the original plan file only.
-- `NEW_PLAN_PATH` is generated once per turn (format: `<stem>-cpNN-vNN.<suffix>`).
-- `ACTIVE_PLAN_PATH` starts as the original plan. After a turn, it updates to `NEW_PLAN_PATH` only if that file was actually created by the harness step.
-- The run ends when a transition selects `END`.
-- If the run reaches max turns without an `END` transition, it is a workflow error.
+## How A Run Works
 
-## Live Status Banner
+Each workflow step launches one fresh harness process.
 
-While a harness step is running, `aflow` shows a Rich banner on stderr with:
+At a high level:
 
-- elapsed runtime
-- workflow name and current step
-- harness, model, and effort level
+1. `aflow` loads the selected workflow and reads the original plan file.
+2. It starts at the workflow's first declared step.
+3. It renders the step prompts, resolves the selected harness profile, and runs the harness CLI once for that step.
+4. After the harness returns, it re-reads the original plan file and evaluates the step's `go` transitions.
+5. The next matching transition decides whether to continue with another step or stop at `END`.
+
+Plan-path behavior is strict:
+
+- `ORIGINAL_PLAN_PATH` is always the user-supplied plan file.
+- `DONE` is computed from `ORIGINAL_PLAN_PATH`, not from a generated follow-up plan.
+- `NEW_PLAN_PATH` is generated once per turn with the format `<stem>-cpNN-vNN.<suffix>`.
+- `ACTIVE_PLAN_PATH` starts as the original plan path.
+- `ACTIVE_PLAN_PATH` changes only when the current harness step actually writes `NEW_PLAN_PATH`.
+
+Extra CLI instructions after the plan path are appended to the rendered step prompt.
+
+## Harnesses
+
+Supported harness adapters are:
+
+- `claude`
+- `codex`
+- `gemini`
+- `kiro`
+- `opencode`
+- `pi`
+
+`aflow` expects those CLIs to already be installed and authenticated on the machine. It does not manage provider auth or SDK setup.
+
+Current adapter behavior:
+
+- `codex` uses `codex exec --dangerously-bypass-approvals-and-sandbox`
+- `claude` uses `claude -p --permission-mode bypassPermissions --dangerously-skip-permissions`
+- `gemini` uses `gemini --prompt ... --approval-mode yolo --sandbox=false`
+- `kiro` uses `kiro-cli chat --no-interactive --trust-all-tools`
+- `opencode` uses `opencode run --format default --dir <repo-root>`
+- `pi` uses `pi --print --tools read,bash,edit,write,grep,find,ls`
+
+`effort` is currently passed through only by the `claude`, `codex`, and `pi` adapters.
+
+
+## Live Status
+
+While a step is running, `aflow` shows a Rich status panel on stderr with:
+
+- elapsed time
+- workflow and current step
+- harness, model, and effort
 - checkpoint progress and turn count
-- original plan, active plan, and generated plan paths
-- current status
-
-## Non-interactive and Full-Permission Mode
-
-Each harness uses a documented headless mode with full permissions:
-
-- `opencode` uses `opencode run` with the prefixed prompt and `--dir` for the repo root
-- `gemini` uses `--prompt` (not positional query), `--approval-mode yolo`, and `--sandbox=false`
-- `codex` uses `exec` with `--dangerously-bypass-approvals-and-sandbox`
-- `claude` uses `-p` with `--permission-mode bypassPermissions` and `--dangerously-skip-permissions`
-- `kiro` uses `chat` with `--no-interactive` and `--trust-all-tools`
-- `pi` uses `--print` with a `--tools` list
-
-Kiro currently uses its default agent in `aflow`, so there is no profile-level `agent` setting yet.
-
-## Limits
-
-- max turns: `15` via `--max-turns`
-- retained runs: `20` via `--keep-runs`
+- original, active, and generated plan paths
+- current run status
 
 ## Run Logs
 
-Run data lives under `.aflow/runs/<run-id>/`.
+Each run writes structured artifacts under `.aflow/runs/<run-id>/`.
 
-Each run stores:
+Saved data includes:
 
-- prompts and argv
-- stdout and stderr
-- per-turn result metadata including workflow step name, selector, conditions, and chosen transition
-- run metadata including workflow name, original/active/generated plan paths
-- live status state
+- rendered prompts
+- argv and environment metadata
+- stdout and stderr for each step
+- plan snapshots before and after each step
+- evaluated conditions and the chosen transition
+- top-level run metadata such as workflow name, current step, turns completed, and plan paths
 
-Older run directories are pruned automatically.
+Older run directories are pruned automatically. The default retention is `20` runs. The default max turn limit is `15`.
 
-## Shipped Skills
+## Included Skills
 
-This repo ships a few skills for the `aflow` workflow:
+This repo also ships optional skills under `skills/`. They are static guidance files that a harness can inject around workflow prompts.
 
-- `ralf-handoff-plan`: writes strict checkpoint handoff plans that `aflow` can execute from disk
-- `ralf-review-squash`: reviews a completed handoff and either squashes it or produces a focused fix plan
+- `aflow-plan` - static guidance for writing aflow-compatible checkpoint plans
+- `review-squash` - static guidance for final review and focused fix-plan creation
+- `execute-aflow-plan` - lightweight reinforcement for plan-driven execution
 
-Those skills live under `skills/` and are repo assets. They are not required to run the package itself.
+The workflow config is where the plan-path placeholders belong. The skills themselves stay free of workflow template variables.
 
 ## Repository Layout
 
-- `aflow/`: the Python package
-- `pyproject.toml`: package metadata, dependencies, and console-script entrypoint
-- `skills/`: optional workflow assets shipped alongside the tool
-- `plans/`: saved working plans and handoff artifacts
-
-For source checkouts, `uv run python -m aflow` is the clean entrypoint. For installed use, the console script from `pyproject.toml` is the real entrypoint.
+- `aflow/` - package code
+- `skills/` - optional workflow skills
+- `plans/` - example and in-progress plan artifacts
+- `pyproject.toml` - package metadata and console entrypoint
 
 ## Troubleshooting
 
 - If the harness exits non-zero, `aflow` stops and prints the run log directory.
-- If no `go` transition matches the current conditions, `aflow` fails with the step name and condition values.
-- If `default_workflow` is missing or the workflow name is unknown, `aflow` exits before starting.
-- If a run stalls, inspect the saved data under `.aflow/runs/<run-id>/`.
+- If no `go` transition matches, the run fails with the step name and evaluated condition values.
+- If the selected workflow does not exist, `aflow` exits before starting a run.
+- If the plan format is invalid, the run fails before or after the step that produced the invalid state.

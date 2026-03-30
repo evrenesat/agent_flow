@@ -5,14 +5,16 @@ description: "Review a completed autonomous AFlow plan, compare the full accumul
 
 #  Review Squash AFlow Implementation
 
-Use this skill only for the final review pass of work produced under a RALF plan that includes `Git Tracking`.
+Use this skill only for the final review pass of work produced under a RALF plan that includes `Git Tracking`. It is meant to be installed as a static skill and driven by prompt context from the workflow engine.
 
 ## Behavior
 
 - Load the active original RALF plan before reviewing code or history.
+- If the prompt already names the original plan, use that directly. Otherwise fall back to the repo's original-plan selection rules.
 - Assume the happy path is a completed autonomous run. Review the whole accumulated handoff, not just one checkpoint batch.
 - Treat files under `plans/` as architect or reviewer-owned artifacts. If an implementation commit modifies plan files unexpectedly, reject that work unless the user explicitly asked for plan-file commits from the implementer.
 - Treat checkpoint/version commit prefixes such as `cp4 v01`, `cp4 v02`, and `cp5 v01` as the primary review-tracking mechanism. Use exact SHAs as supporting evidence, not as the only way to understand state.
+- Treat prompt-supplied concrete review context as authoritative when it is present. Use repo discovery only when the prompt leaves a target ambiguous.
 - If the original plan still has unchecked checkpoints, do not repurpose this skill for routine checkpoint review. Rerun the autonomous executor unless the user explicitly asks for a different workflow.
 - If the full accumulated work is acceptable, approve and squash once at the whole-plan level.
 - If the full accumulated work is not acceptable, do not squash. Create a focused fix plan for the failed checkpoints or behaviors instead of a whole-plan redo.

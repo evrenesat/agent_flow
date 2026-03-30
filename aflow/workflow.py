@@ -78,21 +78,47 @@ def resolve_profile(
     )
 
 
+def _resolve_prompt_file_path(
+    prompt_text: str,
+    *,
+    config_dir: Path,
+    working_dir: Path,
+) -> Path | None:
+    if not prompt_text.startswith("file://"):
+        return None
+
+    location = prompt_text[len("file://") :]
+    if prompt_text.startswith("file:///"):
+        file_path = Path(location)
+        if not file_path.is_absolute():
+            raise WorkflowError(
+                f"prompt file path must be absolute: {file_path}"
+            )
+        return file_path
+
+    if prompt_text.startswith("file://./"):
+        return working_dir / location
+
+    return config_dir / location
+
+
 def render_prompt(
     prompt_text: str,
     *,
     config_dir: Path,
+    working_dir: Path,
     original_plan_path: Path,
     new_plan_path: Path,
     active_plan_path: Path,
 ) -> str:
-    if prompt_text.startswith("file://"):
-        relative = prompt_text[len("file://"):]
-        file_path = config_dir / relative
+    file_path = _resolve_prompt_file_path(
+        prompt_text,
+        config_dir=config_dir,
+        working_dir=working_dir,
+    )
+    if file_path is not None:
         if not file_path.is_file():
-            raise WorkflowError(
-                f"prompt file not found: {file_path}"
-            )
+            raise WorkflowError(f"prompt file not found: {file_path}")
         prompt_text = file_path.read_text(encoding="utf-8")
 
     prompt_text = prompt_text.replace("{ORIGINAL_PLAN_PATH}", str(original_plan_path))
@@ -106,6 +132,7 @@ def render_step_prompts(
     config: WorkflowUserConfig,
     *,
     config_dir: Path,
+    working_dir: Path,
     original_plan_path: Path,
     new_plan_path: Path,
     active_plan_path: Path,
@@ -120,6 +147,7 @@ def render_step_prompts(
         rendered = render_prompt(
             raw,
             config_dir=config_dir,
+            working_dir=working_dir,
             original_plan_path=original_plan_path,
             new_plan_path=new_plan_path,
             active_plan_path=active_plan_path,
@@ -391,6 +419,7 @@ def run_workflow(
     workflow_name: str,
     *,
     config_dir: Path,
+    working_dir: Path | None = None,
     adapter: HarnessAdapter | None = None,
     runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     banner: BannerRenderer | None = None,
@@ -405,6 +434,7 @@ def run_workflow(
     original_plan_path = config.plan_path
     active_plan_path = original_plan_path
     current_step_name = wf.first_step
+    working_dir = working_dir or Path.cwd()
 
     run_paths = create_run_paths(config)
     state = ControllerState(last_snapshot=PlanSnapshot(None, 0, 0, False))
@@ -509,6 +539,7 @@ def run_workflow(
             step,
             workflow_config,
             config_dir=config_dir,
+            working_dir=working_dir,
             original_plan_path=original_plan_path,
             new_plan_path=new_plan_path,
             active_plan_path=active_plan_path,
