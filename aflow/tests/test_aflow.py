@@ -1,38 +1,27 @@
 from __future__ import annotations
 
-from dataclasses import asdict
 import json
 from pathlib import Path
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
-import unittest
-import shutil
 import textwrap
+import unittest
 
-from aflow.controller import (
-    ControllerError,
-    build_system_prompt,
-    build_user_prompt,
-    run_controller,
-)
 from aflow.config import (
     AflowSection,
     ConfigError,
     GoTransition,
-    HarnessConfig,
     HarnessProfileConfig,
-    UserConfig,
     WorkflowConfig,
     WorkflowHarnessConfig,
     WorkflowStepConfig,
     WorkflowUserConfig,
     bootstrap_config,
     find_placeholders,
-    load_user_config,
     load_workflow_config,
-    resolve_launch_config,
     validate_workflow_config,
 )
 from aflow.workflow import (
@@ -58,11 +47,6 @@ from aflow.runlog import create_run_paths, prune_old_runs
 from aflow.status import build_banner, BannerRenderer
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-
-ALL_HARNESSES = ("claude", "codex", "gemini", "opencode", "pi")
-
-
 def _write_plan(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
@@ -72,121 +56,6 @@ def _write_config(home_dir: Path, text: str) -> Path:
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(text, encoding="utf-8")
     return config_path
-
-
-def _copy_aflow_repo(tmp_path: Path) -> Path:
-    repo_root = tmp_path / "repo"
-    repo_root.mkdir()
-    aflow_src = REPO_ROOT / "aflow"
-    aflow_dst = repo_root / "aflow"
-    shutil.copytree(
-        aflow_src,
-        aflow_dst,
-        ignore=shutil.ignore_patterns("__pycache__", "tests"),
-    )
-    return repo_root
-
-
-def _write_fake_harness(repo_root: Path, name: str) -> Path:
-    bin_dir = repo_root / "bin"
-    bin_dir.mkdir(exist_ok=True)
-    script = bin_dir / name
-    script.write_text(
-        textwrap.dedent(
-            """\
-            #!/usr/bin/env python3
-            from __future__ import annotations
-
-            import os
-            import shutil
-            import sys
-            from pathlib import Path
-
-
-            def _read_turn_count(path: Path) -> int:
-                if not path.exists():
-                    return 0
-                return int(path.read_text(encoding="utf-8"))
-
-
-            scenario = os.environ["FAKE_SCENARIO"]
-            plan_path = Path(os.environ["FAKE_PLAN_PATH"])
-            count_file = Path(os.environ["FAKE_COUNT_FILE"])
-            count = _read_turn_count(count_file) + 1
-            count_file.write_text(str(count), encoding="utf-8")
-
-            print(f"{Path(sys.argv[0]).name} turn {count}")
-
-            if scenario == "success":
-                shutil.copyfile(os.environ["FAKE_COMPLETED_PLAN_PATH"], plan_path)
-                sys.exit(0)
-
-            if scenario == "stagnation":
-                sys.exit(0)
-
-            if scenario == "max-turns":
-                source = os.environ["FAKE_ALPHA_PLAN_PATH"] if count % 2 else os.environ["FAKE_BETA_PLAN_PATH"]
-                shutil.copyfile(source, plan_path)
-                sys.exit(0)
-
-            if scenario == "fail":
-                mutated_plan_path = os.environ.get("FAKE_MUTATED_PLAN_PATH")
-                if mutated_plan_path:
-                    shutil.copyfile(mutated_plan_path, plan_path)
-                print(f"{Path(sys.argv[0]).name} failing turn {count}", file=sys.stderr)
-                sys.exit(int(os.environ.get("FAKE_EXIT_CODE", "7")))
-
-            raise SystemExit(f"unknown FAKE_SCENARIO {scenario}")
-            """
-        ),
-        encoding="utf-8",
-    )
-    script.chmod(0o755)
-    return script
-
-
-def _launcher_environment(
-    repo_root: Path,
-    *,
-    scenario: str,
-    plan_path: Path,
-    count_file: Path,
-    home_dir: Path | None = None,
-    completed_plan_path: Path | None = None,
-    alpha_plan_path: Path | None = None,
-    beta_plan_path: Path | None = None,
-    mutated_plan_path: Path | None = None,
-    exit_code: int | None = None,
-) -> dict[str, str]:
-    env = os.environ.copy()
-    env["PATH"] = f"{repo_root / 'bin'}:{env['PATH']}"
-    if home_dir is not None:
-        env["HOME"] = str(home_dir.resolve())
-    env["FAKE_SCENARIO"] = scenario
-    env["FAKE_PLAN_PATH"] = str(plan_path.resolve())
-    env["FAKE_COUNT_FILE"] = str(count_file.resolve())
-    if completed_plan_path is not None:
-        env["FAKE_COMPLETED_PLAN_PATH"] = str(completed_plan_path.resolve())
-    if alpha_plan_path is not None:
-        env["FAKE_ALPHA_PLAN_PATH"] = str(alpha_plan_path.resolve())
-    if beta_plan_path is not None:
-        env["FAKE_BETA_PLAN_PATH"] = str(beta_plan_path.resolve())
-    if mutated_plan_path is not None:
-        env["FAKE_MUTATED_PLAN_PATH"] = str(mutated_plan_path.resolve())
-    if exit_code is not None:
-        env["FAKE_EXIT_CODE"] = str(exit_code)
-    return env
-
-
-def _run_launcher(repo_root: Path, *args: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, "-m", "aflow", *args],
-        cwd=repo_root,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
 
 
 class WorkflowCliTests(unittest.TestCase):
@@ -451,128 +320,6 @@ class PlanParserTests(unittest.TestCase):
             parsed = load_plan(plan_path)
             self.assertTrue(parsed.snapshot.is_complete)
             self.assertIsNone(parsed.snapshot.current_checkpoint_index)
-
-
-class ConfigResolutionTests(unittest.TestCase):
-    def test_configless_invocation_without_harness_fails(self) -> None:
-        with self.assertRaises(ConfigError) as ctx:
-            resolve_launch_config(
-                UserConfig(),
-                harness=None,
-                model="gpt-5.4",
-                effort=None,
-                profile=None,
-            )
-
-        self.assertIn("--harness is required unless default_harness is configured", str(ctx.exception))
-
-    def test_configless_invocation_without_model_with_explicit_harness_keeps_model_unresolved(self) -> None:
-        resolved = resolve_launch_config(
-            UserConfig(),
-            harness="codex",
-            model=None,
-            effort=None,
-            profile=None,
-        )
-
-        self.assertEqual(resolved.harness, "codex")
-        self.assertIsNone(resolved.model)
-        self.assertIsNone(resolved.effort)
-
-    def test_profile_overrides_harness_defaults(self) -> None:
-        config = UserConfig(
-            default_harness="codex",
-            harnesses={
-                "codex": HarnessConfig(
-                    model="gpt-5.4",
-                    effort="low",
-                    profiles={
-                        "turbo": HarnessProfileConfig(
-                            model="gpt-5.4-turbo",
-                            effort="high",
-                        )
-                    },
-                )
-            },
-        )
-
-        resolved = resolve_launch_config(
-            config,
-            harness=None,
-            model=None,
-            effort=None,
-            profile="turbo",
-        )
-
-        self.assertEqual(resolved.harness, "codex")
-        self.assertEqual(resolved.model, "gpt-5.4-turbo")
-        self.assertEqual(resolved.effort, "high")
-
-    def test_cli_model_overrides_profile_and_harness_defaults(self) -> None:
-        config = UserConfig(
-            default_harness="codex",
-            harnesses={
-                "codex": HarnessConfig(
-                    model="gpt-5.4",
-                    effort="low",
-                    profiles={
-                        "turbo": HarnessProfileConfig(
-                            model="gpt-5.4-turbo",
-                            effort="high",
-                        )
-                    },
-                )
-            },
-        )
-
-        resolved = resolve_launch_config(
-            config,
-            harness=None,
-            model="gpt-5.4-explicit",
-            effort=None,
-            profile="turbo",
-        )
-
-        self.assertEqual(resolved.model, "gpt-5.4-explicit")
-        self.assertEqual(resolved.effort, "high")
-
-    def test_unknown_profile_raises_clear_error(self) -> None:
-        config = UserConfig(
-            default_harness="codex",
-            harnesses={
-                "codex": HarnessConfig(
-                    model="gpt-5.4",
-                )
-            },
-        )
-
-        with self.assertRaises(ConfigError) as ctx:
-            resolve_launch_config(
-                config,
-                harness=None,
-                model=None,
-                effort=None,
-                profile="missing",
-            )
-
-        self.assertIn("unknown profile 'missing' for harness 'codex'", str(ctx.exception))
-
-    def test_invalid_config_file_raises_clear_error(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            home_dir = Path(tmpdir)
-            original_home = os.environ.get("HOME")
-            try:
-                _write_config(home_dir, "default_harness = [not valid toml")
-                os.environ["HOME"] = str(home_dir)
-                with self.assertRaises(ConfigError) as ctx:
-                    load_user_config()
-            finally:
-                if original_home is None:
-                    os.environ.pop("HOME", None)
-                else:
-                    os.environ["HOME"] = original_home
-
-        self.assertIn(str(home_dir / ".config" / "aflow" / "aflow.toml"), str(ctx.exception))
 
 
 class AdaptersTests(unittest.TestCase):
@@ -915,518 +662,6 @@ class AdaptersTests(unittest.TestCase):
         self.assertEqual(invocation.argv[0], "gemini")
 
 
-class ControllerTests(unittest.TestCase):
-    def test_controller_stops_when_plan_completes_on_first_turn(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            repo_root = Path(tmpdir)
-            plan_path = repo_root / "plan.md"
-            _write_plan(
-                plan_path,
-                """# Plan
-
-### [ ] Checkpoint 1: First
-- [ ] step one
-""",
-            )
-
-            calls: list[tuple[list[str], dict[str, str]]] = []
-
-            def runner(argv, **kwargs):
-                calls.append((list(argv), dict(kwargs["env"])))
-                _write_plan(
-                    plan_path,
-                    """# Plan
-
-### [x] Checkpoint 1: First
-- [x] step one
-""",
-                )
-                return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
-
-            result = run_controller(
-                ControllerConfig(
-                    repo_root=repo_root,
-                    plan_path=plan_path,
-                    harness="codex",
-                    model="gpt-5.4",
-                ),
-                adapter=CodexAdapter(),
-                runner=runner,
-            )
-
-            self.assertEqual(result.turns_completed, 1)
-            self.assertTrue(result.final_snapshot.is_complete)
-            self.assertEqual(len(calls), 1)
-            self.assertTrue((repo_root / ".aflow" / "runs").exists())
-
-    def test_controller_passes_effort_to_adapter(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            repo_root = Path(tmpdir)
-            plan_path = repo_root / "plan.md"
-            _write_plan(
-                plan_path,
-                """# Plan
-
-### [ ] Checkpoint 1: First
-- [ ] step one
-""",
-            )
-
-            captured_argv: list[str] = []
-
-            def runner(argv, **kwargs):
-                captured_argv.extend(argv)
-                _write_plan(
-                    plan_path,
-                    """# Plan
-
-### [x] Checkpoint 1: First
-- [x] step one
-""",
-                )
-                return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
-
-            run_controller(
-                ControllerConfig(
-                    repo_root=repo_root,
-                    plan_path=plan_path,
-                    harness="codex",
-                    model="gpt-5.4",
-                    effort="high",
-                ),
-                adapter=CodexAdapter(),
-                runner=runner,
-            )
-
-            self.assertIn("-c", captured_argv)
-            self.assertIn("model_reasoning_effort='\"high\"'", captured_argv)
-
-    def test_controller_stops_after_stagnation_limit(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            repo_root = Path(tmpdir)
-            plan_path = repo_root / "plan.md"
-            _write_plan(
-                plan_path,
-                """# Plan
-
-### [ ] Checkpoint 1: First
-- [ ] step one
-""",
-            )
-
-            calls = 0
-
-            def runner(argv, **kwargs):
-                nonlocal calls
-                calls += 1
-                return subprocess.CompletedProcess(argv, 0, stdout="noop", stderr="")
-
-            with self.assertRaises(ControllerError) as ctx:
-                run_controller(
-                    ControllerConfig(
-                        repo_root=repo_root,
-                        plan_path=plan_path,
-                        harness="pi",
-                        model="sonnet",
-                        stagnation_limit=3,
-                        max_turns=10,
-                    ),
-                    adapter=PiAdapter(),
-                    runner=runner,
-                )
-
-            self.assertIn("checkpoint progress did not change for 3 completed turns", ctx.exception.summary)
-            self.assertEqual(calls, 3)
-
-    def test_controller_stops_after_max_turns_when_progress_keeps_changing(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            repo_root = Path(tmpdir)
-            plan_path = repo_root / "plan.md"
-            _write_plan(
-                plan_path,
-                """# Plan
-
-### [ ] Checkpoint 1: Alpha
-- [ ] step one
-""",
-            )
-
-            calls = 0
-
-            def runner(argv, **kwargs):
-                nonlocal calls
-                calls += 1
-                if calls % 2:
-                    title = "Alpha"
-                else:
-                    title = "Beta"
-                _write_plan(
-                    plan_path,
-                    f"""# Plan
-
-### [ ] Checkpoint 1: {title}
-- [ ] step one
-""",
-                )
-                return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
-
-            with self.assertRaises(ControllerError) as ctx:
-                run_controller(
-                    ControllerConfig(
-                        repo_root=repo_root,
-                        plan_path=plan_path,
-                        harness="claude",
-                        model="claude-sonnet-4-6",
-                        stagnation_limit=10,
-                        max_turns=4,
-                    ),
-                    adapter=ClaudeAdapter(),
-                    runner=runner,
-                )
-
-            self.assertIn("reached max turns limit of 4", ctx.exception.summary)
-            self.assertEqual(calls, 4)
-
-    def test_controller_stops_on_non_zero_harness_exit(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            repo_root = Path(tmpdir)
-            plan_path = repo_root / "plan.md"
-            mutated_plan_path = repo_root / "mutated-plan.md"
-            _write_plan(
-                plan_path,
-                """# Plan
-
-### [ ] Checkpoint 1: First
-- [ ] step one
-""",
-            )
-            _write_plan(
-                mutated_plan_path,
-                """# Plan
-
-### [ ] Checkpoint 1: Updated
-- [ ] step one
-""",
-            )
-
-            def runner(argv, **kwargs):
-                shutil.copyfile(mutated_plan_path, plan_path)
-                return subprocess.CompletedProcess(argv, 2, stdout="bad", stderr="boom")
-
-            with self.assertRaises(ControllerError) as ctx:
-                run_controller(
-                    ControllerConfig(
-                        repo_root=repo_root,
-                        plan_path=plan_path,
-                        harness="codex",
-                        model="gpt-5.4",
-                        max_turns=1,
-                    ),
-                    adapter=CodexAdapter(),
-                    runner=runner,
-                )
-
-            self.assertIn("exited with code 2", ctx.exception.summary)
-            self.assertIn("current checkpoint: Checkpoint 1: Updated", ctx.exception.summary)
-
-            run_dir = ctx.exception.run_dir
-            self.assertIsNotNone(run_dir)
-            assert run_dir is not None
-            run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-            self.assertEqual(run_json["status"], "failed")
-            self.assertEqual(run_json["last_snapshot"]["current_checkpoint_name"], "Checkpoint 1: Updated")
-            self.assertEqual(run_json["last_snapshot"]["unchecked_checkpoint_count"], 1)
-            result_json = json.loads((run_dir / "turns" / "turn-001" / "result.json").read_text(encoding="utf-8"))
-            self.assertEqual(result_json["status"], "harness-failed")
-            self.assertEqual(result_json["snapshot_after"]["current_checkpoint_name"], "Checkpoint 1: Updated")
-
-    def test_run_json_records_effort_when_set(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            repo_root = Path(tmpdir)
-            plan_path = repo_root / "plan.md"
-            _write_plan(
-                plan_path,
-                """# Plan
-
-### [ ] Checkpoint 1: First
-- [ ] step one
-""",
-            )
-
-            def runner(argv, **kwargs):
-                return subprocess.CompletedProcess(argv, 0, stdout="noop", stderr="")
-
-            with self.assertRaises(ControllerError):
-                run_controller(
-                    ControllerConfig(
-                        repo_root=repo_root,
-                        plan_path=plan_path,
-                        harness="codex",
-                        model="gpt-5.4",
-                        effort="high",
-                        stagnation_limit=1,
-                        max_turns=2,
-                    ),
-                    adapter=CodexAdapter(),
-                    runner=runner,
-                )
-
-            run_dir = (repo_root / ".aflow" / "runs")
-            run_dirs = list(run_dir.iterdir())
-            self.assertEqual(len(run_dirs), 1)
-            run_json = json.loads((run_dirs[0] / "run.json").read_text(encoding="utf-8"))
-            self.assertEqual(run_json["effort"], "high")
-
-    def test_run_json_records_null_effort_when_omitted(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            repo_root = Path(tmpdir)
-            plan_path = repo_root / "plan.md"
-            _write_plan(
-                plan_path,
-                """# Plan
-
-### [ ] Checkpoint 1: First
-- [ ] step one
-""",
-            )
-
-            def runner(argv, **kwargs):
-                return subprocess.CompletedProcess(argv, 0, stdout="noop", stderr="")
-
-            with self.assertRaises(ControllerError):
-                run_controller(
-                    ControllerConfig(
-                        repo_root=repo_root,
-                        plan_path=plan_path,
-                        harness="codex",
-                        model="gpt-5.4",
-                        stagnation_limit=1,
-                        max_turns=2,
-                    ),
-                    adapter=CodexAdapter(),
-                    runner=runner,
-                )
-
-            run_dir = (repo_root / ".aflow" / "runs")
-            run_dirs = list(run_dir.iterdir())
-            self.assertEqual(len(run_dirs), 1)
-            run_json = json.loads((run_dirs[0] / "run.json").read_text(encoding="utf-8"))
-            self.assertIsNone(run_json["effort"])
-
-    def test_run_json_records_null_model_when_omitted(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            repo_root = Path(tmpdir)
-            plan_path = repo_root / "plan.md"
-            _write_plan(
-                plan_path,
-                """# Plan
-
-### [x] Checkpoint 1: First
-- [x] step one
-""",
-            )
-
-            result = run_controller(
-                ControllerConfig(
-                    repo_root=repo_root,
-                    plan_path=plan_path,
-                    harness="codex",
-                    model=None,
-                ),
-                adapter=CodexAdapter(),
-                runner=None,
-            )
-
-            self.assertEqual(result.turns_completed, 0)
-            run_dir = repo_root / ".aflow" / "runs"
-            run_dirs = list(run_dir.iterdir())
-            self.assertEqual(len(run_dirs), 1)
-            run_json = json.loads((run_dirs[0] / "run.json").read_text(encoding="utf-8"))
-            self.assertIsNone(run_json["model"])
-
-    def test_unchanged_turns_increment_issues_accumulated(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            repo_root = Path(tmpdir)
-            plan_path = repo_root / "plan.md"
-            _write_plan(
-                plan_path,
-                """# Plan
-
-### [ ] Checkpoint 1: First
-- [ ] step one
-""",
-            )
-
-            def runner(argv, **kwargs):
-                return subprocess.CompletedProcess(argv, 0, stdout="noop", stderr="")
-
-            with self.assertRaises(ControllerError):
-                run_controller(
-                    ControllerConfig(
-                        repo_root=repo_root,
-                        plan_path=plan_path,
-                        harness="codex",
-                        model="gpt-5.4",
-                        stagnation_limit=3,
-                        max_turns=4,
-                    ),
-                    adapter=CodexAdapter(),
-                    runner=runner,
-                )
-
-            run_dir = (repo_root / ".aflow" / "runs")
-            run_dirs = list(run_dir.iterdir())
-            self.assertEqual(len(run_dirs), 1)
-            run_json = json.loads((run_dirs[0] / "run.json").read_text(encoding="utf-8"))
-            self.assertEqual(run_json["issues_accumulated"], 3)
-
-    def test_fatal_nonzero_exit_increments_issues_accumulated(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            repo_root = Path(tmpdir)
-            plan_path = repo_root / "plan.md"
-            _write_plan(
-                plan_path,
-                """# Plan
-
-### [ ] Checkpoint 1: First
-- [ ] step one
-""",
-            )
-
-            def runner(argv, **kwargs):
-                return subprocess.CompletedProcess(argv, 1, stdout="bad", stderr="err")
-
-            with self.assertRaises(ControllerError):
-                run_controller(
-                    ControllerConfig(
-                        repo_root=repo_root,
-                        plan_path=plan_path,
-                        harness="codex",
-                        model="gpt-5.4",
-                    ),
-                    adapter=CodexAdapter(),
-                    runner=runner,
-                )
-
-            run_dir = (repo_root / ".aflow" / "runs")
-            run_dirs = list(run_dir.iterdir())
-            self.assertEqual(len(run_dirs), 1)
-            run_json = json.loads((run_dirs[0] / "run.json").read_text(encoding="utf-8"))
-            self.assertEqual(run_json["issues_accumulated"], 1)
-
-    def test_run_metadata_includes_started_at_and_active_turn(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            repo_root = Path(tmpdir)
-            plan_path = repo_root / "plan.md"
-            _write_plan(
-                plan_path,
-                """# Plan
-
-### [ ] Checkpoint 1: First
-- [ ] step one
-""",
-            )
-
-            def runner(argv, **kwargs):
-                return subprocess.CompletedProcess(argv, 0, stdout="noop", stderr="")
-
-            with self.assertRaises(ControllerError):
-                run_controller(
-                    ControllerConfig(
-                        repo_root=repo_root,
-                        plan_path=plan_path,
-                        harness="codex",
-                        model="gpt-5.4",
-                        stagnation_limit=1,
-                        max_turns=2,
-                    ),
-                    adapter=CodexAdapter(),
-                    runner=runner,
-                )
-
-            run_dir = (repo_root / ".aflow" / "runs")
-            run_dirs = list(run_dir.iterdir())
-            run_json = json.loads((run_dirs[0] / "run.json").read_text(encoding="utf-8"))
-            self.assertIn("run_started_at", run_json)
-            self.assertIn("active_turn", run_json)
-            self.assertIn("issues_accumulated", run_json)
-            self.assertIn("status_message", run_json)
-            self.assertEqual(run_json["active_turn"], 1)
-
-    def test_run_json_updated_at_turn_start_before_subprocess(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            repo_root = Path(tmpdir)
-            plan_path = repo_root / "plan.md"
-            _write_plan(
-                plan_path,
-                """# Plan
-
-### [ ] Checkpoint 1: First
-- [ ] step one
-
-### [ ] Checkpoint 2: Second
-- [ ] step two
-""",
-            )
-
-            call_count = 0
-            run_json_at_call: list[dict] = []
-
-            def runner(argv, **kwargs):
-                nonlocal call_count
-                call_count += 1
-                run_dir = (repo_root / ".aflow" / "runs")
-                run_dirs = sorted(run_dir.iterdir())
-                run_json_at_call.append(
-                    json.loads((run_dirs[0] / "run.json").read_text(encoding="utf-8"))
-                )
-                if call_count == 1:
-                    _write_plan(
-                        plan_path,
-                        """# Plan
-
-### [x] Checkpoint 1: First
-- [x] step one
-
-### [ ] Checkpoint 2: Second
-- [ ] step two
-""",
-                    )
-                    return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
-                _write_plan(
-                    plan_path,
-                    """# Plan
-
-### [x] Checkpoint 1: First
-- [x] step one
-
-### [x] Checkpoint 2: Second
-- [x] step two
-""",
-                )
-                return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
-
-            result = run_controller(
-                ControllerConfig(
-                    repo_root=repo_root,
-                    plan_path=plan_path,
-                    harness="codex",
-                    model="gpt-5.4",
-                    max_turns=5,
-                ),
-                adapter=CodexAdapter(),
-                runner=runner,
-            )
-
-            self.assertEqual(result.turns_completed, 2)
-            self.assertTrue(result.final_snapshot.is_complete)
-            self.assertEqual(len(run_json_at_call), 2)
-            self.assertEqual(run_json_at_call[0]["active_turn"], 1)
-            self.assertEqual(run_json_at_call[0]["status_message"], "running turn 1")
-            self.assertEqual(run_json_at_call[1]["active_turn"], 2)
-            self.assertEqual(run_json_at_call[1]["status_message"], "running turn 2")
-
-
 class LazyBannerTests(unittest.TestCase):
     def test_banner_is_noop_when_rich_unavailable(self) -> None:
         import aflow.status as status_mod
@@ -1494,833 +729,6 @@ class RetentionTests(unittest.TestCase):
                 remaining,
                 sorted(f"20260329T120000Z-{22 - index:08x}" for index in range(3, 23)),
             )
-
-
-class EndToEndLauncherTests(unittest.TestCase):
-    def test_launcher_completes_with_fake_codex_and_writes_turn_artifacts(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            repo_root = _copy_aflow_repo(tmp_path)
-            resolved_repo_root = repo_root.resolve()
-            plan_path = tmp_path / "plan.md"
-            completed_plan_path = tmp_path / "completed-plan.md"
-            count_file = tmp_path / "count.txt"
-            resolved_plan_path = plan_path.resolve()
-            _write_plan(
-                plan_path,
-                """# Plan
-
-### [ ] Checkpoint 1: First
-- [ ] step one
-""",
-            )
-            _write_plan(
-                completed_plan_path,
-                """# Plan
-
-### [x] Checkpoint 1: First
-- [x] step one
-""",
-            )
-            for harness in ALL_HARNESSES:
-                _write_fake_harness(repo_root, harness)
-
-            result = _run_launcher(
-                repo_root,
-                "--harness",
-                "codex",
-                "--model",
-                "gpt-5.4",
-                str(plan_path),
-                env=_launcher_environment(
-                    repo_root,
-                    scenario="success",
-                    plan_path=plan_path,
-                    count_file=count_file,
-                    completed_plan_path=completed_plan_path,
-                ),
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(plan_path.read_text(encoding="utf-8"), completed_plan_path.read_text(encoding="utf-8"))
-
-            run_dirs = sorted((repo_root / ".aflow" / "runs").iterdir())
-            self.assertEqual(len(run_dirs), 1)
-            run_dir = run_dirs[0]
-            run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-            self.assertEqual(run_json["status"], "completed")
-            self.assertEqual(run_json["turns_completed"], 1)
-            self.assertEqual(run_json["keep_runs"], 20)
-            self.assertIsNone(run_json["effort"])
-
-            turn_dir = run_dir / "turns" / "turn-001"
-            argv = json.loads((turn_dir / "argv.json").read_text(encoding="utf-8"))
-            effective_prompt = (turn_dir / "effective-prompt.txt").read_text(encoding="utf-8")
-            self.assertEqual(argv["label"], "codex")
-            self.assertEqual(argv["prompt_mode"], "prefix-system-into-user-prompt")
-            self.assertEqual(
-                argv["argv"],
-                [
-                    "codex",
-                    "exec",
-                    "--dangerously-bypass-approvals-and-sandbox",
-                    "-C",
-                    str(resolved_repo_root),
-                    "--model",
-                    "gpt-5.4",
-                    effective_prompt,
-                ],
-            )
-            self.assertIn("Current checkpoint: Checkpoint 1: First", (turn_dir / "system-prompt.txt").read_text(encoding="utf-8"))
-            self.assertIn(f"Plan file: {resolved_plan_path}", (turn_dir / "user-prompt.txt").read_text(encoding="utf-8"))
-            self.assertEqual((turn_dir / "stdout.txt").read_text(encoding="utf-8").strip(), "codex turn 1")
-            self.assertTrue((turn_dir / "result.json").is_file())
-
-    def test_launcher_uses_config_default_harness_and_model(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            repo_root = _copy_aflow_repo(tmp_path)
-            home_dir = tmp_path / "home"
-            home_dir.mkdir()
-            _write_config(
-                home_dir,
-                """default_harness = "codex"
-
-[harness.codex]
-model = "gpt-5.4"
-""",
-            )
-            plan_path = tmp_path / "plan.md"
-            completed_plan_path = tmp_path / "completed-plan.md"
-            count_file = tmp_path / "count.txt"
-            _write_plan(
-                plan_path,
-                """# Plan
-
-### [ ] Checkpoint 1: First
-- [ ] step one
-""",
-            )
-            _write_plan(
-                completed_plan_path,
-                """# Plan
-
-### [x] Checkpoint 1: First
-- [x] step one
-""",
-            )
-            for harness in ALL_HARNESSES:
-                _write_fake_harness(repo_root, harness)
-
-            result = _run_launcher(
-                repo_root,
-                str(plan_path),
-                env=_launcher_environment(
-                    repo_root,
-                    scenario="success",
-                    plan_path=plan_path,
-                    count_file=count_file,
-                    completed_plan_path=completed_plan_path,
-                    home_dir=home_dir,
-                ),
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-
-            run_dirs = sorted((repo_root / ".aflow" / "runs").iterdir())
-            run_dir = run_dirs[0]
-            run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-            self.assertEqual(run_json["harness"], "codex")
-            self.assertEqual(run_json["model"], "gpt-5.4")
-
-            turn_dir = run_dir / "turns" / "turn-001"
-            argv = json.loads((turn_dir / "argv.json").read_text(encoding="utf-8"))
-            self.assertIn("--model", argv["argv"])
-            self.assertIn("gpt-5.4", argv["argv"])
-
-    def test_launcher_with_explicit_harness_and_no_model_omits_model_flag(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            repo_root = _copy_aflow_repo(tmp_path)
-            home_dir = tmp_path / "home"
-            home_dir.mkdir()
-            plan_path = tmp_path / "plan.md"
-            completed_plan_path = tmp_path / "completed-plan.md"
-            count_file = tmp_path / "count.txt"
-            _write_plan(
-                plan_path,
-                """# Plan
-
-### [ ] Checkpoint 1: First
-- [ ] step one
-""",
-            )
-            _write_plan(
-                completed_plan_path,
-                """# Plan
-
-### [x] Checkpoint 1: First
-- [x] step one
-""",
-            )
-            for harness in ALL_HARNESSES:
-                _write_fake_harness(repo_root, harness)
-
-            result = _run_launcher(
-                repo_root,
-                "--harness",
-                "codex",
-                str(plan_path),
-                env=_launcher_environment(
-                    repo_root,
-                    scenario="success",
-                    plan_path=plan_path,
-                    count_file=count_file,
-                    completed_plan_path=completed_plan_path,
-                    home_dir=home_dir,
-                ),
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-
-            run_dirs = sorted((repo_root / ".aflow" / "runs").iterdir())
-            run_dir = run_dirs[0]
-            run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-            self.assertIsNone(run_json["model"])
-
-            turn_dir = run_dir / "turns" / "turn-001"
-            argv = json.loads((turn_dir / "argv.json").read_text(encoding="utf-8"))
-            self.assertNotIn("--model", argv["argv"])
-
-    def test_launcher_succeeds_with_profile_turbo(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            repo_root = _copy_aflow_repo(tmp_path)
-            home_dir = tmp_path / "home"
-            home_dir.mkdir()
-            _write_config(
-                home_dir,
-                """default_harness = "codex"
-
-[harness.codex]
-model = "gpt-5.4"
-effort = "low"
-
-[harness.codex.profiles.turbo]
-model = "gpt-5.4-turbo"
-effort = "high"
-""",
-            )
-            plan_path = tmp_path / "plan.md"
-            completed_plan_path = tmp_path / "completed-plan.md"
-            count_file = tmp_path / "count.txt"
-            _write_plan(
-                plan_path,
-                """# Plan
-
-### [ ] Checkpoint 1: First
-- [ ] step one
-""",
-            )
-            _write_plan(
-                completed_plan_path,
-                """# Plan
-
-### [x] Checkpoint 1: First
-- [x] step one
-""",
-            )
-            for harness in ALL_HARNESSES:
-                _write_fake_harness(repo_root, harness)
-
-            result = _run_launcher(
-                repo_root,
-                "--profile",
-                "turbo",
-                str(plan_path),
-                env=_launcher_environment(
-                    repo_root,
-                    scenario="success",
-                    plan_path=plan_path,
-                    count_file=count_file,
-                    completed_plan_path=completed_plan_path,
-                    home_dir=home_dir,
-                ),
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-
-            run_dirs = sorted((repo_root / ".aflow" / "runs").iterdir())
-            run_dir = run_dirs[0]
-            run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-            self.assertEqual(run_json["harness"], "codex")
-            self.assertEqual(run_json["model"], "gpt-5.4-turbo")
-            self.assertEqual(run_json["effort"], "high")
-
-            turn_dir = run_dir / "turns" / "turn-001"
-            argv = json.loads((turn_dir / "argv.json").read_text(encoding="utf-8"))
-            self.assertIn("--model", argv["argv"])
-            self.assertIn("gpt-5.4-turbo", argv["argv"])
-            self.assertIn("-c", argv["argv"])
-            self.assertIn("model_reasoning_effort='\"high\"'", argv["argv"])
-
-    def test_launcher_fails_when_profile_missing_for_resolved_harness(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            repo_root = _copy_aflow_repo(tmp_path)
-            home_dir = tmp_path / "home"
-            home_dir.mkdir()
-            _write_config(
-                home_dir,
-                """default_harness = "codex"
-
-[harness.codex]
-model = "gpt-5.4"
-""",
-            )
-            plan_path = tmp_path / "plan.md"
-            count_file = tmp_path / "count.txt"
-            _write_plan(
-                plan_path,
-                """# Plan
-
-### [ ] Checkpoint 1: First
-- [ ] step one
-""",
-            )
-            for harness in ALL_HARNESSES:
-                _write_fake_harness(repo_root, harness)
-
-            result = _run_launcher(
-                repo_root,
-                "--profile",
-                "turbo",
-                str(plan_path),
-                env=_launcher_environment(
-                    repo_root,
-                    scenario="success",
-                    plan_path=plan_path,
-                    count_file=count_file,
-                    home_dir=home_dir,
-                ),
-            )
-
-            self.assertEqual(result.returncode, 1)
-            self.assertIn("unknown profile 'turbo' for harness 'codex'", result.stderr)
-            self.assertFalse((repo_root / ".aflow" / "runs").exists())
-
-    def test_launcher_with_effort_writes_effort_argv(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            repo_root = _copy_aflow_repo(tmp_path)
-            plan_path = tmp_path / "plan.md"
-            completed_plan_path = tmp_path / "completed-plan.md"
-            count_file = tmp_path / "count.txt"
-            _write_plan(
-                plan_path,
-                """# Plan
-
-### [ ] Checkpoint 1: First
-- [ ] step one
-""",
-            )
-            _write_plan(
-                completed_plan_path,
-                """# Plan
-
-### [x] Checkpoint 1: First
-- [x] step one
-""",
-            )
-            for harness in ALL_HARNESSES:
-                _write_fake_harness(repo_root, harness)
-
-            result = _run_launcher(
-                repo_root,
-                "--harness",
-                "codex",
-                "--model",
-                "gpt-5.4",
-                "--effort",
-                "high",
-                str(plan_path),
-                env=_launcher_environment(
-                    repo_root,
-                    scenario="success",
-                    plan_path=plan_path,
-                    count_file=count_file,
-                    completed_plan_path=completed_plan_path,
-                ),
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-
-            run_dirs = sorted((repo_root / ".aflow" / "runs").iterdir())
-            run_dir = run_dirs[0]
-            run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-            self.assertEqual(run_json["effort"], "high")
-
-            turn_dir = run_dir / "turns" / "turn-001"
-            argv = json.loads((turn_dir / "argv.json").read_text(encoding="utf-8"))
-            self.assertIn("-c", argv["argv"])
-            self.assertIn("model_reasoning_effort='\"high\"'", argv["argv"])
-
-    def test_launcher_effort_pi_uses_models_flag(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            repo_root = _copy_aflow_repo(tmp_path)
-            plan_path = tmp_path / "plan.md"
-            completed_plan_path = tmp_path / "completed-plan.md"
-            count_file = tmp_path / "count.txt"
-            _write_plan(
-                plan_path,
-                """# Plan
-
-### [ ] Checkpoint 1: First
-- [ ] step one
-""",
-            )
-            _write_plan(
-                completed_plan_path,
-                """# Plan
-
-### [x] Checkpoint 1: First
-- [x] step one
-""",
-            )
-            for harness in ALL_HARNESSES:
-                _write_fake_harness(repo_root, harness)
-
-            result = _run_launcher(
-                repo_root,
-                "--harness",
-                "pi",
-                "--model",
-                "sonnet",
-                "--effort",
-                "high",
-                str(plan_path),
-                env=_launcher_environment(
-                    repo_root,
-                    scenario="success",
-                    plan_path=plan_path,
-                    count_file=count_file,
-                    completed_plan_path=completed_plan_path,
-                ),
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-
-            run_dirs = sorted((repo_root / ".aflow" / "runs").iterdir())
-            turn_dir = run_dirs[0] / "turns" / "turn-001"
-            argv = json.loads((turn_dir / "argv.json").read_text(encoding="utf-8"))
-            self.assertIn("--models", argv["argv"])
-            self.assertIn("sonnet:high", argv["argv"])
-            self.assertNotIn("--model", argv["argv"])
-
-    def test_launcher_effort_claude_adds_effort_flag(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            repo_root = _copy_aflow_repo(tmp_path)
-            plan_path = tmp_path / "plan.md"
-            completed_plan_path = tmp_path / "completed-plan.md"
-            count_file = tmp_path / "count.txt"
-            _write_plan(
-                plan_path,
-                """# Plan
-
-### [ ] Checkpoint 1: First
-- [ ] step one
-""",
-            )
-            _write_plan(
-                completed_plan_path,
-                """# Plan
-
-### [x] Checkpoint 1: First
-- [x] step one
-""",
-            )
-            for harness in ALL_HARNESSES:
-                _write_fake_harness(repo_root, harness)
-
-            result = _run_launcher(
-                repo_root,
-                "--harness",
-                "claude",
-                "--model",
-                "sonnet",
-                "--effort",
-                "low",
-                str(plan_path),
-                env=_launcher_environment(
-                    repo_root,
-                    scenario="success",
-                    plan_path=plan_path,
-                    count_file=count_file,
-                    completed_plan_path=completed_plan_path,
-                ),
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-
-            run_dirs = sorted((repo_root / ".aflow" / "runs").iterdir())
-            turn_dir = run_dirs[0] / "turns" / "turn-001"
-            argv = json.loads((turn_dir / "argv.json").read_text(encoding="utf-8"))
-            self.assertIn("--effort", argv["argv"])
-            self.assertIn("low", argv["argv"])
-
-    def test_launcher_stops_after_five_unchanged_snapshots_with_fake_pi(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            repo_root = _copy_aflow_repo(tmp_path)
-            plan_path = tmp_path / "plan.md"
-            count_file = tmp_path / "count.txt"
-            _write_plan(
-                plan_path,
-                """# Plan
-
-### [ ] Checkpoint 1: First
-- [ ] step one
-""",
-            )
-            for harness in ALL_HARNESSES:
-                _write_fake_harness(repo_root, harness)
-
-            result = _run_launcher(
-                repo_root,
-                "--harness",
-                "pi",
-                "--model",
-                "sonnet",
-                str(plan_path),
-                env=_launcher_environment(
-                    repo_root,
-                    scenario="stagnation",
-                    plan_path=plan_path,
-                    count_file=count_file,
-                ),
-            )
-
-            self.assertEqual(result.returncode, 1)
-            self.assertIn("checkpoint progress did not change for 5 completed turns", result.stderr)
-            run_dirs = sorted((repo_root / ".aflow" / "runs").iterdir())
-            self.assertEqual(len(run_dirs), 1)
-            run_json = json.loads((run_dirs[0] / "run.json").read_text(encoding="utf-8"))
-            self.assertEqual(run_json["status"], "failed")
-            self.assertEqual(run_json["turns_completed"], 5)
-            self.assertEqual(run_json["stagnation_turns"], 5)
-            self.assertIn(str(run_dirs[0]), run_json["failure_reason"])
-            self.assertEqual(len(list((run_dirs[0] / "turns").iterdir())), 5)
-
-    def test_launcher_stops_after_fifteen_turns_with_fake_claude(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            repo_root = _copy_aflow_repo(tmp_path)
-            plan_path = tmp_path / "plan.md"
-            alpha_plan_path = tmp_path / "alpha-plan.md"
-            beta_plan_path = tmp_path / "beta-plan.md"
-            count_file = tmp_path / "count.txt"
-            _write_plan(
-                plan_path,
-                """# Plan
-
-### [ ] Checkpoint 1: Alpha
-- [ ] step one
-""",
-            )
-            _write_plan(
-                alpha_plan_path,
-                """# Plan
-
-### [ ] Checkpoint 1: Alpha
-- [ ] step one
-""",
-            )
-            _write_plan(
-                beta_plan_path,
-                """# Plan
-
-### [ ] Checkpoint 1: Beta
-- [ ] step one
-""",
-            )
-            for harness in ALL_HARNESSES:
-                _write_fake_harness(repo_root, harness)
-
-            result = _run_launcher(
-                repo_root,
-                "--harness",
-                "claude",
-                "--model",
-                "claude-sonnet-4-6",
-                str(plan_path),
-                env=_launcher_environment(
-                    repo_root,
-                    scenario="max-turns",
-                    plan_path=plan_path,
-                    count_file=count_file,
-                    alpha_plan_path=alpha_plan_path,
-                    beta_plan_path=beta_plan_path,
-                ),
-            )
-
-            self.assertEqual(result.returncode, 1)
-            self.assertIn("reached max turns limit of 15", result.stderr)
-            run_dirs = sorted((repo_root / ".aflow" / "runs").iterdir())
-            self.assertEqual(len(run_dirs), 1)
-            run_json = json.loads((run_dirs[0] / "run.json").read_text(encoding="utf-8"))
-            self.assertEqual(run_json["status"], "failed")
-            self.assertEqual(run_json["turns_completed"], 15)
-            self.assertEqual(len(list((run_dirs[0] / "turns").iterdir())), 15)
-
-            turn_dir = run_dirs[0] / "turns" / "turn-001"
-            argv = json.loads((turn_dir / "argv.json").read_text(encoding="utf-8"))
-            self.assertEqual(argv["label"], "claude")
-            self.assertEqual(argv["prompt_mode"], "system-prompt-flag")
-            self.assertEqual(
-                argv["argv"][:11],
-                [
-                    "claude",
-                    "-p",
-                    "--system-prompt",
-                    (turn_dir / "system-prompt.txt").read_text(encoding="utf-8"),
-                    "--model",
-                    "claude-sonnet-4-6",
-                    "--permission-mode",
-                    "bypassPermissions",
-                    "--dangerously-skip-permissions",
-                    "--tools",
-                    "default",
-                ],
-            )
-
-    def test_launcher_stops_immediately_on_non_zero_fake_harness_exit(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            repo_root = _copy_aflow_repo(tmp_path)
-            plan_path = tmp_path / "plan.md"
-            mutated_plan_path = tmp_path / "mutated-plan.md"
-            count_file = tmp_path / "count.txt"
-            _write_plan(
-                plan_path,
-                """# Plan
-
-### [ ] Checkpoint 1: First
-- [ ] step one
-""",
-            )
-            _write_plan(
-                mutated_plan_path,
-                """# Plan
-
-### [ ] Checkpoint 1: Updated
-- [ ] step one
-""",
-            )
-            for harness in ALL_HARNESSES:
-                _write_fake_harness(repo_root, harness)
-
-            result = _run_launcher(
-                repo_root,
-                "--harness",
-                "codex",
-                "--model",
-                "gpt-5.4",
-                str(plan_path),
-                env=_launcher_environment(
-                    repo_root,
-                    scenario="fail",
-                    plan_path=plan_path,
-                    count_file=count_file,
-                    mutated_plan_path=mutated_plan_path,
-                    exit_code=7,
-                ),
-            )
-
-            self.assertEqual(result.returncode, 1)
-            self.assertIn("harness 'codex' exited with code 7", result.stderr)
-            run_dirs = sorted((repo_root / ".aflow" / "runs").iterdir())
-            self.assertEqual(len(run_dirs), 1)
-            run_json = json.loads((run_dirs[0] / "run.json").read_text(encoding="utf-8"))
-            self.assertEqual(run_json["status"], "failed")
-            self.assertEqual(run_json["turns_completed"], 0)
-            self.assertIn("run log directory:", run_json["failure_reason"])
-            self.assertEqual(run_json["last_snapshot"]["current_checkpoint_name"], "Checkpoint 1: Updated")
-            turn_dir = run_dirs[0] / "turns" / "turn-001"
-            self.assertEqual((turn_dir / "stderr.txt").read_text(encoding="utf-8").strip(), "codex failing turn 1")
-            result_json = json.loads((turn_dir / "result.json").read_text(encoding="utf-8"))
-            self.assertEqual(result_json["status"], "harness-failed")
-            self.assertEqual(result_json["returncode"], 7)
-            self.assertEqual(result_json["snapshot_after"]["current_checkpoint_name"], "Checkpoint 1: Updated")
-
-    def test_launcher_uses_aflow_runs_directory(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            repo_root = _copy_aflow_repo(tmp_path)
-            plan_path = tmp_path / "plan.md"
-            completed_plan_path = tmp_path / "completed-plan.md"
-            count_file = tmp_path / "count.txt"
-            _write_plan(
-                plan_path,
-                """# Plan
-
-### [ ] Checkpoint 1: First
-- [ ] step one
-""",
-            )
-            _write_plan(
-                completed_plan_path,
-                """# Plan
-
-### [x] Checkpoint 1: First
-- [x] step one
-""",
-            )
-            for harness in ALL_HARNESSES:
-                _write_fake_harness(repo_root, harness)
-
-            _run_launcher(
-                repo_root,
-                "--harness",
-                "codex",
-                "--model",
-                "gpt-5.4",
-                str(plan_path),
-                env=_launcher_environment(
-                    repo_root,
-                    scenario="success",
-                    plan_path=plan_path,
-                    count_file=count_file,
-                    completed_plan_path=completed_plan_path,
-                ),
-            )
-
-            self.assertTrue((repo_root / ".aflow" / "runs").exists())
-            self.assertFalse((repo_root / ".ralf" / "runs").exists())
-
-    def test_launcher_opencode_with_effort_warns_and_ignores_effort(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            repo_root = _copy_aflow_repo(tmp_path)
-            resolved_repo_root = repo_root.resolve()
-            plan_path = tmp_path / "plan.md"
-            completed_plan_path = tmp_path / "completed-plan.md"
-            count_file = tmp_path / "count.txt"
-            _write_plan(
-                plan_path,
-                """# Plan
-
-### [ ] Checkpoint 1: First
-- [ ] step one
-""",
-            )
-            _write_plan(
-                completed_plan_path,
-                """# Plan
-
-### [x] Checkpoint 1: First
-- [x] step one
-""",
-            )
-            for harness in ALL_HARNESSES:
-                _write_fake_harness(repo_root, harness)
-
-            result = _run_launcher(
-                repo_root,
-                "--harness",
-                "opencode",
-                "--model",
-                "glm-5-turbo",
-                "--effort",
-                "high",
-                str(plan_path),
-                env=_launcher_environment(
-                    repo_root,
-                    scenario="success",
-                    plan_path=plan_path,
-                    count_file=count_file,
-                    completed_plan_path=completed_plan_path,
-                ),
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("warning: harness 'opencode' ignores --effort", result.stderr)
-            self.assertEqual(result.stderr.count("warning"), 1)
-
-            run_dirs = sorted((repo_root / ".aflow" / "runs").iterdir())
-            run_dir = run_dirs[0]
-            run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-            self.assertEqual(run_json["effort"], "high")
-
-            turn_dir = run_dir / "turns" / "turn-001"
-            argv = json.loads((turn_dir / "argv.json").read_text(encoding="utf-8"))
-            self.assertEqual(argv["label"], "opencode")
-            self.assertNotIn("effort", " ".join(argv["argv"]).lower())
-            self.assertEqual(argv["argv"][0], "opencode")
-            self.assertIn("--dir", argv["argv"])
-            self.assertIn(str(resolved_repo_root), argv["argv"])
-
-    def test_launcher_gemini_with_effort_warns_and_ignores_effort(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            repo_root = _copy_aflow_repo(tmp_path)
-            plan_path = tmp_path / "plan.md"
-            completed_plan_path = tmp_path / "completed-plan.md"
-            count_file = tmp_path / "count.txt"
-            _write_plan(
-                plan_path,
-                """# Plan
-
-### [ ] Checkpoint 1: First
-- [ ] step one
-""",
-            )
-            _write_plan(
-                completed_plan_path,
-                """# Plan
-
-### [x] Checkpoint 1: First
-- [x] step one
-""",
-            )
-            for harness in ALL_HARNESSES:
-                _write_fake_harness(repo_root, harness)
-
-            result = _run_launcher(
-                repo_root,
-                "--harness",
-                "gemini",
-                "--model",
-                "gemini-2.5-pro",
-                "--effort",
-                "high",
-                str(plan_path),
-                env=_launcher_environment(
-                    repo_root,
-                    scenario="success",
-                    plan_path=plan_path,
-                    count_file=count_file,
-                    completed_plan_path=completed_plan_path,
-                ),
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("warning: harness 'gemini' ignores --effort", result.stderr)
-            self.assertEqual(result.stderr.count("warning"), 1)
-
-            run_dirs = sorted((repo_root / ".aflow" / "runs").iterdir())
-            run_dir = run_dirs[0]
-            run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-            self.assertEqual(run_json["effort"], "high")
-
-            turn_dir = run_dir / "turns" / "turn-001"
-            argv = json.loads((turn_dir / "argv.json").read_text(encoding="utf-8"))
-            self.assertEqual(argv["label"], "gemini")
-            self.assertNotIn("effort", " ".join(argv["argv"]).lower())
-            self.assertIn("--approval-mode", argv["argv"])
-            self.assertIn("--sandbox=false", argv["argv"])
-
 
 class WorkflowConfigTests(unittest.TestCase):
     def _write_workflow_config(
@@ -4521,6 +2929,424 @@ class WorkflowArtifactTests(unittest.TestCase):
             run_json = json.loads((run_dirs[0] / "run.json").read_text(encoding="utf-8"))
             self.assertEqual(run_json["workflow_name"], "simple")
             self.assertEqual(run_json["current_step_name"], "implement_plan")
+
+
+def _copy_aflow_repo(tmp_path: Path) -> Path:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    aflow_src = Path(__file__).resolve().parents[1]
+    aflow_dst = repo_root / "aflow"
+    shutil.copytree(
+        aflow_src,
+        aflow_dst,
+        ignore=shutil.ignore_patterns("__pycache__", "tests"),
+    )
+    return repo_root
+
+
+def _write_workflow_harness_script(repo_root: Path, harness_name: str) -> Path:
+    bin_dir = repo_root / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    script = bin_dir / harness_name
+    script.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env python3
+            from __future__ import annotations
+            import os, shutil, sys
+            from pathlib import Path
+
+            plan_path = Path(os.environ["AFLOW_TEST_PLAN_PATH"])
+            scenario = os.environ.get("AFLOW_TEST_SCENARIO", "noop")
+            count_file = Path(os.environ["AFLOW_TEST_COUNT_FILE"])
+            count = int(count_file.read_text(encoding="utf-8")) + 1 if count_file.exists() else 1
+            count_file.write_text(str(count), encoding="utf-8")
+
+            print(f"{harness_name} turn {count}")
+
+            if scenario == "complete":
+                shutil.copyfile(os.environ["AFLOW_TEST_COMPLETED_PLAN"], plan_path)
+                sys.exit(0)
+
+            if scenario == "noop":
+                sys.exit(0)
+
+            if scenario == "create_plan":
+                new_plan = os.environ.get("AFLOW_TEST_NEW_PLAN_PATH", "")
+                if new_plan:
+                    Path(new_plan).write_text("# Generated\\n", encoding="utf-8")
+                shutil.copyfile(os.environ["AFLOW_TEST_COMPLETED_PLAN"], plan_path)
+                sys.exit(0)
+
+            if scenario == "fail":
+                print(f"{harness_name} failing", file=sys.stderr)
+                sys.exit(int(os.environ.get("AFLOW_TEST_EXIT_CODE", "1")))
+
+            raise SystemExit(f"unknown AFLOW_TEST_SCENARIO {scenario}")
+            """
+        ).replace("{harness_name}", harness_name),
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return script
+
+
+def _workflow_test_env(
+    repo_root: Path,
+    *,
+    scenario: str,
+    plan_path: Path,
+    count_file: Path,
+    home_dir: Path | None = None,
+    completed_plan_path: Path | None = None,
+    new_plan_path: Path | None = None,
+    exit_code: int | None = None,
+) -> dict[str, str]:
+    env = os.environ.copy()
+    env["PATH"] = f"{repo_root / 'bin'}:{env['PATH']}"
+    if home_dir is not None:
+        env["HOME"] = str(home_dir.resolve())
+    env["AFLOW_TEST_SCENARIO"] = scenario
+    env["AFLOW_TEST_PLAN_PATH"] = str(plan_path.resolve())
+    env["AFLOW_TEST_COUNT_FILE"] = str(count_file.resolve())
+    if completed_plan_path is not None:
+        env["AFLOW_TEST_COMPLETED_PLAN"] = str(completed_plan_path.resolve())
+    if new_plan_path is not None:
+        env["AFLOW_TEST_NEW_PLAN_PATH"] = str(new_plan_path.resolve())
+    if exit_code is not None:
+        env["AFLOW_TEST_EXIT_CODE"] = str(exit_code)
+    return env
+
+
+def _run_workflow_launcher(
+    repo_root: Path,
+    *args: str,
+    env: dict[str, str],
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "aflow", *args],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+class WorkflowEndToEndTests(unittest.TestCase):
+    def test_simple_workflow_completion_on_done(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            repo_root = _copy_aflow_repo(tmp_path)
+            home_dir = tmp_path / "home"
+            home_dir.mkdir()
+
+            _write_config(
+                home_dir,
+                """\
+[aflow]
+default_workflow = "simple"
+
+[harness.codex.profiles.default]
+model = "gpt-5.4"
+
+[workflow.simple.steps.implement_plan]
+profile = "codex.default"
+prompts = ["p"]
+go = [
+  { to = "END", when = "DONE || MAX_TURNS_REACHED" },
+  { to = "implement_plan" },
+]
+
+[prompts]
+p = "Work from {ACTIVE_PLAN_PATH}."
+""",
+            )
+
+            plan_path = tmp_path / "plan.md"
+            completed_plan_path = tmp_path / "completed.md"
+            count_file = tmp_path / "count.txt"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+""",
+            )
+            _write_plan(
+                completed_plan_path,
+                """# Plan
+
+### [x] Checkpoint 1: First
+- [x] step one
+""",
+            )
+            _write_workflow_harness_script(repo_root, "codex")
+
+            result = _run_workflow_launcher(
+                repo_root,
+                "--max-turns", "5",
+                str(plan_path),
+                env=_workflow_test_env(
+                    repo_root,
+                    scenario="complete",
+                    plan_path=plan_path,
+                    count_file=count_file,
+                    home_dir=home_dir,
+                    completed_plan_path=completed_plan_path,
+                ),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            run_dirs = sorted((repo_root / ".aflow" / "runs").iterdir())
+            self.assertEqual(len(run_dirs), 1)
+            run_json = json.loads((run_dirs[0] / "run.json").read_text(encoding="utf-8"))
+            self.assertEqual(run_json["status"], "completed")
+            self.assertEqual(run_json["workflow_name"], "simple")
+            self.assertEqual(run_json["turns_completed"], 1)
+
+    def test_reviewer_created_plan_becomes_active_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            repo_root = _copy_aflow_repo(tmp_path)
+            home_dir = tmp_path / "home"
+            home_dir.mkdir()
+
+            _write_config(
+                home_dir,
+                """\
+[aflow]
+default_workflow = "loop"
+
+[harness.codex.profiles.default]
+model = "gpt-5.4"
+
+[workflow.loop.steps.review]
+profile = "codex.default"
+prompts = ["review_p"]
+go = [{ to = "implement" }]
+
+[workflow.loop.steps.implement]
+profile = "codex.default"
+prompts = ["impl_p"]
+go = [
+  { to = "END", when = "DONE || MAX_TURNS_REACHED" },
+  { to = "review" },
+]
+
+[prompts]
+review_p = "Active: {ACTIVE_PLAN_PATH}. New: {NEW_PLAN_PATH}."
+impl_p = "Active: {ACTIVE_PLAN_PATH}."
+""",
+            )
+
+            plan_path = tmp_path / "plan.md"
+            completed_plan_path = tmp_path / "completed.md"
+            count_file = tmp_path / "count.txt"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+""",
+            )
+            _write_plan(
+                completed_plan_path,
+                """# Plan
+
+### [x] Checkpoint 1: First
+- [x] step one
+""",
+            )
+            _write_workflow_harness_script(repo_root, "codex")
+
+            call_count = [0]
+
+            def count_env():
+                nonlocal call_count
+                call_count[0] += 1
+                new_plan = plan_path.parent / "plan-cp01-v01.md"
+                scenario = "create_plan" if call_count[0] == 1 else "complete"
+                return _workflow_test_env(
+                    repo_root,
+                    scenario=scenario,
+                    plan_path=plan_path,
+                    count_file=count_file,
+                    home_dir=home_dir,
+                    completed_plan_path=completed_plan_path,
+                    new_plan_path=new_plan if call_count[0] == 1 else None,
+                )
+
+            result = _run_workflow_launcher(
+                repo_root,
+                "--max-turns", "5",
+                str(plan_path),
+                env=count_env(),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            run_dirs = sorted((repo_root / ".aflow" / "runs").iterdir())
+            self.assertEqual(len(run_dirs), 1)
+            run_json = json.loads((run_dirs[0] / "run.json").read_text(encoding="utf-8"))
+            self.assertEqual(run_json["status"], "completed")
+            self.assertEqual(run_json["turns_completed"], 2)
+
+            turn2_result = json.loads(
+                (run_dirs[0] / "turns" / "turn-002" / "result.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                Path(turn2_result["active_plan_path"]).resolve(),
+                (plan_path.parent / "plan-cp01-v01.md").resolve(),
+            )
+
+    def test_reviewer_without_generated_plan_keeps_active_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            repo_root = _copy_aflow_repo(tmp_path)
+            home_dir = tmp_path / "home"
+            home_dir.mkdir()
+
+            _write_config(
+                home_dir,
+                """\
+[aflow]
+default_workflow = "loop"
+
+[harness.codex.profiles.default]
+model = "gpt-5.4"
+
+[workflow.loop.steps.review]
+profile = "codex.default"
+prompts = ["review_p"]
+go = [{ to = "implement" }]
+
+[workflow.loop.steps.implement]
+profile = "codex.default"
+prompts = ["impl_p"]
+go = [
+  { to = "END", when = "DONE || MAX_TURNS_REACHED" },
+  { to = "review" },
+]
+
+[prompts]
+review_p = "Active: {ACTIVE_PLAN_PATH}."
+impl_p = "Active: {ACTIVE_PLAN_PATH}."
+""",
+            )
+
+            plan_path = tmp_path / "plan.md"
+            completed_plan_path = tmp_path / "completed.md"
+            count_file = tmp_path / "count.txt"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+- [ ] step two
+""",
+            )
+            _write_plan(
+                completed_plan_path,
+                """# Plan
+
+### [x] Checkpoint 1: First
+- [x] step one
+- [x] step two
+""",
+            )
+            _write_workflow_harness_script(repo_root, "codex")
+
+            result = _run_workflow_launcher(
+                repo_root,
+                "--max-turns", "4",
+                str(plan_path),
+                env=_workflow_test_env(
+                    repo_root,
+                    scenario="noop",
+                    plan_path=plan_path,
+                    count_file=count_file,
+                    home_dir=home_dir,
+                    completed_plan_path=completed_plan_path,
+                ),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            run_dirs = sorted((repo_root / ".aflow" / "runs").iterdir())
+            run_json = json.loads((run_dirs[0] / "run.json").read_text(encoding="utf-8"))
+            self.assertEqual(run_json["status"], "completed")
+            self.assertEqual(run_json["turns_completed"], 4)
+
+            for turn_dir in sorted((run_dirs[0] / "turns").iterdir()):
+                turn_result = json.loads((turn_dir / "result.json").read_text(encoding="utf-8"))
+                self.assertEqual(
+                    Path(turn_result["active_plan_path"]).resolve(),
+                    plan_path.resolve(),
+                    f"Turn {turn_dir.name} should have original active plan",
+                )
+
+    def test_max_turns_routes_to_end(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            repo_root = _copy_aflow_repo(tmp_path)
+            home_dir = tmp_path / "home"
+            home_dir.mkdir()
+
+            _write_config(
+                home_dir,
+                """\
+[aflow]
+default_workflow = "simple"
+
+[harness.codex.profiles.default]
+model = "gpt-5.4"
+
+[workflow.simple.steps.implement_plan]
+profile = "codex.default"
+prompts = ["p"]
+go = [
+  { to = "END", when = "DONE || MAX_TURNS_REACHED" },
+  { to = "implement_plan" },
+]
+
+[prompts]
+p = "Work."
+""",
+            )
+
+            plan_path = tmp_path / "plan.md"
+            count_file = tmp_path / "count.txt"
+            _write_plan(
+                plan_path,
+                """# Plan
+
+### [ ] Checkpoint 1: First
+- [ ] step one
+""",
+            )
+            _write_workflow_harness_script(repo_root, "codex")
+
+            result = _run_workflow_launcher(
+                repo_root,
+                "--max-turns", "3",
+                str(plan_path),
+                env=_workflow_test_env(
+                    repo_root,
+                    scenario="noop",
+                    plan_path=plan_path,
+                    count_file=count_file,
+                    home_dir=home_dir,
+                ),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            run_dirs = sorted((repo_root / ".aflow" / "runs").iterdir())
+            self.assertEqual(len(run_dirs), 1)
+            run_json = json.loads((run_dirs[0] / "run.json").read_text(encoding="utf-8"))
+            self.assertEqual(run_json["status"], "completed")
+            self.assertEqual(run_json["turns_completed"], 3)
 
 
 if __name__ == "__main__":
