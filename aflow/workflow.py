@@ -412,6 +412,7 @@ def run_workflow(
     write_run_metadata(
         run_paths, config, state, status="initializing",
         workflow_name=workflow_name, original_plan_path=original_plan_path,
+        active_plan_path=active_plan_path,
     )
 
     if banner is None:
@@ -431,6 +432,7 @@ def run_workflow(
         write_run_metadata(
             run_paths, config, state, status="failed", failure_reason=summary,
             workflow_name=workflow_name, original_plan_path=original_plan_path,
+            active_plan_path=active_plan_path,
         )
         raise WorkflowError(summary, run_dir=run_paths.run_dir) from exc
 
@@ -439,6 +441,7 @@ def run_workflow(
     write_run_metadata(
         run_paths, config, state, status="running", last_snapshot=original_snapshot,
         workflow_name=workflow_name, original_plan_path=original_plan_path,
+        active_plan_path=active_plan_path,
     )
     banner.update(state)
 
@@ -455,10 +458,12 @@ def run_workflow(
         write_run_metadata(
             run_paths, config, state, status="completed", last_snapshot=original_snapshot,
             workflow_name=workflow_name, original_plan_path=original_plan_path,
+            active_plan_path=active_plan_path,
         )
         return result
 
     use_popen = runner is None
+    new_plan_path: Path | None = None
 
     for turn_number in range(1, config.max_turns + 1):
         state.active_turn = turn_number
@@ -576,6 +581,7 @@ def run_workflow(
                 turns_completed=state.turns_completed,
                 workflow_name=workflow_name, original_plan_path=original_plan_path,
                 current_step_name=current_step_name, active_plan_path=active_plan_path,
+                new_plan_path=new_plan_path,
             )
             banner.stop(state)
             raise WorkflowError(summary, run_dir=run_paths.run_dir) from exc
@@ -609,6 +615,7 @@ def run_workflow(
                 last_snapshot=post_snapshot,
                 workflow_name=workflow_name, original_plan_path=original_plan_path,
                 current_step_name=current_step_name, active_plan_path=active_plan_path,
+                new_plan_path=new_plan_path,
             )
             banner.stop(state)
             raise WorkflowError(summary, run_dir=run_paths.run_dir)
@@ -668,6 +675,7 @@ def run_workflow(
                 last_snapshot=state.last_snapshot,
                 workflow_name=workflow_name, original_plan_path=original_plan_path,
                 current_step_name=current_step_name, active_plan_path=active_plan_path,
+                new_plan_path=new_plan_path,
             )
             banner.stop(state)
             raise WorkflowError(summary, run_dir=run_paths.run_dir) from exc
@@ -695,6 +703,7 @@ def run_workflow(
             turns_completed=state.turns_completed,
             workflow_name=workflow_name, original_plan_path=original_plan_path,
             current_step_name=current_step_name, active_plan_path=active_plan_path,
+            new_plan_path=new_plan_path,
         )
 
         if transition_target == "END":
@@ -711,6 +720,7 @@ def run_workflow(
                 turns_completed=state.turns_completed,
                 workflow_name=workflow_name, original_plan_path=original_plan_path,
                 current_step_name=current_step_name, active_plan_path=active_plan_path,
+                new_plan_path=new_plan_path,
             )
             prune_old_runs(run_paths.runs_root, config.keep_runs)
             banner.stop(state)
@@ -730,6 +740,7 @@ def run_workflow(
         turns_completed=state.turns_completed,
         workflow_name=workflow_name, original_plan_path=original_plan_path,
         current_step_name=current_step_name, active_plan_path=active_plan_path,
+        new_plan_path=new_plan_path,
     )
     prune_old_runs(run_paths.runs_root, config.keep_runs)
     banner.stop(state)

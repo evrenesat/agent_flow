@@ -84,6 +84,7 @@ def write_run_metadata(
     current_step_name: str | None = None,
     original_plan_path: Path | None = None,
     active_plan_path: Path | None = None,
+    new_plan_path: Path | None = None,
 ) -> None:
     payload: dict[str, object] = {
         "repo_root": str(paths.repo_root),
@@ -109,6 +110,8 @@ def write_run_metadata(
         payload["original_plan_path"] = str(original_plan_path)
     if active_plan_path is not None:
         payload["active_plan_path"] = str(active_plan_path)
+    if new_plan_path is not None:
+        payload["new_plan_path"] = str(new_plan_path)
     if state is not None:
         payload["run_started_at"] = state.run_started_at.isoformat()
         payload["active_turn"] = state.active_turn
