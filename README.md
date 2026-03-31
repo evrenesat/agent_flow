@@ -164,6 +164,9 @@ Plan-path behavior is strict:
 - `NEW_PLAN_PATH` is generated once per turn with the format `<stem>-cpNN-vNN.<suffix>`.
 - `ACTIVE_PLAN_PATH` starts as the original plan path.
 - `ACTIVE_PLAN_PATH` changes only when the current harness step actually writes `NEW_PLAN_PATH`.
+- Before the workflow starts, `aflow` copies the original plan into `<repo_root>/plans/backups/`.
+- If the matching backup content already exists, `aflow` reuses it.
+- If the same backup name already exists with different content, `aflow` writes the next `_vNN` file instead of overwriting anything.
 
 Extra CLI instructions after the plan path are appended to the rendered step prompt.
 

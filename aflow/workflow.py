@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -174,6 +176,96 @@ def generate_new_plan_path(
                 existing_versions.add(int(m.group(1)))
     next_version = max(existing_versions, default=0) + 1
     return parent / f"{stem}-cp{cp:02d}-v{next_version:02d}{suffix}"
+
+
+def _plan_backup_base_name(original_plan_path: Path) -> tuple[str, str]:
+    suffix = original_plan_path.suffix
+    if suffix:
+        return original_plan_path.name[:-len(suffix)], suffix
+    return original_plan_path.name, ""
+
+
+def _file_identity(path: Path) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as stream:
+        while True:
+            chunk = stream.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            digest.update(chunk)
+    return size, digest.hexdigest()
+
+
+def _same_file_contents(
+    source_path: Path,
+    candidate_path: Path,
+    *,
+    source_identity: tuple[int, str] | None = None,
+) -> bool:
+    if source_identity is None:
+        source_identity = _file_identity(source_path)
+    source_size, source_hash = source_identity
+    if candidate_path.stat().st_size != source_size:
+        return False
+    candidate_identity = _file_identity(candidate_path)
+    return candidate_identity[1] == source_hash
+
+
+def _backup_original_plan(repo_root: Path, original_plan_path: Path) -> Path:
+    if not original_plan_path.is_file():
+        raise WorkflowError(f"original plan file does not exist: {original_plan_path}")
+
+    backup_dir = repo_root / "plans" / "backups"
+    base_name, suffix = _plan_backup_base_name(original_plan_path)
+    base_backup_path = backup_dir / f"{base_name}{suffix}"
+    version_pattern = re.compile(
+        rf"^{re.escape(base_name)}_v(\d+){re.escape(suffix)}$"
+    )
+    source_identity = _file_identity(original_plan_path)
+    highest_version = 1
+
+    try:
+        backup_dir.mkdir(parents=True, exist_ok=True)
+
+        if base_backup_path.is_file():
+            if _same_file_contents(
+                original_plan_path,
+                base_backup_path,
+                source_identity=source_identity,
+            ):
+                return base_backup_path
+
+        for child in backup_dir.iterdir():
+            if not child.is_file() or child == base_backup_path:
+                continue
+            match = version_pattern.match(child.name)
+            if match is None:
+                continue
+            highest_version = max(highest_version, int(match.group(1)))
+            if _same_file_contents(
+                original_plan_path,
+                child,
+                source_identity=source_identity,
+            ):
+                return child
+
+        if not base_backup_path.exists():
+            target_path = base_backup_path
+        else:
+            version = max(highest_version, 1) + 1
+            target_path = backup_dir / f"{base_name}_v{version:02d}{suffix}"
+            while target_path.exists():
+                version += 1
+                target_path = backup_dir / f"{base_name}_v{version:02d}{suffix}"
+
+        shutil.copyfile(original_plan_path, target_path)
+        return target_path
+    except OSError as exc:
+        raise WorkflowError(
+            f"failed to back up original plan {original_plan_path} into {backup_dir}: {exc}"
+        ) from exc
 
 
 def _evaluate_condition_token(
@@ -441,7 +533,22 @@ def run_workflow(
     banner.start(state)
 
     try:
+        _backup_original_plan(config.repo_root, original_plan_path)
         parsed_plan = load_plan(original_plan_path)
+    except WorkflowError as exc:
+        state.status_message = "failed"
+        banner.stop(state)
+        summary = _format_failure(
+            reason=exc.summary,
+            run_dir=run_paths.run_dir,
+            snapshot=PlanSnapshot(None, 0, 0, False),
+        )
+        write_run_metadata(
+            run_paths, config, state, status="failed", failure_reason=summary,
+            workflow_name=workflow_name, original_plan_path=original_plan_path,
+            active_plan_path=active_plan_path,
+        )
+        raise WorkflowError(summary, run_dir=run_paths.run_dir) from exc
     except (PlanParseError, FileNotFoundError) as exc:
         state.status_message = "failed"
         banner.stop(state)

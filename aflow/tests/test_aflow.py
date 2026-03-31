@@ -9,7 +9,7 @@ import tempfile
 import textwrap
 import unittest
 from aflow.config import AflowSection, ConfigError, GoTransition, HarnessProfileConfig, WorkflowConfig, WorkflowHarnessConfig, WorkflowStepConfig, WorkflowUserConfig, bootstrap_config, find_placeholders, load_workflow_config, validate_workflow_config
-from aflow.workflow import WorkflowError, evaluate_condition, generate_new_plan_path, pick_transition, render_prompt, render_step_prompts, resolve_profile, run_workflow
+from aflow.workflow import WorkflowError, _backup_original_plan, evaluate_condition, generate_new_plan_path, pick_transition, render_prompt, render_step_prompts, resolve_profile, run_workflow
 from aflow.cli import build_parser, main
 from aflow.harnesses.claude import ClaudeAdapter
 from aflow.harnesses.codex import CodexAdapter
@@ -767,6 +767,77 @@ class WorkflowRuntimeTests(unittest.TestCase):
             p1 = generate_new_plan_path(original, checkpoint_index=None)
             assert p1.name == 'plan-cp01-v01.md'
 
+    def test_original_plan_backup_creates_repo_root_backup_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_root = root / 'repo'
+            repo_root.mkdir()
+            original = root / 'plan.md'
+            original.write_text('# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n', encoding='utf-8')
+
+            backup_path = _backup_original_plan(repo_root, original)
+
+            expected = repo_root / 'plans' / 'backups' / 'plan.md'
+            assert backup_path == expected
+            assert expected.read_text(encoding='utf-8') == original.read_text(encoding='utf-8')
+            assert len(list((repo_root / 'plans' / 'backups').iterdir())) == 1
+
+    def test_original_plan_backup_reuses_identical_existing_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_root = root / 'repo'
+            repo_root.mkdir()
+            original = root / 'plan.md'
+            text = '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n'
+            original.write_text(text, encoding='utf-8')
+            backup_dir = repo_root / 'plans' / 'backups'
+            backup_dir.mkdir(parents=True)
+            (backup_dir / 'plan.md').write_text(text, encoding='utf-8')
+
+            first = _backup_original_plan(repo_root, original)
+            second = _backup_original_plan(repo_root, original)
+
+            assert first == backup_dir / 'plan.md'
+            assert second == backup_dir / 'plan.md'
+            assert sorted(child.name for child in backup_dir.iterdir()) == ['plan.md']
+
+    def test_original_plan_backup_reuses_identical_versioned_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_root = root / 'repo'
+            repo_root.mkdir()
+            original = root / 'plan.md'
+            text = '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n'
+            original.write_text(text, encoding='utf-8')
+            backup_dir = repo_root / 'plans' / 'backups'
+            backup_dir.mkdir(parents=True)
+            (backup_dir / 'plan.md').write_text('different\n', encoding='utf-8')
+            (backup_dir / 'plan_v02.md').write_text(text, encoding='utf-8')
+
+            backup_path = _backup_original_plan(repo_root, original)
+
+            assert backup_path == backup_dir / 'plan_v02.md'
+            assert sorted(child.name for child in backup_dir.iterdir()) == ['plan.md', 'plan_v02.md']
+
+    def test_original_plan_backup_versions_conflicting_backups(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_root = root / 'repo'
+            repo_root.mkdir()
+            original = root / 'plan.md'
+            backup_dir = repo_root / 'plans' / 'backups'
+            backup_dir.mkdir(parents=True)
+            original.write_text('first version\n', encoding='utf-8')
+            (backup_dir / 'plan.md').write_text('different base\n', encoding='utf-8')
+
+            first_backup = _backup_original_plan(repo_root, original)
+            assert first_backup == backup_dir / 'plan_v02.md'
+
+            original.write_text('second version\n', encoding='utf-8')
+            second_backup = _backup_original_plan(repo_root, original)
+            assert second_backup == backup_dir / 'plan_v03.md'
+            assert sorted(child.name for child in backup_dir.iterdir()) == ['plan.md', 'plan_v02.md', 'plan_v03.md']
+
     def test_condition_parsing_simple_symbols(self) -> None:
         assert evaluate_condition('DONE', done=True, new_plan_exists=False, max_turns_reached=False)
         assert not evaluate_condition('DONE', done=False, new_plan_exists=False, max_turns_reached=False)
@@ -1236,11 +1307,15 @@ class WorkflowEndToEndTests(unittest.TestCase):
             plan_path = tmp_path / 'plan.md'
             completed_plan_path = tmp_path / 'completed.md'
             count_file = tmp_path / 'count.txt'
-            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            original_plan_text = '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n'
+            _write_plan(plan_path, original_plan_text)
             _write_plan(completed_plan_path, '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n')
             _write_workflow_harness_script(repo_root, 'codex')
             result = _run_workflow_launcher(repo_root, '--max-turns', '5', str(plan_path), env=_workflow_test_env(repo_root, scenario='complete', plan_path=plan_path, count_file=count_file, home_dir=home_dir, completed_plan_path=completed_plan_path))
             assert result.returncode == 0
+            backup_path = repo_root / 'plans' / 'backups' / 'plan.md'
+            assert backup_path.exists()
+            assert backup_path.read_text(encoding='utf-8') == original_plan_text
             run_dirs = sorted((repo_root / '.aflow' / 'runs').iterdir())
             assert len(run_dirs) == 1
             run_json = json.loads((run_dirs[0] / 'run.json').read_text(encoding='utf-8'))
