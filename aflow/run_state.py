@@ -3,8 +3,27 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from .plan import PlanSnapshot
+
+
+WorkflowEndReason = Literal[
+    "already_complete",
+    "done",
+    "max_turns_reached",
+    "transition_end",
+]
+
+
+def describe_end_reason(end_reason: WorkflowEndReason) -> str:
+    if end_reason == "already_complete":
+        return "the original plan was already complete"
+    if end_reason == "done":
+        return "DONE evaluated true"
+    if end_reason == "max_turns_reached":
+        return "MAX_TURNS_REACHED matched"
+    return "the workflow selected END"
 
 
 @dataclass(frozen=True)
@@ -24,6 +43,7 @@ class ControllerState:
     run_started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     active_turn: int = 0
     status_message: str = "initializing"
+    end_reason: WorkflowEndReason | None = None
 
 
 @dataclass(frozen=True)
@@ -33,6 +53,7 @@ class ControllerRunResult:
     final_snapshot: PlanSnapshot
     status: str = "completed"
     issues_accumulated: int = 0
+    end_reason: WorkflowEndReason = "transition_end"
 
     def to_dict(self) -> dict[str, object]:
         from dataclasses import asdict
@@ -42,4 +63,5 @@ class ControllerRunResult:
             "final_snapshot": asdict(self.final_snapshot),
             "status": self.status,
             "issues_accumulated": self.issues_accumulated,
+            "end_reason": self.end_reason,
         }

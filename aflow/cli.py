@@ -11,8 +11,8 @@ from .config import (
     load_workflow_config,
     validate_workflow_config,
 )
+from .run_state import ControllerConfig, WorkflowEndReason, describe_end_reason
 from .workflow import WorkflowError, run_workflow
-from .run_state import ControllerConfig
 
 
 DEFAULT_MAX_TURNS = 15
@@ -38,6 +38,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return build_parser().parse_args(argv)
+
+
+def _format_success_summary(workflow_name: str, turns_completed: int, end_reason: WorkflowEndReason) -> str:
+    turn_label = "turn" if turns_completed == 1 else "turns"
+    return (
+        f"Workflow '{workflow_name}' completed after {turns_completed} {turn_label} "
+        f"because {describe_end_reason(end_reason)}."
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -95,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     try:
-        run_workflow(
+        result = run_workflow(
             config,
             workflow_config,
             workflow_name,
@@ -105,6 +113,7 @@ def main(argv: list[str] | None = None) -> int:
     except WorkflowError as exc:
         print(exc.summary, file=sys.stderr)
         return 1
+    print(_format_success_summary(workflow_name, result.turns_completed, result.end_reason))
     return 0
 
 

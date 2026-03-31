@@ -1185,7 +1185,55 @@ class WorkflowRuntimeTests(unittest.TestCase):
             result = run_workflow(controller_config, wf_config, 'simple', config_dir=config_dir, adapter=CodexAdapter(), runner=runner)
             assert result.turns_completed == 0
             assert result.final_snapshot.is_complete
+            assert result.end_reason == 'already_complete'
+            assert result.to_dict()['end_reason'] == 'already_complete'
             assert call_count[0] == 0
+
+    def test_workflow_unconditional_end_uses_transition_end_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            config_dir = repo_root
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+
+            def runner(argv, **kwargs):
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+            wf_config = WorkflowUserConfig(harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(profile='codex.default', prompts=('p',), go=(GoTransition(to='END'),))}, first_step='implement_plan')}, prompts={'p': 'Work.'})
+            controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3)
+            result = run_workflow(controller_config, wf_config, 'simple', config_dir=config_dir, adapter=CodexAdapter(), runner=runner)
+            assert result.turns_completed == 1
+            assert result.end_reason == 'transition_end'
+            run_json = json.loads((result.run_dir / 'run.json').read_text(encoding='utf-8'))
+            assert run_json['end_reason'] == 'transition_end'
+            turn_result = json.loads((result.run_dir / 'turns' / 'turn-001' / 'result.json').read_text(encoding='utf-8'))
+            assert turn_result['end_reason'] == 'transition_end'
+            assert turn_result['status'] == 'running'
+
+    def test_workflow_end_reason_prefers_done_when_plan_completes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            config_dir = repo_root
+            plan_path = repo_root / 'plan.md'
+            completed_plan_path = repo_root / 'completed.md'
+            new_plan_path = repo_root / 'plan-cp01-v01.md'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            _write_plan(completed_plan_path, '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n')
+
+            def runner(argv, **kwargs):
+                shutil.copyfile(completed_plan_path, plan_path)
+                new_plan_path.write_text('# Generated\n', encoding='utf-8')
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            wf_config = WorkflowUserConfig(harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(profile='codex.default', prompts=('p',), go=(GoTransition(to='END', when='NEW_PLAN_EXISTS'),))}, first_step='implement_plan')}, prompts={'p': 'Work.'})
+            controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3)
+            result = run_workflow(controller_config, wf_config, 'simple', config_dir=config_dir, adapter=CodexAdapter(), runner=runner)
+            assert result.turns_completed == 1
+            assert result.end_reason == 'done'
+            run_json = json.loads((result.run_dir / 'run.json').read_text(encoding='utf-8'))
+            assert run_json['end_reason'] == 'done'
+            turn_result = json.loads((result.run_dir / 'turns' / 'turn-001' / 'result.json').read_text(encoding='utf-8'))
+            assert turn_result['end_reason'] == 'done'
+            assert turn_result['status'] == 'completed'
 
 class WorkflowArtifactTests(unittest.TestCase):
 
@@ -1202,6 +1250,7 @@ class WorkflowArtifactTests(unittest.TestCase):
             assert run_json['workflow_name'] == 'simple'
             assert run_json['original_plan_path'] == str(plan_path)
             assert run_json['status'] == 'completed'
+            assert run_json['end_reason'] == 'already_complete'
 
     def test_turn_artifacts_include_workflow_step_and_transition(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1222,6 +1271,7 @@ class WorkflowArtifactTests(unittest.TestCase):
             assert result_json['conditions']['DONE'] == True
             assert result_json['conditions']['NEW_PLAN_EXISTS'] == False
             assert result_json['chosen_transition'] == 'END'
+            assert result_json['end_reason'] == 'done'
 
     def test_turn_artifacts_include_plan_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1297,6 +1347,26 @@ def _run_workflow_launcher(repo_root: Path, *args: str, env: dict[str, str]) -> 
 
 class WorkflowEndToEndTests(unittest.TestCase):
 
+    def test_already_complete_workflow_reports_success_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            repo_root = _copy_aflow_repo(tmp_path)
+            home_dir = tmp_path / 'home'
+            home_dir.mkdir()
+            _write_config(home_dir, '[aflow]\ndefault_workflow = "simple"\n\n[harness.codex.profiles.default]\nmodel = "gpt-5.4"\n\n[workflow.simple.steps.implement_plan]\nprofile = "codex.default"\nprompts = ["p"]\ngo = [{ to = "END", when = "DONE || MAX_TURNS_REACHED" }]\n\n[prompts]\np = "Work."\n')
+            plan_path = tmp_path / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n')
+            count_file = tmp_path / 'count.txt'
+            result = _run_workflow_launcher(repo_root, str(plan_path), env=_workflow_test_env(repo_root, scenario='noop', plan_path=plan_path, count_file=count_file, home_dir=home_dir))
+            assert result.returncode == 0
+            assert result.stdout.strip() == "Workflow 'simple' completed after 0 turns because the original plan was already complete."
+            assert not count_file.exists()
+            run_dirs = sorted((repo_root / '.aflow' / 'runs').iterdir())
+            assert len(run_dirs) == 1
+            run_json = json.loads((run_dirs[0] / 'run.json').read_text(encoding='utf-8'))
+            assert run_json['end_reason'] == 'already_complete'
+            assert run_json['turns_completed'] == 0
+
     def test_simple_workflow_completion_on_done(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -1311,8 +1381,9 @@ class WorkflowEndToEndTests(unittest.TestCase):
             _write_plan(plan_path, original_plan_text)
             _write_plan(completed_plan_path, '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n')
             _write_workflow_harness_script(repo_root, 'codex')
-            result = _run_workflow_launcher(repo_root, '--max-turns', '5', str(plan_path), env=_workflow_test_env(repo_root, scenario='complete', plan_path=plan_path, count_file=count_file, home_dir=home_dir, completed_plan_path=completed_plan_path))
+            result = _run_workflow_launcher(repo_root, '--max-turns', '1', str(plan_path), env=_workflow_test_env(repo_root, scenario='complete', plan_path=plan_path, count_file=count_file, home_dir=home_dir, completed_plan_path=completed_plan_path))
             assert result.returncode == 0
+            assert result.stdout.strip() == "Workflow 'simple' completed after 1 turn because DONE evaluated true."
             backup_path = repo_root / 'plans' / 'backups' / 'plan.md'
             assert backup_path.exists()
             assert backup_path.read_text(encoding='utf-8') == original_plan_text
@@ -1322,6 +1393,9 @@ class WorkflowEndToEndTests(unittest.TestCase):
             assert run_json['status'] == 'completed'
             assert run_json['workflow_name'] == 'simple'
             assert run_json['turns_completed'] == 1
+            assert run_json['end_reason'] == 'done'
+            turn_result = json.loads((run_dirs[0] / 'turns' / 'turn-001' / 'result.json').read_text(encoding='utf-8'))
+            assert turn_result['end_reason'] == 'done'
 
     def test_kiro_workflow_invokes_chat_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1343,9 +1417,11 @@ class WorkflowEndToEndTests(unittest.TestCase):
             run_json = json.loads((run_dirs[0] / 'run.json').read_text(encoding='utf-8'))
             assert run_json['status'] == 'completed'
             assert run_json['turns_completed'] == 1
+            assert run_json['end_reason'] == 'done'
             turn_dir = run_dirs[0] / 'turns' / 'turn-001'
             turn_result = json.loads((turn_dir / 'result.json').read_text(encoding='utf-8'))
             assert turn_result['selector'] == 'kiro.default'
+            assert turn_result['end_reason'] == 'done'
             argv_json = json.loads((turn_dir / 'argv.json').read_text(encoding='utf-8'))
             assert argv_json['argv'][:4] == ['kiro-cli', 'chat', '--no-interactive', '--trust-all-tools']
 
@@ -1377,8 +1453,10 @@ class WorkflowEndToEndTests(unittest.TestCase):
             run_json = json.loads((run_dirs[0] / 'run.json').read_text(encoding='utf-8'))
             assert run_json['status'] == 'completed'
             assert run_json['turns_completed'] == 2
+            assert run_json['end_reason'] == 'done'
             turn2_result = json.loads((run_dirs[0] / 'turns' / 'turn-002' / 'result.json').read_text(encoding='utf-8'))
             assert Path(turn2_result['active_plan_path']).resolve() == (plan_path.parent / 'plan-cp01-v01.md').resolve()
+            assert turn2_result['end_reason'] == 'done'
 
     def test_reviewer_without_generated_plan_keeps_active_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1399,9 +1477,12 @@ class WorkflowEndToEndTests(unittest.TestCase):
             run_json = json.loads((run_dirs[0] / 'run.json').read_text(encoding='utf-8'))
             assert run_json['status'] == 'completed'
             assert run_json['turns_completed'] == 4
+            assert run_json['end_reason'] == 'max_turns_reached'
             for turn_dir in sorted((run_dirs[0] / 'turns').iterdir()):
                 turn_result = json.loads((turn_dir / 'result.json').read_text(encoding='utf-8'))
                 assert Path(turn_result['active_plan_path']).resolve() == plan_path.resolve()
+            turn_result = json.loads((run_dirs[0] / 'turns' / 'turn-004' / 'result.json').read_text(encoding='utf-8'))
+            assert turn_result['end_reason'] == 'max_turns_reached'
 
     def test_max_turns_routes_to_end(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1421,6 +1502,11 @@ class WorkflowEndToEndTests(unittest.TestCase):
             run_json = json.loads((run_dirs[0] / 'run.json').read_text(encoding='utf-8'))
             assert run_json['status'] == 'completed'
             assert run_json['turns_completed'] == 3
+            assert run_json['end_reason'] == 'max_turns_reached'
+            assert result.stdout.strip() == "Workflow 'simple' completed after 3 turns because MAX_TURNS_REACHED matched."
+            turn_result = json.loads((run_dirs[0] / 'turns' / 'turn-003' / 'result.json').read_text(encoding='utf-8'))
+            assert turn_result['end_reason'] == 'max_turns_reached'
+            assert turn_result['status'] == 'running'
 
 class SkillDocsTests(unittest.TestCase):
 

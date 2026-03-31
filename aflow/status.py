@@ -44,6 +44,18 @@ def _checkpoint_display(snapshot: PlanSnapshot) -> str:
     return f"0/{snapshot.total_checkpoint_count}"
 
 
+def _status_display(state: ControllerState) -> str:
+    if state.status_message == "completed" and state.end_reason is not None:
+        if state.end_reason == "already_complete":
+            return "completed: already complete"
+        if state.end_reason == "done":
+            return "completed: done"
+        if state.end_reason == "max_turns_reached":
+            return "completed: max turns reached"
+        return "completed: transition to END"
+    return state.status_message
+
+
 def build_banner(
     *,
     workflow_name: str | None = None,
@@ -99,7 +111,7 @@ def build_banner(
     if workflow_name is None:
         table.add_row("Plan", str(config_plan_path))
 
-    table.add_row("Status", state.status_message)
+    table.add_row("Status", _status_display(state))
 
     title = Text("aflow", style="bold magenta")
     return Panel(table, title=title, border_style="blue")

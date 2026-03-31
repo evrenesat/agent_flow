@@ -206,6 +206,19 @@ While a step is running, `aflow` shows a Rich status panel on stderr with:
 - original, active, and generated plan paths
 - current run status
 
+## Success Reporting
+
+When a workflow finishes successfully, `aflow` prints one line on stdout. The message names the workflow, how many turns ran, and why the run stopped.
+
+The machine-readable `end_reason` values are:
+
+- `already_complete`
+- `done`
+- `max_turns_reached`
+- `transition_end`
+
+`transition_end` covers successful `END` transitions when the plan is still incomplete and the chosen transition is not driven by `DONE` or `MAX_TURNS_REACHED`, including an unconditional `go = [{ to = "END" }]`.
+
 ## Run Logs
 
 Each run writes structured artifacts under `.aflow/runs/<run-id>/`.
@@ -217,7 +230,10 @@ Saved data includes:
 - stdout and stderr for each step
 - plan snapshots before and after each step
 - evaluated conditions and the chosen transition
-- top-level run metadata such as workflow name, current step, turns completed, and plan paths
+- `end_reason` on successful runs, both in `run.json` and in the final turn artifact
+- top-level run metadata such as workflow name, current step, turns completed, plan paths, and the terminal end reason
+
+If a run reaches the hard loop limit without any transition to `END`, that is still a failure, even if the last turn also satisfies `MAX_TURNS_REACHED`.
 
 Older run directories are pruned automatically. The default retention is `20` runs. The default max turn limit is `15`.
 

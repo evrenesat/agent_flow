@@ -8,7 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from .plan import PlanSnapshot
-from .run_state import ControllerConfig, ControllerState
+from .run_state import ControllerConfig, ControllerState, WorkflowEndReason
 from .harnesses.base import HarnessInvocation
 
 
@@ -77,6 +77,7 @@ def write_run_metadata(
     state: ControllerState | None,
     *,
     status: str,
+    end_reason: WorkflowEndReason | None = None,
     failure_reason: str | None = None,
     last_snapshot: PlanSnapshot | None = None,
     turns_completed: int | None = None,
@@ -111,6 +112,10 @@ def write_run_metadata(
         payload["run_started_at"] = state.run_started_at.isoformat()
         payload["active_turn"] = state.active_turn
         payload["status_message"] = state.status_message
+        if end_reason is None:
+            end_reason = state.end_reason
+    if end_reason is not None:
+        payload["end_reason"] = end_reason
     if failure_reason is not None:
         payload["failure_reason"] = failure_reason
     _write_json(paths.run_json, payload)
@@ -135,6 +140,7 @@ def write_turn_artifacts(
     new_plan_path: Path | None = None,
     conditions: dict[str, bool] | None = None,
     chosen_transition: str | None = None,
+    end_reason: WorkflowEndReason | None = None,
 ) -> Path:
     turn_dir = paths.turns_dir / f"turn-{turn_number:03d}"
     turn_dir.mkdir(parents=False, exist_ok=False)
@@ -167,6 +173,8 @@ def write_turn_artifacts(
         result_payload["conditions"] = conditions
     if chosen_transition is not None:
         result_payload["chosen_transition"] = chosen_transition
+    if end_reason is not None:
+        result_payload["end_reason"] = end_reason
     if error is not None:
         result_payload["error"] = error
     _write_json(turn_dir / "result.json", result_payload)

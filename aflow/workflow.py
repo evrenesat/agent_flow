@@ -19,7 +19,7 @@ from .config import (
 from .harnesses import get_adapter
 from .harnesses.base import HarnessAdapter, HarnessInvocation
 from .plan import PlanParseError, PlanSnapshot, load_plan
-from .run_state import ControllerConfig, ControllerRunResult, ControllerState
+from .run_state import ControllerConfig, ControllerRunResult, ControllerState, WorkflowEndReason
 from .runlog import create_run_paths, prune_old_runs, write_run_metadata, write_turn_artifacts
 from .status import BannerRenderer
 
@@ -395,21 +395,56 @@ def pick_transition(
     new_plan_exists: bool,
     max_turns_reached: bool,
 ) -> str:
+    return _select_transition(
+        transitions,
+        step_path=step_path,
+        done=done,
+        new_plan_exists=new_plan_exists,
+        max_turns_reached=max_turns_reached,
+    ).to
+
+
+def _select_transition(
+    transitions: tuple[GoTransition, ...],
+    *,
+    step_path: str,
+    done: bool,
+    new_plan_exists: bool,
+    max_turns_reached: bool,
+) -> GoTransition:
     for transition in transitions:
         if transition.when is None:
-            return transition.to
+            return transition
         if evaluate_condition(
             transition.when,
             done=done,
             new_plan_exists=new_plan_exists,
             max_turns_reached=max_turns_reached,
         ):
-            return transition.to
+            return transition
     raise WorkflowError(
         f"no transition matched for {step_path} "
         f"with conditions: DONE={done}, NEW_PLAN_EXISTS={new_plan_exists}, "
         f"MAX_TURNS_REACHED={max_turns_reached}"
     )
+
+
+def _normalize_end_reason(
+    *,
+    already_complete: bool = False,
+    selected_transition: GoTransition | None = None,
+    done: bool = False,
+    max_turns_reached: bool = False,
+) -> WorkflowEndReason:
+    if already_complete:
+        return "already_complete"
+    if selected_transition is not None and selected_transition.when is None:
+        return "transition_end"
+    if done:
+        return "done"
+    if max_turns_reached:
+        return "max_turns_reached"
+    return "transition_end"
 
 
 def _format_failure(
@@ -575,6 +610,8 @@ def run_workflow(
 
     done = original_snapshot.is_complete
     if done:
+        end_reason = _normalize_end_reason(already_complete=True)
+        state.end_reason = end_reason
         state.status_message = "completed"
         banner.stop(state)
         result = ControllerRunResult(
@@ -582,9 +619,11 @@ def run_workflow(
             turns_completed=0,
             final_snapshot=original_snapshot,
             issues_accumulated=state.issues_accumulated,
+            end_reason=end_reason,
         )
         write_run_metadata(
             run_paths, config, state, status="completed", last_snapshot=original_snapshot,
+            end_reason=end_reason,
             workflow_name=workflow_name, original_plan_path=original_plan_path,
             active_plan_path=active_plan_path,
         )
@@ -766,15 +805,17 @@ def run_workflow(
             "MAX_TURNS_REACHED": max_turns_reached,
         }
 
+        selected_transition: GoTransition | None = None
         transition_target: str | None = None
         try:
-            transition_target = pick_transition(
+            selected_transition = _select_transition(
                 step.go,
                 step_path=step_path,
                 done=done,
                 new_plan_exists=new_plan_exists,
                 max_turns_reached=max_turns_reached,
             )
+            transition_target = selected_transition.to
         except WorkflowError as exc:
             state.status_message = "failed"
             state.issues_accumulated += 1
@@ -824,6 +865,15 @@ def run_workflow(
             new_plan_path=new_plan_path,
             conditions=conditions,
             chosen_transition=transition_target,
+            end_reason=(
+                _normalize_end_reason(
+                    selected_transition=selected_transition,
+                    done=done,
+                    max_turns_reached=max_turns_reached,
+                )
+                if transition_target == "END" and selected_transition is not None
+                else None
+            ),
         )
 
         write_run_metadata(
@@ -836,17 +886,25 @@ def run_workflow(
         )
 
         if transition_target == "END":
+            end_reason = _normalize_end_reason(
+                selected_transition=selected_transition,
+                done=done,
+                max_turns_reached=max_turns_reached,
+            )
+            state.end_reason = end_reason
             state.status_message = "completed"
             result = ControllerRunResult(
                 run_dir=run_paths.run_dir,
                 turns_completed=state.turns_completed,
                 final_snapshot=post_snapshot,
                 issues_accumulated=state.issues_accumulated,
+                end_reason=end_reason,
             )
             write_run_metadata(
                 run_paths, config, state, status="completed",
                 last_snapshot=post_snapshot,
                 turns_completed=state.turns_completed,
+                end_reason=end_reason,
                 workflow_name=workflow_name, original_plan_path=original_plan_path,
                 current_step_name=current_step_name, active_plan_path=active_plan_path,
                 new_plan_path=new_plan_path,
