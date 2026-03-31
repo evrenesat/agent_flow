@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from importlib import resources
 from pathlib import Path
 from collections.abc import Mapping
 import tomllib
@@ -337,12 +338,13 @@ def load_workflow_config(
 
 
 def bootstrap_config(config_path: Path | None = None) -> Path:
-    from .default_config import STARTER_CONFIG
-
     path = config_path or _config_path()
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(STARTER_CONFIG, encoding="utf-8")
+        config_text = resources.files("aflow").joinpath("aflow.toml").read_text(
+            encoding="utf-8"
+        )
+        path.write_text(config_text, encoding="utf-8")
     return path
 
 

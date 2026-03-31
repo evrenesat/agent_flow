@@ -8,6 +8,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from importlib import resources
 from aflow.config import AflowSection, ConfigError, GoTransition, HarnessProfileConfig, WorkflowConfig, WorkflowHarnessConfig, WorkflowStepConfig, WorkflowUserConfig, bootstrap_config, find_placeholders, load_workflow_config, validate_workflow_config
 from aflow.workflow import WorkflowError, _backup_original_plan, evaluate_condition, generate_new_plan_path, pick_transition, render_prompt, render_step_prompts, resolve_profile, run_workflow
 from aflow.cli import build_parser, main
@@ -524,29 +525,37 @@ class WorkflowConfigTests(unittest.TestCase):
             assert 'harness.codex.profiles.high.model' in placeholders
             assert 'harness.opencode.profiles.default.model' in placeholders
 
-    def test_bootstrap_template_matches_canonical_schema(self) -> None:
-        from aflow.default_config import STARTER_CONFIG
+    def test_bundled_config_matches_canonical_schema(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / 'starter.toml'
-            config_path.write_text(STARTER_CONFIG, encoding='utf-8')
+            config_path.write_text(resources.files('aflow').joinpath('aflow.toml').read_text(encoding='utf-8'), encoding='utf-8')
             config = load_workflow_config(config_path)
-            assert config.aflow.default_workflow == 'simple'
+            assert config.aflow.default_workflow == 'ralph'
             assert 'opencode' in config.harnesses
             assert 'codex' in config.harnesses
-            assert config.harnesses['opencode'].profiles['default'].model == 'FILL_IN_MODEL'
-            assert config.harnesses['codex'].profiles['high'].model == 'FILL_IN_MODEL'
+            assert 'claude' in config.harnesses
+            assert config.harnesses['opencode'].profiles['turbo'].model == 'zai-coding-plan/glm-5-turbo'
+            assert config.harnesses['codex'].profiles['high'].model == 'GPT-5.4'
             assert config.harnesses['codex'].profiles['high'].effort == 'high'
-            assert 'simple' in config.workflows
-            step = config.workflows['simple'].steps['implement_plan']
-            assert step.profile == 'opencode.default'
-            assert step.prompts == ('implementation_prompt',)
+            assert 'ralph' in config.workflows
+            assert 'review_implement_review' in config.workflows
+            assert 'review_implement_cp_review' in config.workflows
+            step = config.workflows['ralph'].steps['implement_plan']
+            assert step.profile == 'opencode.turbo'
+            assert step.prompts == ('simple_implementation',)
             assert len(step.go) == 2
             assert step.go[0].to == 'END'
             assert step.go[0].when == 'DONE || MAX_TURNS_REACHED'
             assert step.go[1].to == 'implement_plan'
             assert step.go[1].when is None
-            assert 'implementation_prompt' in config.prompts
-            assert 'review_plan' not in config.prompts
+            assert config.prompts['simple_implementation'] == "Work from {ACTIVE_PLAN_PATH}. Use 'execute-aflow-plan' skill."
+            assert config.prompts['followup_implementation'] == "Work from {ACTIVE_PLAN_PATH}. Use 'execute-aflow-plan' skill."
+            assert config.prompts['final_review'] == "Use 'final-review' skill."
+
+    def test_bundled_config_validates_without_errors(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        config = load_workflow_config(repo_root / 'aflow' / 'aflow.toml')
+        assert validate_workflow_config(config) == []
 
     def test_bootstrap_creates_config_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -554,6 +563,8 @@ class WorkflowConfigTests(unittest.TestCase):
             result = bootstrap_config(config_path)
             assert result.exists()
             assert result == config_path
+            packaged_text = resources.files('aflow').joinpath('aflow.toml').read_text(encoding='utf-8')
+            assert result.read_text(encoding='utf-8') == packaged_text
 
     def test_bootstrap_does_not_overwrite_existing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1513,11 +1524,36 @@ class SkillDocsTests(unittest.TestCase):
     def test_skill_files_do_not_contain_workflow_placeholders(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         placeholders = ('{ORIGINAL_PLAN_PATH}', '{ACTIVE_PLAN_PATH}', '{NEW_PLAN_PATH}')
-        for skill_name in ('aflow-plan', 'review-squash', 'execute-aflow-plan', 'execute-aflow-checkpoint', 'review-aflow-checkpoint'):
+        for skill_name in ('aflow-plan', 'review-squash', 'execute-aflow-plan', 'execute-aflow-checkpoint', 'review-aflow-checkpoint', 'final-review'):
             skill_path = repo_root / 'skills' / skill_name / 'SKILL.md'
             text = skill_path.read_text(encoding='utf-8')
             for placeholder in placeholders:
                 assert placeholder not in text
+
+    def test_bundled_prompt_skill_names_match_shipped_skills(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        config = load_workflow_config(repo_root / 'aflow' / 'aflow.toml')
+        expected = {
+            'simple_implementation': 'execute-aflow-plan',
+            'cp_loop_implementation': 'execute-aflow-checkpoint',
+            'followup_implementation': 'execute-aflow-plan',
+            'review_squash': 'review-squash',
+            'review_cp': 'review-aflow-checkpoint',
+            'final_review': 'final-review',
+        }
+        for prompt_name, skill_name in expected.items():
+            prompt = config.prompts[prompt_name]
+            assert f"'{skill_name}'" in prompt
+            skill_path = repo_root / 'skills' / skill_name / 'SKILL.md'
+            assert skill_path.exists()
+
+    def test_final_review_skill_is_distinct_and_no_squash(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        text = (repo_root / 'skills' / 'final-review' / 'SKILL.md').read_text(encoding='utf-8')
+        assert 'name: final-review' in text
+        assert 'Do nothing.' not in text
+        assert 'Do not squash' in text or 'Do not squash,' in text
+        assert 'non-checkpoint' in text
 
     def test_example_plan_uses_review_squash_spelling(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
@@ -1525,6 +1561,8 @@ class SkillDocsTests(unittest.TestCase):
         assert 'review-squash' in example_text
         assert 'review-aflow-checkpoint' in example_text
         assert 'execute-aflow-checkpoint' in example_text
+        assert 'execute-aflow-plan' in example_text
+        assert 'final-review' in example_text
         typo = '-'.join(('revive', 'squash'))
         assert typo not in example_text
 if __name__ == '__main__':

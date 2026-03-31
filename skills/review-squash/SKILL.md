@@ -17,13 +17,13 @@ Use this skill only for the final review pass of work produced under a aflow pla
 - Treat prompt-supplied concrete review context as authoritative when it is present. Use repo discovery only when the prompt leaves a target ambiguous.
 - If the original plan still has unchecked checkpoints, do not repurpose this skill for routine checkpoint review. Rerun the autonomous executor unless the user explicitly asks for a different workflow.
 - If the full accumulated work is acceptable, approve and squash once at the whole-plan level.
-- If the full accumulated work is not acceptable, do not squash. Create a focused fix plan for the failed checkpoints or behaviors instead of a whole-plan redo.
+- If the full accumulated work is not acceptable, do not squash. Create a focused non-checkpoint fix plan for the failed checkpoints or behaviors instead of a whole-plan redo.
 - Treat `aflow` as the canonical spelling.
 - Compact `DEVLOG.md` to one handoff entry only when a squash actually happens and multiple handoff entries exist.
 
 ## Core Rule
 
-The original plan file is the source of truth for long-lived review state. Fix plans are temporary overlays for rejected work, not replacements for the original plan.
+The original plan file is the source of truth for long-lived review state. Fix plans are temporary non-checkpoint overlays for rejected work, not replacements for the original plan.
 
 ## Required Inputs
 
@@ -84,7 +84,7 @@ If the accumulated work is not acceptable:
 2. Create a new aflow fix plan that covers only the failed checkpoints or behaviors against the current `HEAD`.
 3. Ensure `plans/in-progress/` exists before writing the fix plan. Create it if it does not exist.
 4. Use the filename format `original-plan-name-fix-cpN-v01.md` when the rejection is anchored to one checkpoint. If multiple checkpoints are involved, use a similarly descriptive focused name.
-5. The fix plan must be self-contained and must not require the implementer to read prior chat context.
+5. The fix plan must be self-contained, non-checkpoint, and must not require the implementer to read prior chat context.
 6. When creating a new fix plan, delete older superseded fix plans for the same original handoff by default unless the user explicitly asks to keep them.
 7. After creating the new fix plan, `plans/in-progress/` should contain only the original handoff plan plus that newest fix plan for the same handoff.
 8. Update the original plan:

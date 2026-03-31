@@ -1,29 +1,28 @@
 ---
-name: review-squash
-description: "Review a completed autonomous AFlow plan, compare the full accumulated implementation against the original plan, create a focused fix plan for The findings that doesn't match with the plan's expectations.."
+name: final-review
+description: "Final no-squash review for a completed checkpointed AFlow handoff. Use when the original plan is complete and the reviewer must either approve the whole result or create one focused follow-up fix plan."
 ---
 
-#  Review Squash AFlow Implementation
+# Final Review AFlow Implementation
 
-Use this skill only for the final review pass of work produced under a aflow plan that includes `Git Tracking`. It is meant to be installed as a static skill and driven by prompt context from the workflow engine.
+Use this skill only for the final review pass of work produced under an aflow plan that includes `Git Tracking`. It is meant to be installed as a static skill and driven by prompt context from the workflow engine.
 
 ## Behavior
 
 - Load the active original aflow plan before reviewing code or history.
 - If the prompt already names the original plan, use that directly. Otherwise fall back to the repo's original-plan selection rules.
-- Assume the happy path is a completed autonomous run. Review the whole accumulated handoff, not just one checkpoint batch.
+- Assume the happy path is a completed original checkpointed handoff. Review the whole accumulated result, not just one checkpoint batch.
 - Treat files under `plans/` as architect or reviewer-owned artifacts. If an implementation commit modifies plan files unexpectedly, reject that work unless the user explicitly asked for plan-file commits from the implementer.
 - Treat checkpoint/version commit prefixes such as `cp4 v01`, `cp4 v02`, and `cp5 v01` as the primary review-tracking mechanism. Use exact SHAs as supporting evidence, not as the only way to understand state.
 - Treat prompt-supplied concrete review context as authoritative when it is present. Use repo discovery only when the prompt leaves a target ambiguous.
-- If the original plan still has unchecked checkpoints, do not repurpose this skill for routine checkpoint review. Rerun the autonomous executor unless the user explicitly asks for a different workflow.
-- If the full accumulated work is acceptable, approve and squash once at the whole-plan level.
-- If the full accumulated work is not acceptable, do not squash. Create a focused fix plan for the failed checkpoints or behaviors instead of a whole-plan redo.
+- If the original plan still has unchecked checkpoints, do not repurpose this skill for routine checkpoint review. Return control to the checkpoint workflow until the original plan is actually complete.
+- If the full accumulated work is acceptable, approve the completed handoff without squashing or rewriting history.
+- If the full accumulated work is not acceptable, do not squash. Create a focused non-checkpoint follow-up fix plan for the failed checkpoints or behaviors.
 - Treat `aflow` as the canonical spelling.
-- Compact `DEVLOG.md` to one handoff entry only when a squash actually happens and multiple handoff entries exist.
 
 ## Core Rule
 
-The original plan file is the source of truth for long-lived review state. Fix plans are temporary overlays for rejected work, not replacements for the original plan.
+The original plan file is the source of truth for long-lived review state. Fix plans created here are temporary non-checkpoint follow-up overlays for rejected work, not replacements for the original plan.
 
 ## Required Inputs
 
@@ -33,7 +32,7 @@ ORIGINAL_PLAN: This is the original implementation plan.
 ACTIVE_PLAN: This maybe same as the original plan file, or could be a transient follow-up plan focused on fixing of review findings.
 NEW_PLAN_PATH: This is the path for a possible follow-up plan for the findings of your review.    
 
-Before reviewing or squashing, identify the active original aflow plan under `plans/in-progress/`.
+Before reviewing, identify the active original aflow plan under `plans/in-progress/`.
 
 Selection rules:
 
@@ -66,24 +65,27 @@ Selection rules:
 
 If the accumulated work looks correct:
 
-Do nothing.
+1. Update the original plan's final-review state, `Git Tracking`, and `Review Log` to reflect final approval.
+2. Delete any remaining fix plans for that handoff unless the user explicitly asked to keep them.
+3. Report completion.
+4. Do not squash, rewrite history, or compact unrelated artifacts.
 
 ## Rejection Path
 
 If the accumulated work is not acceptable:
 
-
+1. Do not approve the final review.
 2. Create a new aflow fix plan that covers only the failed checkpoints or behaviors against the current `HEAD`.
 3. Ensure `plans/in-progress/` exists before writing the fix plan. Create it if it does not exist.
 4. Use the filename format `original-plan-name-fix-v01.md` when the rejection is anchored to one checkpoint. If multiple checkpoints are involved, use a similarly descriptive focused name.
-5. The fix plan must be self-contained and must not require the implementer to read the original plan.
+5. The fix plan must be self-contained, non-checkpoint, and must not require the implementer to read the original plan.
 6. When creating a new fix plan, delete older superseded fix plans for the same original handoff by default unless the user explicitly asks to keep them.
 7. After creating the new fix plan, `plans/in-progress/` should contain only the original handoff plan plus that newest fix plan for the same handoff.
 8. Update the original plan:
    - append a `Review Log` entry with the review date, the reviewed checkpoint or behavior range, and outcome `changes-requested`
    - update `Last Reviewed HEAD` only when it clearly helps and does not create brittle bookkeeping pressure
 9. Keep `Pre-Handoff Base HEAD` unchanged.
-10. Do not compact `DEVLOG.md`.
+10. Return control to the follow-up implementation step. Do not squash, rewrite history, or compact `DEVLOG.md`.
 
 ## Stop And Escalate If
 
@@ -91,7 +93,7 @@ If the accumulated work is not acceptable:
 - the current branch does not match the plan's `Plan Branch`
 - `Pre-Handoff Base HEAD` is missing or no longer reachable
 - the original plan is still mid-flight and the correct next action is to resume the autonomous executor
-- the worktree has unrelated dirty changes that make the review or squash ambiguous
+- the worktree has unrelated dirty changes that make the review ambiguous
 - multiple original plan files are plausible and the active one cannot be determined safely
 
 ## Verification
@@ -100,10 +102,10 @@ Before finishing, verify:
 
 - the reviewed range is correct relative to the original plan's checkpoint/version review history, `Last Reviewed HEAD`, or `Pre-Handoff Base HEAD`
 - the reported commit counts match git history
-- after approval, the branch contains exactly one accumulated handoff commit after `Pre-Handoff Base HEAD`
+- after approval, no history rewrite occurred
 - after approval, no stale fix plans remain in `plans/in-progress/`
-- after final approval, `plans/done/` exists and contains the completed original handoff plan
+- after final approval, the original plan records final approval cleanly
 - after rejection, no history rewrite occurred
 - after rejection, `plans/in-progress/` contains only the original handoff plan plus the newest focused fix plan for that handoff
 - after rejection, superseded older fix plans were deleted unless the user asked to keep them
-- `DEVLOG.md` was compacted only when a squash occurred and multiple relevant entries existed
+- `DEVLOG.md` was not compacted by this workflow

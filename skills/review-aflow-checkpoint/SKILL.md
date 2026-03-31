@@ -17,12 +17,12 @@ Use this skill only for checkpoint-scoped review of work produced under an aflow
 - Treat prompt-supplied concrete review context as authoritative when it is present. Use repo discovery only when the prompt leaves a target ambiguous.
 - If the original plan is already effectively complete, do not repurpose this skill for whole-plan review.
 - If the checkpoint looks correct, approve that checkpoint and advance the original plan's review state.
-- If the checkpoint is not acceptable, do not approve it. Create a focused fix plan for the failed checkpoint or behaviors instead of a whole-plan redo.
+- If the checkpoint is not acceptable, do not approve it. Create a focused non-checkpoint fix plan for the failed checkpoint or behaviors instead of a whole-plan redo.
 - Treat `aflow` as the canonical spelling.
 
 ## Core Rule
 
-The original plan file is the source of truth for long-lived review state. Fix plans are temporary overlays for rejected checkpoint work, not replacements for the original plan.
+The original plan file is the source of truth for long-lived review state. Fix plans are temporary non-checkpoint overlays for rejected checkpoint work, not replacements for the original plan.
 
 ## Required Inputs
 
@@ -78,7 +78,7 @@ If the checkpoint is not acceptable:
 2. Create a new aflow fix plan that covers only the failed checkpoint or behaviors against the current `HEAD`.
 3. Ensure `plans/in-progress/` exists before writing the fix plan. Create it if it does not exist.
 4. Use a focused filename that names the rejected checkpoint or behavior range.
-5. The fix plan must be self-contained and must not require the implementer to read prior chat context.
+5. The fix plan must be self-contained, non-checkpoint, and must not require the implementer to read prior chat context.
 6. When creating a new fix plan, delete older superseded fix plans for the same checkpoint by default unless the user explicitly asks to keep them.
 7. After creating the new fix plan, `plans/in-progress/` should contain only the original handoff plan plus that newest fix plan for the same checkpoint.
 8. Update the original plan:

@@ -97,8 +97,8 @@ go = [{ to = "final_review" }]
 [prompts]
 
 input_vars = """
-Original plan: "{ORIGINAL_PLAN_PATH}". This is the original implementation plan.
-Active plan: "{ACTIVE_PLAN_PATH}". This maybe same as the original plan file, or could be a transient follow-up plan focused on fixing of review findings.
+ORIGINAL_PLAN: "{ORIGINAL_PLAN_PATH}". This is the original implementation plan.
+ACTIVE_PLAN: "{ACTIVE_PLAN_PATH}". This maybe same as the original plan file, or could be a transient follow-up plan focused on fixing of review findings.
 """
 output_vars = """
 NEW_PLAN_PATH: "{NEW_PLAN_PATH}"
@@ -106,11 +106,11 @@ NEW_PLAN_PATH: "{NEW_PLAN_PATH}"
 
 review_plan = "Review the plan at {ORIGINAL_PLAN_PATH} for obvious/undispituble weak spots, ambiguity, and missing constraints and directly apply improvementns to the plan file."
 
-simple_implementation = "Work from {ACTIVE_PLAN_PATH}. Use 'execute-aflow' skill."
+simple_implementation = "Work from {ACTIVE_PLAN_PATH}. Use 'execute-aflow-plan' skill."
 
 cp_loop_implementation = "Use 'execute-aflow-checkpoint' skill."
 
-followup_implementation = "Use 'execute-aflow-checkpoint' skill."
+followup_implementation = "Use 'execute-aflow-plan' skill."
 
 
 review_squash = "Use 'review-squash' skill."

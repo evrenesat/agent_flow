@@ -9,6 +9,12 @@ Use this skill only for checkpoint-scoped aflow execution. Treat `aflow` as the 
 
 The plan file is the source of truth. Do not rely on chat memory when the plan, repository state, test output, or git history disagree.
 
+## Plan Shape
+
+- If the active plan is the original handoff plan with checkpoint headings, execute exactly one checkpoint from it.
+- If the active plan is a review-generated non-checkpoint follow-up plan, execute that focused plan fully, verify it, and stop.
+- Do not invent checkpoint structure in a review-generated non-checkpoint plan.
+
 ## Core Rules
 
 - Execute exactly one checkpoint per invocation.
@@ -23,7 +29,7 @@ The plan file is the source of truth. Do not rely on chat memory when the plan, 
 ## Required Inputs
 
 
-Following plan paths should be provied by the prompt;
+Following plan paths should be provided by the prompt;
 
 ORIGINAL_PLAN: This is the original implementation plan.
 ACTIVE_PLAN: This maybe same as the original plan file, or could be a transient follow-up plan focused on fixing of review findings.
@@ -31,18 +37,25 @@ ACTIVE_PLAN: This maybe same as the original plan file, or could be a transient 
 Before acting, identify:
 
 - the active plan file
-- the checkpoint that will be implemented
+- whether it is a checkpointed handoff plan or a focused non-checkpoint follow-up plan
+- for checkpointed plans, the checkpoint that will be implemented
 - any `Git Tracking`, `Dependencies`, `Verification`, `Done When`, or `Stop and Escalate If` instructions attached to that checkpoint
 
 If the prompt already names a concrete plan file, use it. If not, discover the single active original plan under `plans/in-progress/` when that is unambiguous. If the plan file is missing, multiple candidate plans exist, or the checkpoint cannot be identified safely, stop and ask for clarification.
 
 ## Execution Loop
 
-- Read the target checkpoint fully before editing code.
-- Implement only that checkpoint's scope.
-- Run the exact verification commands from the plan.
-- If verification passes, update the plan state and create the required checkpoint commit.
-- Stop there, do not move on to the next unchecked checkpoint.
+- For checkpointed plans:
+  - Read the target checkpoint fully before editing code.
+  - Implement only that checkpoint's scope.
+  - Run the exact verification commands from the plan.
+  - If verification passes, update the plan state and create the required checkpoint commit.
+  - Stop there, do not move on to the next unchecked checkpoint.
+- For review-generated non-checkpoint follow-up plans:
+  - Execute the focused plan fully as written.
+  - Run the exact verification commands from that plan.
+  - Do not look for or invent checkpoint headings.
+  - Stop after that focused follow-up plan is verified and any required commit policy is satisfied.
 
 Do not use this skill to invent a second execution spec. The plan should already define the checkpoint details, verification, and commit policy.
 

@@ -1,6 +1,6 @@
 # aflow
 
-`aflow` runs checkpoint-based coding plans through existing agent CLIs such as Codex, Claude, Gemini, Kiro, OpenCode, and Pi.
+`aflow` runs plan-driven coding workflows through existing agent CLIs such as Codex, Claude, Gemini, Kiro, OpenCode, and Pi.
 
 It does not call provider APIs directly. It shells out to the harnesses you already use and have access to. The main use case is a stricter loop where a stronger model plans or reviews, a cheaper model implements the current checkpoint, and the run keeps moving until the original plan is done or the workflow reaches `END`.
 
@@ -26,7 +26,7 @@ uv run python -m aflow path/to/plan.md
 
 ```bash
 aflow path/to/plan.md
-aflow --workflow review_loop path/to/plan.md
+aflow --workflow review_implement_review path/to/plan.md
 aflow --max-turns 10 path/to/plan.md
 aflow path/to/plan.md -- keep edits small and update docs if behavior changes
 ```
@@ -72,15 +72,14 @@ Current parser rules:
 
 `aflow` reads `~/.config/aflow/aflow.toml`.
 
-If that file does not exist, `aflow` writes a starter config and exits. The starter config includes placeholder model values that must be filled in before the first real run.
+If that file does not exist, `aflow` copies the packaged [aflow/aflow.toml](/Users/evren/code/agent_flow/aflow/aflow.toml) into place and exits. That file is the default config source, so edit it there if you want different models, profiles, or workflows before the first real run.
 
 Example:
 
 ```bash
 aflow path/to/plan.md
-# Config bootstrapped. Fill in the following model values before running:
-#   harness.codex.profiles.high.model
-#   harness.opencode.profiles.default.model
+# Config bootstrapped at ~/.config/aflow/aflow.toml
+# Review the copied profiles and adjust them if needed, then run again
 ```
 
 ## Config
@@ -96,7 +95,7 @@ Example:
 
 ```toml
 [aflow]
-default_workflow = "review_loop"
+default_workflow = "review_implement_review"
 
 [harness.opencode.profiles.implement]
 model = "zai-coding-plan/glm-4.7"
@@ -105,23 +104,22 @@ model = "zai-coding-plan/glm-4.7"
 model = "gpt-5.4"
 effort = "high"
 
-[workflow.review_loop.steps.review_plan]
+[workflow.review_implement_review.steps.review_plan]
 profile = "codex.review"
 prompts = ["review_plan"]
 go = [{ to = "implement_plan" }]
 
-[workflow.review_loop.steps.implement_plan]
+[workflow.review_implement_review.steps.implement_plan]
 profile = "opencode.implement"
-prompts = ["implementation_prompt"]
+prompts = ["simple_implementation"]
 go = [
-  { to = "END", when = "DONE || MAX_TURNS_REACHED" },
   { to = "review_plan", when = "NEW_PLAN_EXISTS" },
-  { to = "implement_plan" },
+  { to = "END" },
 ]
 
 [prompts]
 review_plan = "Review the plan at {ORIGINAL_PLAN_PATH}. If tighter follow-up work is needed, write it to {NEW_PLAN_PATH}."
-implementation_prompt = "Work from {ACTIVE_PLAN_PATH}. Re-read it from disk before acting."
+simple_implementation = "Work from {ACTIVE_PLAN_PATH}. Use 'execute-aflow-plan' skill."
 ```
 
 Config rules that matter in practice:
@@ -266,10 +264,11 @@ Older run directories are pruned automatically. The default retention is `20` ru
 This repo also ships optional skills under `skills/`. They are static guidance files that a harness can inject around workflow prompts.
 
 - `aflow-plan` - static guidance for writing aflow-compatible checkpoint plans
-- `execute-aflow-plan` - lightweight reinforcement for autonomous plan-driven execution across all remaining checkpoints
-- `execute-aflow-checkpoint` - checkpoint-scoped execution that implements one checkpoint and then stops
+- `execute-aflow-plan` - lightweight reinforcement for executing an active plan, including review-generated non-checkpoint follow-up plans
+- `execute-aflow-checkpoint` - checkpoint-scoped execution for the original handoff plan, with support for focused non-checkpoint follow-up plans when review creates one
 - `review-squash` - final review for completed autonomous runs, including whole-handoff squash or fix-plan creation
 - `review-aflow-checkpoint` - checkpoint-scoped review for the latest checkpoint attempt
+- `final-review` - no-squash final auditor for checkpoint workflows after the original plan is complete
 
 The workflow config is where the plan-path placeholders belong. The skills themselves stay free of workflow template variables.
 
