@@ -1,6 +1,6 @@
 ---
 name: review-squash
-description: "Review a completed autonomous AFlow plan, compare the full accumulated implementation against the original plan, and either squash the whole handoff into one final commit or create a focused fix plan for the remaining failed checkpoints or behaviors."
+description: "Review a completed autonomous AFlow plan, compare the full accumulated implementation against the original plan, create a focused fix plan for The findings that doesn't match with the plan's expectations.."
 ---
 
 #  Review Squash AFlow Implementation
@@ -66,25 +66,17 @@ Selection rules:
 
 If the accumulated work looks correct:
 
-1. Use the original plan's `Pre-Handoff Base HEAD` as the squash anchor for the final accumulated handoff.
-2. Update the original plan's `Git Tracking` and `Review Log` to capture the approved and squashed result.
-3. Delete any remaining fix plans for that handoff unless the user explicitly asked to keep them.
-4. Rewrite history so every commit after the squash anchor becomes one final accumulated commit.
-5. Use a non-interactive workflow. Prefer `git reset --soft <squash-base>` followed by a new commit over interactive rebase.
-6. Write a fresh final commit message that covers the full accumulated scope of the handoff.
-7. If `DEVLOG.md` exists and multiple handoff-related entries were added or updated during the handoff, compact them to one entry that matches the final squashed change.
-8. If the original plan's checkpoints are all complete, move that original plan to `plans/done/`, include it in the final commit, and mention the moved plan path in the final response. Create `plans/done/` first if it does not exist.
-9. Treat dirty changes in plan files that are intentionally part of the final handoff state as part of finalization, not as unrelated worktree noise. Still stop if truly unrelated dirty changes remain and make the squash ambiguous.
+Do nothing.
 
 ## Rejection Path
 
 If the accumulated work is not acceptable:
 
-1. Do not squash commits.
+
 2. Create a new aflow fix plan that covers only the failed checkpoints or behaviors against the current `HEAD`.
 3. Ensure `plans/in-progress/` exists before writing the fix plan. Create it if it does not exist.
-4. Use the filename format `original-plan-name-fix-cpN-v01.md` when the rejection is anchored to one checkpoint. If multiple checkpoints are involved, use a similarly descriptive focused name.
-5. The fix plan must be self-contained and must not require the implementer to read prior chat context.
+4. Use the filename format `original-plan-name-fix-v01.md` when the rejection is anchored to one checkpoint. If multiple checkpoints are involved, use a similarly descriptive focused name.
+5. The fix plan must be self-contained and must not require the implementer to read the original plan.
 6. When creating a new fix plan, delete older superseded fix plans for the same original handoff by default unless the user explicitly asks to keep them.
 7. After creating the new fix plan, `plans/in-progress/` should contain only the original handoff plan plus that newest fix plan for the same handoff.
 8. Update the original plan:

@@ -22,6 +22,12 @@ The plan file is the source of truth. Do not rely on chat memory when the plan, 
 
 ## Required Inputs
 
+
+Following plan paths should be provied by the prompt;
+
+ORIGINAL_PLAN: This is the original implementation plan.
+ACTIVE_PLAN: This maybe same as the original plan file, or could be a transient follow-up plan focused on fixing of review findings.
+
 Before acting, identify:
 
 - the active plan file

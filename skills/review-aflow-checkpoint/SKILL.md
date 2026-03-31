@@ -9,14 +9,13 @@ Use this skill only for checkpoint-scoped review of work produced under an aflow
 
 ## Behavior
 
-- Load the active original aflow plan before reviewing code or history.
-- If the prompt already names the original plan, use that directly. Otherwise fall back to the repo's original-plan selection rules.
+- Load the active plan before reviewing code or history.
 - Review one checkpoint at a time, not the whole accumulated handoff.
 - Treat checkpoint/version commit prefixes such as `cp4 v01`, `cp4 v02`, and `cp5 v01` as the primary review target. Use exact SHAs as supporting evidence, not as the only way to understand state.
 - If the latest checkpoint commit boundary is missing or ambiguous, review the current worktree state and say that the fallback was used.
 - Treat files under `plans/` as architect or reviewer-owned artifacts. If an implementation commit modifies plan files unexpectedly, reject that work unless the user explicitly asked for plan-file commits from the implementer.
 - Treat prompt-supplied concrete review context as authoritative when it is present. Use repo discovery only when the prompt leaves a target ambiguous.
-- If the active original plan is already effectively complete, do not repurpose this skill for whole-plan review. Use the whole-plan review workflow instead.
+- If the original plan is already effectively complete, do not repurpose this skill for whole-plan review.
 - If the checkpoint looks correct, approve that checkpoint and advance the original plan's review state.
 - If the checkpoint is not acceptable, do not approve it. Create a focused fix plan for the failed checkpoint or behaviors instead of a whole-plan redo.
 - Treat `aflow` as the canonical spelling.
@@ -27,12 +26,17 @@ The original plan file is the source of truth for long-lived review state. Fix p
 
 ## Required Inputs
 
+Following plan paths should be provided by the prompt;
+
+ORIGINAL_PLAN: This is the original implementation plan.
+ACTIVE_PLAN: This maybe same as the original plan file, or could be a transient follow-up plan focused on fixing of review findings.
+NEW_PLAN_PATH: This is the path for a possible follow-up plan for the findings of your review.    
+
 Before reviewing, identify the active original aflow plan under `plans/in-progress/`.
 
 Selection rules:
 
 1. If the user names a plan file, use it.
-2. Otherwise search `plans/in-progress/` for original plan files containing `Pre-Handoff Base HEAD`.
 3. Filter candidates to the current branch recorded in `Plan Branch`.
 4. Ignore temporary fix plans when choosing the original long-lived plan.
 5. If exactly one original plan remains, use it.

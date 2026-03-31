@@ -1,0 +1,120 @@
+[aflow]
+default_workflow = "ralph"
+
+#### HARNESS PROFILES ####
+
+[harness.opencode.profiles.turbo]
+model = "zai-coding-plan/glm-5-turbo"
+
+[harness.opencode.profiles.glm47]
+model = "zai-coding-plan/glm-4.7"
+
+[harness.claude.profiles.opus]
+ model = "Opus-4.6"
+ effort = "medium"
+
+[harness.codex.profiles.high]
+model = "GPT-5.4"
+effort = "high"
+
+
+#### WORKFLOWS ####
+# RALPH LOOP
+# This is a simple single step workflow that emulates ralph loop style execution.
+#
+[workflow.ralph.steps.implement_plan]
+profile = "opencode.turbo"
+prompts = ["simple_implementation"]
+go = [
+  { to = "END", when = "DONE || MAX_TURNS_REACHED" },
+  { to = "implement_plan" },
+]
+
+
+# REVIEW-IMPLEMENT-REVIEW
+# This workflow first requests an improvement review from a capable model before actually starting on implementation, then passes a plan to a worker model to do whole implementation in one go. But of course, each checkpoint will be implemented with a clean context. And when implementer model thinks it is done, workflow goes to final step to review the implementation. If the review is successful, if the reviewer model is satisfied, then workflow ends. If not, reviewer model creates a fix-up follow-up plan. And then workflow goes back to implementation step with the new plan. And this final ping-pong between review model and implementer model with the follow-up plans continues until reviewer satisfies with the end result.
+[workflow.review_implement_review.steps.review_plan]
+profile = "claude.opus"
+prompts = ["review_plan"]
+go = [{ to = "implement_plan" }]
+
+[workflow.review_implement_review.steps.implement_plan]
+profile = "opencode.turbo"
+prompts = ["input_vars","simple_implementation"]
+go = [
+ { to = "review_implementation", when = "DONE" },
+ { to = "implement_plan" },
+]
+
+[workflow.review_implement_review.steps.review_implementation]
+profile = "codex.high"
+prompts = ["input_vars","output_vars","review_squash"]
+go = [
+  { to = "implement_plan", when="NEW_PLAN_EXISTS" },
+  { to = "END" }
+]
+
+
+# REVIEW-IMPLEMENT_CHECKPOINT-REVIEW-FINAL_REVIEW-FOLLOW_UP
+#
+[workflow.review_implement_cp_review.steps.review_plan]
+profile = "claude.opus"
+prompts = ["review_plan"]
+go = [{ to = "implement_plan" }]
+
+[workflow.review_implement_cp_review.steps.implement_plan]
+profile = "opencode.turbo"
+prompts = ["input_vars","cp_loop_implementation"]
+go = [{ to = "review_cp_implementation" }]
+
+[workflow.review_implement_cp_review.steps.review_cp_implementation]
+profile = "codex.high"
+prompts = ["input_vars","output_vars","review_cp"]
+go = [
+    { to = "implement_plan", when="NEW_PLAN_EXISTS || !DONE" },
+    { to = "final_review" },
+]
+
+# Make a final review against original plan for the complete implementation.
+[workflow.review_implement_cp_review.steps.final_review]
+profile = "codex.high"
+prompts = ["input_vars","output_vars","final_review"]
+go = [
+  { to = "followup", when="NEW_PLAN_EXISTS" },
+  { to = "END" }
+]
+
+[workflow.review_implement_cp_review.steps.followup]
+profile = "opencode.turbo"
+prompts = ["input_vars","followup_implementation"]
+go = [{ to = "final_review" }]
+
+
+
+
+#### PROMPTS ####
+
+[prompts]
+
+input_vars = """
+Original plan: "{ORIGINAL_PLAN_PATH}". This is the original implementation plan.
+Active plan: "{ACTIVE_PLAN_PATH}". This maybe same as the original plan file, or could be a transient follow-up plan focused on fixing of review findings.
+"""
+output_vars = """
+NEW_PLAN_PATH: "{NEW_PLAN_PATH}"
+"""
+
+review_plan = "Review the plan at {ORIGINAL_PLAN_PATH} for obvious/undispituble weak spots, ambiguity, and missing constraints and directly apply improvementns to the plan file."
+
+simple_implementation = "Work from {ACTIVE_PLAN_PATH}. Use 'execute-aflow' skill."
+
+cp_loop_implementation = "Use 'execute-aflow-checkpoint' skill."
+
+followup_implementation = "Use 'execute-aflow-checkpoint' skill."
+
+
+review_squash = "Use 'review-squash' skill."
+
+final_review = "Use 'final-review' skill."
+
+review_cp = " Use 'review-aflow-checkpoint' skill."
