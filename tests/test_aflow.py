@@ -1313,7 +1313,7 @@ class WorkflowArtifactTests(unittest.TestCase):
 def _copy_aflow_repo(tmp_path: Path) -> Path:
     repo_root = tmp_path / 'repo'
     repo_root.mkdir()
-    aflow_src = Path(__file__).resolve().parents[1]
+    aflow_src = Path(__file__).resolve().parents[1] / 'aflow'
     aflow_dst = repo_root / 'aflow'
     shutil.copytree(aflow_src, aflow_dst, ignore=shutil.ignore_patterns('__pycache__', 'tests'))
     return repo_root
@@ -1511,7 +1511,7 @@ class WorkflowEndToEndTests(unittest.TestCase):
 class SkillDocsTests(unittest.TestCase):
 
     def test_skill_files_do_not_contain_workflow_placeholders(self) -> None:
-        repo_root = Path(__file__).resolve().parents[2]
+        repo_root = Path(__file__).resolve().parents[1]
         placeholders = ('{ORIGINAL_PLAN_PATH}', '{ACTIVE_PLAN_PATH}', '{NEW_PLAN_PATH}')
         for skill_name in ('aflow-plan', 'review-squash', 'execute-aflow-plan', 'execute-aflow-checkpoint', 'review-aflow-checkpoint'):
             skill_path = repo_root / 'skills' / skill_name / 'SKILL.md'
@@ -1520,7 +1520,7 @@ class SkillDocsTests(unittest.TestCase):
                 assert placeholder not in text
 
     def test_example_plan_uses_review_squash_spelling(self) -> None:
-        repo_root = Path(__file__).resolve().parents[2]
+        repo_root = Path(__file__).resolve().parents[1]
         example_text = (repo_root / 'plans' / 'example.toml').read_text(encoding='utf-8')
         assert 'review-squash' in example_text
         assert 'review-aflow-checkpoint' in example_text

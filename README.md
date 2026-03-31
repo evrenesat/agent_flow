@@ -137,6 +137,12 @@ Config rules that matter in practice:
 - Boolean expressions support `&&`, `||`, `!`, and parentheses.
 - A transition without `when` is an unconditional fallback.
 
+Condition symbols mean exactly this at transition-evaluation time:
+
+- `DONE` is true when the original user-supplied plan file is complete after the current step finishes. It is based on `ORIGINAL_PLAN_PATH`, not on any generated follow-up plan.
+- `NEW_PLAN_EXISTS` is true when the current step actually created the generated candidate file for this turn at `NEW_PLAN_PATH`.
+- `MAX_TURNS_REACHED` is true only on the last allowed turn, when the current turn number is equal to the configured `max_turns`.
+
 Prompt templates support these placeholders:
 
 - `{ORIGINAL_PLAN_PATH}`
@@ -169,6 +175,24 @@ Plan-path behavior is strict:
 - If the same backup name already exists with different content, `aflow` writes the next `_vNN` file instead of overwriting anything.
 
 Extra CLI instructions after the plan path are appended to the rendered step prompt.
+
+## Loop Limits
+
+`max_turns` is the only built-in hard cap on turn count. The workflow runner executes turns with a fixed `1..max_turns` loop, so a workflow cannot exceed that number of turns even if its `go` transitions keep routing back to earlier steps.
+
+That hard cap does not end the run by itself in the success path. On the last allowed turn:
+
+- `MAX_TURNS_REACHED` evaluates true for transition matching.
+- If one of that step's transitions matches and routes to `END`, the run completes successfully with end reason `max_turns_reached` unless `DONE` is also true, in which case the end reason is `done`.
+- If no transition routes to `END` before the loop exhausts, the run fails with "reached max turns limit ... without a transition to END".
+
+Other things can stop a run earlier, but they are not extra turn-limit mechanisms:
+
+- the plan is already complete before any turn starts
+- a step transitions to `END`
+- no `go` transition matches for the current step
+- the harness exits non-zero
+- the original plan becomes unreadable or invalid
 
 ## Harnesses
 
@@ -252,6 +276,7 @@ The workflow config is where the plan-path placeholders belong. The skills thems
 ## Repository Layout
 
 - `aflow/` - package code
+- `tests/` - test suite
 - `skills/` - optional workflow skills
 - `plans/` - example and in-progress plan artifacts
 - `pyproject.toml` - package metadata and console entrypoint
