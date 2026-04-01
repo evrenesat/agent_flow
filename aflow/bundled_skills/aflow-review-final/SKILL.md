@@ -1,5 +1,5 @@
 ---
-name: final-review
+name: aflow-review-final
 description: "Final no-squash review for a completed checkpointed AFlow handoff. Use when the original plan is complete and the reviewer must either approve the whole result or create one focused follow-up fix plan."
 ---
 
@@ -65,7 +65,7 @@ Selection rules:
 
 If the accumulated work looks correct:
 
-1. Update the original plan's final-review state, `Git Tracking`, and `Review Log` to reflect final approval.
+1. Update the original plan's `aflow-review-final` state, `Git Tracking`, and `Review Log` to reflect final approval.
 2. Delete any remaining fix plans for that handoff unless the user explicitly asked to keep them.
 3. Report completion.
 4. Do not squash, rewrite history, or compact unrelated artifacts.

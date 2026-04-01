@@ -22,6 +22,37 @@ If you are working from a local checkout, you can also run:
 uv run python -m aflow path/to/plan.md
 ```
 
+## Install Skills
+
+`aflow install-skills` copies the six bundled skills into harness skill directories. In auto mode, it only targets supported harness CLIs that are already on `PATH`.
+
+Auto mode:
+
+```bash
+aflow install-skills
+```
+
+Manual mode:
+
+```bash
+aflow install-skills ~/.claude/skills
+```
+
+Skip the confirmation prompt:
+
+```bash
+aflow install-skills --yes
+```
+
+The auto-install destination map is:
+
+- `claude` -> `~/.claude/skills`
+- `codex` -> `~/.codex/skills`
+- `gemini` -> `~/.agents/skills`
+- `kiro` -> `~/.kiro/skills`
+- `opencode` -> `~/.config/opencode/skills`
+- `pi` -> `~/.agents/skills`
+
 ## Usage
 
 ```bash
@@ -72,7 +103,7 @@ Current parser rules:
 
 `aflow` reads `~/.config/aflow/aflow.toml`.
 
-If that file does not exist, `aflow` copies the packaged [aflow/aflow.toml](/Users/evren/code/agent_flow/aflow/aflow.toml) into place and exits. That file is the default config source, so edit it there if you want different models, profiles, or workflows before the first real run.
+If that file does not exist, `aflow` copies the packaged `aflow/aflow.toml` into place and exits. That file is the default config source, so edit it there if you want different models, profiles, or workflows before the first real run.
 
 Example:
 
@@ -119,7 +150,7 @@ go = [
 
 [prompts]
 review_plan = "Review the plan at {ORIGINAL_PLAN_PATH}. If tighter follow-up work is needed, write it to {NEW_PLAN_PATH}."
-simple_implementation = "Work from {ACTIVE_PLAN_PATH}. Use 'execute-aflow-plan' skill."
+simple_implementation = "Work from {ACTIVE_PLAN_PATH}. Use 'aflow-execute-plan' skill."
 ```
 
 Config rules that matter in practice:
@@ -147,7 +178,7 @@ Prompt templates support these placeholders:
 - `{ACTIVE_PLAN_PATH}`
 - `{NEW_PLAN_PATH}`
 
-Those placeholders belong in workflow prompt templates. The bundled skills under `skills/` are static guidance files that a harness can inject around those prompts, not places to author unresolved workflow variables.
+Those placeholders belong in workflow prompt templates. The bundled skills under `aflow/bundled_skills/` are static guidance files that a harness can inject around those prompts, not places to author unresolved workflow variables.
 
 ## How A Run Works
 
@@ -261,22 +292,22 @@ Older run directories are pruned automatically. The default retention is `20` ru
 
 ## Included Skills
 
-This repo also ships optional skills under `skills/`. They are static guidance files that a harness can inject around workflow prompts.
+This repo also ships optional skills under `aflow/bundled_skills/`. `aflow install-skills` copies them into the harness-specific skill roots listed above.
 
 - `aflow-plan` - static guidance for writing aflow-compatible checkpoint plans
-- `execute-aflow-plan` - lightweight reinforcement for executing an active plan, including review-generated non-checkpoint follow-up plans
-- `execute-aflow-checkpoint` - checkpoint-scoped execution for the original handoff plan, with support for focused non-checkpoint follow-up plans when review creates one
-- `review-squash` - final review for completed autonomous runs, including whole-handoff squash or fix-plan creation
-- `review-aflow-checkpoint` - checkpoint-scoped review for the latest checkpoint attempt
-- `final-review` - no-squash final auditor for checkpoint workflows after the original plan is complete
+- `aflow-execute-plan` - lightweight reinforcement for executing an active plan, including review-generated non-checkpoint follow-up plans
+- `aflow-execute-checkpoint` - checkpoint-scoped execution for the original handoff plan, with support for focused non-checkpoint follow-up plans when review creates one
+- `aflow-review-squash` - final review for completed autonomous runs, including whole-handoff squash or fix-plan creation
+- `aflow-review-checkpoint` - checkpoint-scoped review for the latest checkpoint attempt
+- `aflow-review-final` - no-squash final auditor for checkpoint workflows after the original plan is complete
 
 The workflow config is where the plan-path placeholders belong. The skills themselves stay free of workflow template variables.
 
 ## Repository Layout
 
 - `aflow/` - package code
+- `aflow/bundled_skills/` - packaged optional workflow skills
 - `tests/` - test suite
-- `skills/` - optional workflow skills
 - `plans/` - example and in-progress plan artifacts
 - `pyproject.toml` - package metadata and console entrypoint
 

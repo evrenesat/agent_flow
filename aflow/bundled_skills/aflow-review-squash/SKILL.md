@@ -1,5 +1,5 @@
 ---
-name: review-squash
+name: aflow-review-squash
 description: "Review a completed autonomous AFlow plan, compare the full accumulated implementation against the original plan, and either squash the whole handoff into one final commit or create a focused fix plan for the remaining failed checkpoints or behaviors."
 ---
 

@@ -11,7 +11,7 @@ import unittest
 from importlib import resources
 from aflow.config import AflowSection, ConfigError, GoTransition, HarnessProfileConfig, WorkflowConfig, WorkflowHarnessConfig, WorkflowStepConfig, WorkflowUserConfig, bootstrap_config, find_placeholders, load_workflow_config, validate_workflow_config
 from aflow.workflow import WorkflowError, _backup_original_plan, evaluate_condition, generate_new_plan_path, pick_transition, render_prompt, render_step_prompts, resolve_profile, run_workflow
-from aflow.cli import build_parser, main
+from aflow.cli import build_install_parser, build_parser, main
 from aflow.harnesses.claude import ClaudeAdapter
 from aflow.harnesses.codex import CodexAdapter
 from aflow.harnesses.gemini import GeminiAdapter
@@ -56,6 +56,16 @@ class WorkflowCliTests(unittest.TestCase):
         assert 'effort' not in action_names
         assert 'profile' not in action_names
         assert 'stagnation_limit' not in action_names
+
+    def test_install_parser_exposes_destination_and_yes(self) -> None:
+        args = build_install_parser().parse_args(['--yes'])
+        assert args.destination is None
+        assert args.yes is True
+
+    def test_root_help_mentions_install_skills_command(self) -> None:
+        help_text = build_parser().format_help()
+        assert "install-skills" in help_text
+        assert "aflow install-skills ~/.claude/skills" in help_text
 
     def test_cli_bootstraps_missing_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -104,6 +114,23 @@ class WorkflowCliTests(unittest.TestCase):
                 else:
                     os.environ['HOME'] = original_home
             assert result == 0
+
+    def test_cli_routes_install_skills_before_bootstrap(self) -> None:
+        import aflow.cli as cli_module
+
+        calls: list[list[str] | None] = []
+        original = cli_module.run_install_skills
+        try:
+            def fake_run_install_skills(argv: list[str] | None = None) -> int:
+                calls.append(None if argv is None else list(argv))
+                return 0
+
+            cli_module.run_install_skills = fake_run_install_skills
+            result = main(['install-skills', '/tmp/dest', '--yes'])
+        finally:
+            cli_module.run_install_skills = original
+        assert result == 0
+        assert calls == [['/tmp/dest', '--yes']]
 
     def test_cli_rejects_unknown_workflow(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -548,9 +575,12 @@ class WorkflowConfigTests(unittest.TestCase):
             assert step.go[0].when == 'DONE || MAX_TURNS_REACHED'
             assert step.go[1].to == 'implement_plan'
             assert step.go[1].when is None
-            assert config.prompts['simple_implementation'] == "Work from {ACTIVE_PLAN_PATH}. Use 'execute-aflow-plan' skill."
-            assert config.prompts['followup_implementation'] == "Work from {ACTIVE_PLAN_PATH}. Use 'execute-aflow-plan' skill."
-            assert config.prompts['final_review'] == "Use 'final-review' skill."
+            assert config.prompts['simple_implementation'] == "Work from {ACTIVE_PLAN_PATH}. Use 'aflow-execute-plan' skill."
+            assert config.prompts['followup_implementation'] == "Use 'aflow-execute-plan' skill."
+            assert config.prompts['cp_loop_implementation'] == "Use 'aflow-execute-checkpoint' skill."
+            assert config.prompts['review_squash'] == "Use 'aflow-review-squash' skill."
+            assert config.prompts['review_cp'] == "Use 'aflow-review-checkpoint' skill."
+            assert config.prompts['final_review'] == "Use 'aflow-review-final' skill."
 
     def test_bundled_config_validates_without_errors(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
@@ -1524,8 +1554,8 @@ class SkillDocsTests(unittest.TestCase):
     def test_skill_files_do_not_contain_workflow_placeholders(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         placeholders = ('{ORIGINAL_PLAN_PATH}', '{ACTIVE_PLAN_PATH}', '{NEW_PLAN_PATH}')
-        for skill_name in ('aflow-plan', 'review-squash', 'execute-aflow-plan', 'execute-aflow-checkpoint', 'review-aflow-checkpoint', 'final-review'):
-            skill_path = repo_root / 'skills' / skill_name / 'SKILL.md'
+        for skill_name in ('aflow-plan', 'aflow-execute-plan', 'aflow-execute-checkpoint', 'aflow-review-squash', 'aflow-review-checkpoint', 'aflow-review-final'):
+            skill_path = repo_root / 'aflow' / 'bundled_skills' / skill_name / 'SKILL.md'
             text = skill_path.read_text(encoding='utf-8')
             for placeholder in placeholders:
                 assert placeholder not in text
@@ -1534,23 +1564,23 @@ class SkillDocsTests(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[1]
         config = load_workflow_config(repo_root / 'aflow' / 'aflow.toml')
         expected = {
-            'simple_implementation': 'execute-aflow-plan',
-            'cp_loop_implementation': 'execute-aflow-checkpoint',
-            'followup_implementation': 'execute-aflow-plan',
-            'review_squash': 'review-squash',
-            'review_cp': 'review-aflow-checkpoint',
-            'final_review': 'final-review',
+            'simple_implementation': 'aflow-execute-plan',
+            'cp_loop_implementation': 'aflow-execute-checkpoint',
+            'followup_implementation': 'aflow-execute-plan',
+            'review_squash': 'aflow-review-squash',
+            'review_cp': 'aflow-review-checkpoint',
+            'final_review': 'aflow-review-final',
         }
         for prompt_name, skill_name in expected.items():
             prompt = config.prompts[prompt_name]
             assert f"'{skill_name}'" in prompt
-            skill_path = repo_root / 'skills' / skill_name / 'SKILL.md'
+            skill_path = repo_root / 'aflow' / 'bundled_skills' / skill_name / 'SKILL.md'
             assert skill_path.exists()
 
     def test_final_review_skill_is_distinct_and_no_squash(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
-        text = (repo_root / 'skills' / 'final-review' / 'SKILL.md').read_text(encoding='utf-8')
-        assert 'name: final-review' in text
+        text = (repo_root / 'aflow' / 'bundled_skills' / 'aflow-review-final' / 'SKILL.md').read_text(encoding='utf-8')
+        assert 'name: aflow-review-final' in text
         assert 'Do nothing.' not in text
         assert 'Do not squash' in text or 'Do not squash,' in text
         assert 'non-checkpoint' in text
@@ -1558,11 +1588,11 @@ class SkillDocsTests(unittest.TestCase):
     def test_example_plan_uses_review_squash_spelling(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         example_text = (repo_root / 'plans' / 'example.toml').read_text(encoding='utf-8')
-        assert 'review-squash' in example_text
-        assert 'review-aflow-checkpoint' in example_text
-        assert 'execute-aflow-checkpoint' in example_text
-        assert 'execute-aflow-plan' in example_text
-        assert 'final-review' in example_text
+        assert 'aflow-review-squash' in example_text
+        assert 'aflow-review-checkpoint' in example_text
+        assert 'aflow-execute-checkpoint' in example_text
+        assert 'aflow-execute-plan' in example_text
+        assert 'aflow-review-final' in example_text
         typo = '-'.join(('revive', 'squash'))
         assert typo not in example_text
 if __name__ == '__main__':

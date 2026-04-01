@@ -1,5 +1,5 @@
 ---
-name: review-aflow-checkpoint
+name: aflow-review-checkpoint
 description: "Checkpoint-scoped review for AFlow plans. Use when an agent should review the latest checkpoint attempt, compare it against the original plan, and either approve that checkpoint or create a focused fix plan for that checkpoint only."
 ---
 

@@ -106,15 +106,15 @@ NEW_PLAN_PATH: "{NEW_PLAN_PATH}"
 
 review_plan = "Review the plan at {ORIGINAL_PLAN_PATH} for obvious/undispituble weak spots, ambiguity, and missing constraints and directly apply improvementns to the plan file."
 
-simple_implementation = "Work from {ACTIVE_PLAN_PATH}. Use 'execute-aflow-plan' skill."
+simple_implementation = "Work from {ACTIVE_PLAN_PATH}. Use 'aflow-execute-plan' skill."
 
-cp_loop_implementation = "Use 'execute-aflow-checkpoint' skill."
+cp_loop_implementation = "Use 'aflow-execute-checkpoint' skill."
 
-followup_implementation = "Use 'execute-aflow-plan' skill."
+followup_implementation = "Use 'aflow-execute-plan' skill."
 
 
-review_squash = "Use 'review-squash' skill."
+review_squash = "Use 'aflow-review-squash' skill."
 
-final_review = "Use 'final-review' skill."
+final_review = "Use 'aflow-review-final' skill."
 
-review_cp = " Use 'review-aflow-checkpoint' skill."
+review_cp = "Use 'aflow-review-checkpoint' skill."

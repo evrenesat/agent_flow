@@ -1,5 +1,5 @@
 ---
-name: execute-aflow-checkpoint
+name: aflow-execute-checkpoint
 description: "Checkpoint-scoped execution for an existing AFlow plan. Use when an agent should implement exactly one checkpoint, verify it, create the checkpoint commit, and then stop instead of continuing into the next checkpoint."
 ---
 

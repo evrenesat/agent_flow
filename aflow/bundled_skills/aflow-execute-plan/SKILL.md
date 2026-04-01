@@ -1,5 +1,5 @@
 ---
-name: execute-aflow-plan
+name: aflow-execute-plan
 description: "Lightweight execution reinforcement for an existing AFlow plan. Use when an agent must resume from the first unchecked checkpoint and keep the plan synchronized with verified progress."
 ---
 
