@@ -178,6 +178,21 @@ class BannerRenderer:
             return
         self._live.update(panel)
 
+    def pause(self) -> None:
+        if self._live is None or not _RICH_AVAILABLE:
+            return
+        self._live.stop()
+        self._live = None
+
+    def resume(self, state: ControllerState) -> None:
+        if not _RICH_AVAILABLE:
+            return
+        panel = self._build(state)
+        if panel is None:
+            return
+        self._live = Live(panel, console=self._console, refresh_per_second=1)
+        self._live.start()
+
     def stop(self, state: ControllerState) -> None:
         if self._live is None or not _RICH_AVAILABLE:
             return

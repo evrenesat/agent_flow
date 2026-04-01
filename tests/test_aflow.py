@@ -641,7 +641,7 @@ class WorkflowConfigTests(unittest.TestCase):
             assert 'review_implement_cp_review' in config.workflows
             step = config.workflows['ralph'].steps['implement_plan']
             assert step.profile == 'opencode.turbo'
-            assert step.prompts == ('simple_implementation',)
+            assert step.prompts == ('input_vars', 'simple_implementation')
             assert len(step.go) == 2
             assert step.go[0].to == 'END'
             assert step.go[0].when == 'DONE || MAX_TURNS_REACHED'
@@ -1667,5 +1667,391 @@ class SkillDocsTests(unittest.TestCase):
         assert 'aflow-review-final' in example_text
         typo = '-'.join(('revive', 'squash'))
         assert typo not in example_text
+
+    def test_review_checkpoint_skill_has_pre_handoff_selection_rule(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        text = (repo_root / 'aflow' / 'bundled_skills' / 'aflow-review-checkpoint' / 'SKILL.md').read_text(encoding='utf-8')
+        assert 'Pre-Handoff Base HEAD' in text
+        # The selection rule about searching plans/in-progress/ must be present
+        assert 'plans/in-progress/' in text
+
+    def test_bundled_config_review_implement_review_max_turns_transitions(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        config = load_workflow_config(repo_root / 'aflow' / 'aflow.toml')
+        wf = config.workflows['review_implement_review']
+        for step_name, step in wf.steps.items():
+            assert step.go[0].to == 'END', f"step {step_name} first transition must be END"
+            assert step.go[0].when == 'MAX_TURNS_REACHED', f"step {step_name} first transition must be MAX_TURNS_REACHED"
+
+    def test_bundled_config_review_implement_cp_review_max_turns_transitions(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        config = load_workflow_config(repo_root / 'aflow' / 'aflow.toml')
+        wf = config.workflows['review_implement_cp_review']
+        for step_name, step in wf.steps.items():
+            assert step.go[0].to == 'END', f"step {step_name} first transition must be END"
+            assert step.go[0].when == 'MAX_TURNS_REACHED', f"step {step_name} first transition must be MAX_TURNS_REACHED"
+
+    def test_bundled_config_ralph_includes_input_vars_prompt(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        config = load_workflow_config(repo_root / 'aflow' / 'aflow.toml')
+        step = config.workflows['ralph'].steps['implement_plan']
+        assert 'input_vars' in step.prompts
+
+    def test_bundled_config_typos_are_fixed(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        text = (repo_root / 'aflow' / 'aflow.toml').read_text(encoding='utf-8')
+        assert 'undispituble' not in text
+        assert 'improvementns' not in text
+
+    def test_example_plan_max_turns_transitions(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        import tomllib
+        with open(repo_root / 'plans' / 'example.toml', 'rb') as f:
+            raw = tomllib.load(f)
+        for wf_name in ('my_wf1', 'checkpoint_loop'):
+            for step_name, step_table in raw['workflow'][wf_name]['steps'].items():
+                first_go = step_table['go'][0]
+                assert first_go.get('when') == 'MAX_TURNS_REACHED', (
+                    f"{wf_name}.{step_name} first transition must be MAX_TURNS_REACHED"
+                )
+                assert first_go['to'] == 'END'
+
+
+class RepoRootTests(unittest.TestCase):
+
+    def test_resolve_repo_root_outside_git_uses_cwd(self) -> None:
+        import unittest.mock as mock
+        from aflow.cli import _resolve_repo_root
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_cwd = Path(tmpdir)
+            with mock.patch('subprocess.run') as mock_run, \
+                 mock.patch('pathlib.Path.cwd', return_value=fake_cwd):
+                mock_run.return_value = subprocess.CompletedProcess([], 1, stdout='', stderr='fatal: not a git repo\n')
+                result = _resolve_repo_root()
+                assert result == fake_cwd.resolve()
+
+    def test_resolve_repo_root_cwd_equals_git_root_uses_cwd(self) -> None:
+        import unittest.mock as mock
+        from aflow.cli import _resolve_repo_root
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_cwd = Path(tmpdir).resolve()
+            with mock.patch('subprocess.run') as mock_run, \
+                 mock.patch('pathlib.Path.cwd', return_value=fake_cwd):
+                mock_run.return_value = subprocess.CompletedProcess([], 0, stdout=str(fake_cwd) + '\n', stderr='')
+                result = _resolve_repo_root()
+                assert result == fake_cwd
+
+    def test_resolve_repo_root_nested_no_tty_returns_none(self) -> None:
+        import unittest.mock as mock
+        from aflow.cli import _resolve_repo_root
+        with tempfile.TemporaryDirectory() as tmpdir:
+            git_root = Path(tmpdir) / 'repo'
+            git_root.mkdir()
+            subdir = git_root / 'subdir'
+            subdir.mkdir()
+            fake_cwd = subdir.resolve()
+            git_root_resolved = git_root.resolve()
+            with mock.patch('subprocess.run') as mock_run, \
+                 mock.patch('pathlib.Path.cwd', return_value=fake_cwd), \
+                 mock.patch('sys.stdin') as mock_stdin, \
+                 mock.patch('sys.stdout') as mock_stdout:
+                mock_run.return_value = subprocess.CompletedProcess([], 0, stdout=str(git_root_resolved) + '\n', stderr='')
+                mock_stdin.isatty.return_value = False
+                mock_stdout.isatty.return_value = False
+                result = _resolve_repo_root()
+                assert result is None
+
+    def test_resolve_repo_root_nested_tty_accepts_git_root(self) -> None:
+        import unittest.mock as mock
+        from aflow.cli import _resolve_repo_root
+        with tempfile.TemporaryDirectory() as tmpdir:
+            git_root = Path(tmpdir) / 'repo'
+            git_root.mkdir()
+            subdir = git_root / 'subdir'
+            subdir.mkdir()
+            fake_cwd = subdir.resolve()
+            git_root_resolved = git_root.resolve()
+            with mock.patch('subprocess.run') as mock_run, \
+                 mock.patch('pathlib.Path.cwd', return_value=fake_cwd), \
+                 mock.patch('sys.stdin') as mock_stdin, \
+                 mock.patch('sys.stdout') as mock_stdout, \
+                 mock.patch('builtins.input', return_value='y'):
+                mock_run.return_value = subprocess.CompletedProcess([], 0, stdout=str(git_root_resolved) + '\n', stderr='')
+                mock_stdin.isatty.return_value = True
+                mock_stdout.isatty.return_value = True
+                result = _resolve_repo_root()
+                assert result == git_root_resolved
+
+    def test_resolve_repo_root_nested_tty_declines_uses_cwd(self) -> None:
+        import unittest.mock as mock
+        from aflow.cli import _resolve_repo_root
+        with tempfile.TemporaryDirectory() as tmpdir:
+            git_root = Path(tmpdir) / 'repo'
+            git_root.mkdir()
+            subdir = git_root / 'subdir'
+            subdir.mkdir()
+            fake_cwd = subdir.resolve()
+            git_root_resolved = git_root.resolve()
+            with mock.patch('subprocess.run') as mock_run, \
+                 mock.patch('pathlib.Path.cwd', return_value=fake_cwd), \
+                 mock.patch('sys.stdin') as mock_stdin, \
+                 mock.patch('sys.stdout') as mock_stdout, \
+                 mock.patch('builtins.input', return_value='n'):
+                mock_run.return_value = subprocess.CompletedProcess([], 0, stdout=str(git_root_resolved) + '\n', stderr='')
+                mock_stdin.isatty.return_value = True
+                mock_stdout.isatty.return_value = True
+                result = _resolve_repo_root()
+                assert result == fake_cwd
+
+    def test_nested_subdir_no_tty_run_exits_with_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            repo_root = _copy_aflow_repo(tmp_path)
+            home_dir = tmp_path / 'home'
+            home_dir.mkdir()
+            _write_config(home_dir, '[aflow]\ndefault_workflow = "simple"\n\n[harness.codex.profiles.default]\nmodel = "gpt-5.4"\n\n[workflow.simple.steps.implement_plan]\nprofile = "codex.default"\nprompts = ["p"]\ngo = [{ to = "END", when = "DONE || MAX_TURNS_REACHED" }]\n\n[prompts]\np = "Work."\n')
+            # init a real git repo at repo_root and create a subdirectory
+            subprocess.run(['git', 'init'], cwd=str(repo_root), check=True, capture_output=True)
+            subdir = repo_root / 'nested'
+            subdir.mkdir()
+            plan_path = tmp_path / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            env = os.environ.copy()
+            env['HOME'] = str(home_dir)
+            result = subprocess.run(
+                [sys.executable, '-m', 'aflow', 'run', str(plan_path)],
+                cwd=str(subdir),
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert result.returncode == 1
+            assert 'git' in result.stderr.lower() or 'Rerun' in result.stderr or 'nested' in result.stderr
+
+
+class PlanParserFenceTests(unittest.TestCase):
+
+    def test_parser_ignores_step_checkboxes_inside_backtick_fence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_path = Path(tmpdir) / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] real step\n\n```\n- [ ] fake inside fence\n```\n')
+            parsed = load_plan(plan_path)
+            assert parsed.snapshot.current_checkpoint_unchecked_step_count == 1
+
+    def test_parser_ignores_step_checkboxes_inside_tilde_fence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_path = Path(tmpdir) / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] real step\n\n~~~\n- [ ] fake inside tilde fence\n~~~\n')
+            parsed = load_plan(plan_path)
+            assert parsed.snapshot.current_checkpoint_unchecked_step_count == 1
+
+    def test_parser_ignores_checkpoint_heading_inside_fence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_path = Path(tmpdir) / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: Real\n- [ ] step one\n\n```\n### [ ] Checkpoint 2: Fake\n- [ ] fake step\n```\n')
+            parsed = load_plan(plan_path)
+            assert parsed.snapshot.total_checkpoint_count == 1
+            assert parsed.snapshot.current_checkpoint_name == 'Checkpoint 1: Real'
+
+    def test_parser_reopens_fence_after_close(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_path = Path(tmpdir) / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n\n```\n- [ ] fake\n```\n\n- [ ] step two\n')
+            parsed = load_plan(plan_path)
+            assert parsed.snapshot.current_checkpoint_unchecked_step_count == 2
+
+    def test_plan_has_git_tracking_detects_heading_outside_fence(self) -> None:
+        from aflow.plan import plan_has_git_tracking
+        assert plan_has_git_tracking('# Plan\n\n## Git Tracking\n\nBase: abc\n')
+        assert not plan_has_git_tracking('# Plan\n\n## No Tracking Here\n')
+
+    def test_plan_has_git_tracking_ignores_heading_inside_fence(self) -> None:
+        from aflow.plan import plan_has_git_tracking
+        text = '# Plan\n\n### [ ] Checkpoint 1\n\n```\n## Git Tracking\n```\n'
+        assert not plan_has_git_tracking(text)
+
+    def test_generate_new_plan_path_none_checkpoint_uses_cp01(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            original = Path(tmpdir) / 'plan.md'
+            original.write_text('dummy', encoding='utf-8')
+            result = generate_new_plan_path(original, checkpoint_index=None)
+            assert result.name == 'plan-cp01-v01.md'
+
+    def test_generate_new_plan_path_zero_checkpoint_uses_cp00(self) -> None:
+        # Verifies `1 if checkpoint_index is None` - 0 is not None, keeps 0
+        with tempfile.TemporaryDirectory() as tmpdir:
+            original = Path(tmpdir) / 'plan.md'
+            original.write_text('dummy', encoding='utf-8')
+            result = generate_new_plan_path(original, checkpoint_index=0)
+            assert result.name == 'plan-cp00-v01.md'
+
+
+class WorkflowPreflightTests(unittest.TestCase):
+
+    def _make_review_wf_config(self) -> WorkflowUserConfig:
+        return WorkflowUserConfig(
+            harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='m')})},
+            workflows={'review_wf': WorkflowConfig(
+                steps={'step1': WorkflowStepConfig(
+                    profile='codex.default',
+                    prompts=('review_prompt',),
+                    go=(GoTransition(to='END'),),
+                )},
+                first_step='step1',
+            )},
+            prompts={'review_prompt': "Use 'aflow-review-squash' skill."},
+        )
+
+    def test_preflight_fails_when_review_skill_and_no_git_tracking(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=1)
+            wf_config = self._make_review_wf_config()
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(config, wf_config, 'review_wf', config_dir=repo_root, runner=lambda *a, **k: None)
+            assert 'Git Tracking' in str(ctx.value)
+
+    def test_preflight_passes_when_review_skill_and_git_tracking_present(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n## Git Tracking\n\nBase: abc\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            wf_config = self._make_review_wf_config()
+            call_count = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=1)
+            result = run_workflow(config, wf_config, 'review_wf', config_dir=repo_root, adapter=CodexAdapter(), runner=runner)
+            assert result.turns_completed == 1
+
+    def test_preflight_skipped_for_non_review_workflow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: Done\n- [x] step one\n')
+            wf_config = WorkflowUserConfig(
+                harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='m')})},
+                workflows={'simple': WorkflowConfig(
+                    steps={'impl': WorkflowStepConfig(
+                        profile='codex.default',
+                        prompts=('p',),
+                        go=(GoTransition(to='END'),),
+                    )},
+                    first_step='impl',
+                )},
+                prompts={'p': "Use 'aflow-execute-plan' skill."},
+            )
+            config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=1)
+            result = run_workflow(config, wf_config, 'simple', config_dir=repo_root)
+            assert result.end_reason == 'already_complete'
+
+    def test_preflight_fails_for_git_tracking_only_inside_fence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n```\n## Git Tracking\n```\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=1)
+            wf_config = self._make_review_wf_config()
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(config, wf_config, 'review_wf', config_dir=repo_root, runner=lambda *a, **k: None)
+            assert 'Git Tracking' in str(ctx.value)
+
+
+class ActivePlanLifecycleTests(unittest.TestCase):
+
+    def test_fix_plan_resets_to_original_after_review_without_new_plan(self) -> None:
+        # 3-step workflow with all unconditional transitions so turn 3 always runs,
+        # even after DONE becomes true at turn 2.  This lets us verify the invariant:
+        # when implement completes the original plan but creates no new fix plan,
+        # the following step sees original_plan as active (not the previous fix plan).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            config_dir = repo_root
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            fix_plan = repo_root / 'plan-cp01-v01.md'
+            captured_active: list[str] = []
+            turn_counter = [0]
+
+            def capturing_runner(argv, **kwargs):
+                turn_counter[0] += 1
+                prompt = ' '.join(argv)
+                import re as _re
+                m = _re.search(r'Active: (\S+)', prompt)
+                if m:
+                    captured_active.append(m.group(1).rstrip('.'))
+                if turn_counter[0] == 1:
+                    # review: create fix plan, original stays incomplete
+                    fix_plan.write_text('# Fix\n\n### [x] CP: done\n- [x] s\n', encoding='utf-8')
+                elif turn_counter[0] == 2:
+                    # implement: work from fix plan, complete original — no new plan written
+                    _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n')
+                # turn 3 (second_review): does NOT create a new plan
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            wf_config = WorkflowUserConfig(
+                harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='m')})},
+                workflows={'loop': WorkflowConfig(
+                    steps={
+                        'review': WorkflowStepConfig(
+                            profile='codex.default',
+                            prompts=('rp',),
+                            go=(GoTransition(to='implement'),),
+                        ),
+                        'implement': WorkflowStepConfig(
+                            profile='codex.default',
+                            prompts=('ip',),
+                            go=(GoTransition(to='second_review'),),
+                        ),
+                        'second_review': WorkflowStepConfig(
+                            profile='codex.default',
+                            prompts=('rp',),
+                            go=(GoTransition(to='END'),),
+                        ),
+                    },
+                    first_step='review',
+                )},
+                prompts={
+                    'rp': 'Active: {ACTIVE_PLAN_PATH}.',
+                    'ip': 'Active: {ACTIVE_PLAN_PATH}.',
+                },
+            )
+            controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=5)
+            result = run_workflow(controller_config, wf_config, 'loop', config_dir=config_dir, adapter=CodexAdapter(), runner=capturing_runner)
+            assert result.turns_completed == 3
+            # Turn 1 (review): active should be original plan
+            assert captured_active[0] == str(plan_path)
+            # Turn 2 (implement): active should be fix plan (review created it in turn 1)
+            assert captured_active[1] == str(fix_plan)
+            # Turn 3 (second_review): active must reset to original — not the stale fix plan
+            assert captured_active[2] == str(plan_path)
+
+
+class WorkflowMaxTurnsEndToEndTests(unittest.TestCase):
+
+    def test_review_implement_review_ends_via_max_turns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            repo_root = _copy_aflow_repo(tmp_path)
+            home_dir = tmp_path / 'home'
+            home_dir.mkdir()
+            _write_config(home_dir, '[aflow]\ndefault_workflow = "multi"\n\n[harness.codex.profiles.default]\nmodel = "gpt-5.4"\n\n[workflow.multi.steps.review_plan]\nprofile = "codex.default"\nprompts = ["p"]\ngo = [\n  { to = "END", when = "MAX_TURNS_REACHED" },\n  { to = "implement_plan" },\n]\n\n[workflow.multi.steps.implement_plan]\nprofile = "codex.default"\nprompts = ["p"]\ngo = [\n  { to = "END", when = "MAX_TURNS_REACHED" },\n  { to = "review_implementation", when = "DONE" },\n  { to = "implement_plan" },\n]\n\n[workflow.multi.steps.review_implementation]\nprofile = "codex.default"\nprompts = ["p"]\ngo = [\n  { to = "END", when = "MAX_TURNS_REACHED" },\n  { to = "implement_plan", when = "NEW_PLAN_EXISTS" },\n  { to = "END" },\n]\n\n[prompts]\np = "Work."\n')
+            plan_path = tmp_path / 'plan.md'
+            count_file = tmp_path / 'count.txt'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            _write_workflow_harness_script(repo_root, 'codex')
+            result = _run_workflow_launcher(repo_root, '--max-turns', '1', str(plan_path), env=_workflow_test_env(repo_root, scenario='noop', plan_path=plan_path, count_file=count_file, home_dir=home_dir))
+            assert result.returncode == 0
+            run_dirs = sorted((repo_root / '.aflow' / 'runs').iterdir())
+            run_json = json.loads((run_dirs[0] / 'run.json').read_text(encoding='utf-8'))
+            assert run_json['end_reason'] == 'max_turns_reached'
+
+
 if __name__ == '__main__':
     unittest.main()

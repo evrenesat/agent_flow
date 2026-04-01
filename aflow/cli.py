@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import subprocess
 import sys
 
 from .config import (
@@ -48,6 +49,54 @@ Supported auto targets:
   opencode -> ~/.config/opencode/skills
   pi -> ~/.agents/skills
 """
+
+
+def _resolve_repo_root() -> Path | None:
+    """Resolve project root from cwd using git discovery.
+
+    Returns the resolved root, or None when the run must be aborted due to an
+    ambiguous root that cannot be resolved interactively.
+    """
+    working_dir = Path.cwd().resolve()
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(working_dir), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (OSError, FileNotFoundError):
+        return working_dir
+
+    if result.returncode != 0:
+        return working_dir
+
+    git_root = Path(result.stdout.strip()).resolve()
+    if git_root == working_dir:
+        return working_dir
+
+    is_tty = sys.stdin.isatty() and sys.stdout.isatty()
+    if not is_tty:
+        print(
+            f"error: current directory '{working_dir}' is inside a git repository "
+            f"rooted at '{git_root}'.\n"
+            f"Rerun from '{git_root}' to use the repository root, or rerun from a "
+            f"directory that is its own git root.",
+            file=sys.stderr,
+        )
+        return None
+
+    try:
+        response = input(
+            f"Current directory '{working_dir}' is inside '{git_root}'.\n"
+            f"Use git root '{git_root}' as project root? [Y/n]: "
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return working_dir
+
+    if response in ("", "y", "yes"):
+        return git_root
+    return working_dir
 
 
 def _positive_int(value: str) -> int:
@@ -175,7 +224,9 @@ def main(argv: list[str] | None = None) -> int:
         print("error: plan_file is required", file=sys.stderr)
         return 1
 
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = _resolve_repo_root()
+    if repo_root is None:
+        return 1
     working_dir = Path.cwd()
     plan_path = Path(plan_file_arg).expanduser().resolve()
 

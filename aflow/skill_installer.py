@@ -125,20 +125,35 @@ def build_install_plan(destination: str | Path | None = None) -> InstallPlan:
     return InstallPlan(mode=mode, skills=skills, targets=targets, preview_rows=preview_rows)
 
 
+def _unique_destinations(targets: tuple[InstallTarget, ...]) -> list[Path]:
+    seen: set[Path] = set()
+    result: list[Path] = []
+    for target in targets:
+        if target.destination not in seen:
+            seen.add(target.destination)
+            result.append(target.destination)
+    return result
+
+
 def render_preview(plan: InstallPlan) -> str:
     lines: list[str] = []
     if plan.mode == "auto":
         lines.append("Auto install mode")
         lines.append("Detected harness destinations:")
+        dest_to_harnesses: dict[Path, list[str]] = {}
         for target in plan.targets:
-            lines.append(f"- {target.harness} ({target.executable}) -> {target.destination}")
+            dest_to_harnesses.setdefault(target.destination, []).append(target.harness)
+        for dest, harnesses in dest_to_harnesses.items():
+            lines.append(f"- {', '.join(harnesses)} -> {dest}")
     else:
         lines.append("Manual install mode")
         lines.append(f"Destination root: {plan.targets[0].destination}")
     lines.append("Bundled skills:")
     for skill in plan.skills:
         lines.append(f"- {skill.name}")
-    lines.append(f"Total copy operations: {len(plan.preview_rows)}")
+    unique_dests = _unique_destinations(plan.targets)
+    total = len(unique_dests) * len(plan.skills)
+    lines.append(f"Total copy operations: {total}")
     return "\n".join(lines)
 
 
@@ -186,15 +201,16 @@ def _copy_traversable_tree(source: Traversable, destination: Path) -> None:
 
 
 def _copy_plan(plan: InstallPlan) -> int:
+    unique_dests = _unique_destinations(plan.targets)
     copied = 0
-    for target in plan.targets:
-        target.destination.mkdir(parents=True, exist_ok=True)
-    for target in plan.targets:
+    for dest in unique_dests:
+        dest.mkdir(parents=True, exist_ok=True)
+    for dest in unique_dests:
         for skill in plan.skills:
             try:
-                _copy_traversable_tree(skill.source, target.destination / skill.name)
+                _copy_traversable_tree(skill.source, dest / skill.name)
             except InstallerError as exc:
-                raise InstallerError(f"Failed while copying into {target.destination}: {exc}") from exc
+                raise InstallerError(f"Failed while copying into {dest}: {exc}") from exc
             copied += 1
     return copied
 

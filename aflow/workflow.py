@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -13,20 +14,27 @@ from typing import Callable
 
 from .config import (
     GoTransition,
+    VALID_CONDITION_SYMBOLS,
+    WorkflowConfig,
     WorkflowStepConfig,
     WorkflowUserConfig,
 )
 from .harnesses import get_adapter
 from .harnesses.base import HarnessAdapter, HarnessInvocation
-from .plan import PlanParseError, PlanSnapshot, load_plan
+from .plan import PlanParseError, PlanSnapshot, load_plan, plan_has_git_tracking
 from .run_state import ControllerConfig, ControllerRunResult, ControllerState, WorkflowEndReason
 from .runlog import create_run_paths, prune_old_runs, write_run_metadata, write_turn_artifacts
 from .status import BannerRenderer
 
 
-VALID_CONDITION_SYMBOLS = frozenset({"DONE", "NEW_PLAN_EXISTS", "MAX_TURNS_REACHED"})
 PROCESS_POLL_INTERVAL_SECONDS = 0.05
 BANNER_REFRESH_INTERVAL_SECONDS = 1.0
+
+_REVIEW_SKILL_NAMES = frozenset({
+    "aflow-review-squash",
+    "aflow-review-checkpoint",
+    "aflow-review-final",
+})
 
 
 class WorkflowError(RuntimeError):
@@ -164,7 +172,7 @@ def generate_new_plan_path(
     stem = original_plan_path.stem
     parent = original_plan_path.parent
     suffix = original_plan_path.suffix or ".md"
-    cp = checkpoint_index or 1
+    cp = 1 if checkpoint_index is None else checkpoint_index
     pattern = re.compile(
         re.escape(f"{stem}-cp{cp:02d}-v") + r"(\d+)" + re.escape(suffix)
     )
@@ -469,6 +477,8 @@ def _run_process(
     banner: BannerRenderer,
     state: ControllerState,
 ) -> subprocess.CompletedProcess[str]:
+    is_interactive = sys.stdin.isatty() and sys.stdout.isatty()
+
     proc = subprocess.Popen(
         list(invocation.argv),
         cwd=str(repo_root),
@@ -477,37 +487,52 @@ def _run_process(
         stderr=subprocess.PIPE,
         text=True,
     )
-    banner.update(state)
+
+    if is_interactive:
+        banner.pause()
+    else:
+        banner.update(state)
 
     stdout_chunks: list[str] = []
     stderr_chunks: list[str] = []
 
-    def _drain(stream, chunks: list[str]) -> None:
+    def _drain(stream, chunks: list[str], tee_to=None) -> None:
         while True:
             chunk = stream.read(4096)
             if not chunk:
                 break
             chunks.append(chunk)
+            if tee_to is not None:
+                tee_to.write(chunk)
+                tee_to.flush()
 
     assert proc.stdout is not None
     assert proc.stderr is not None
-    t_out = threading.Thread(target=_drain, args=(proc.stdout, stdout_chunks), daemon=True)
-    t_err = threading.Thread(target=_drain, args=(proc.stderr, stderr_chunks), daemon=True)
+    t_out = threading.Thread(
+        target=_drain,
+        args=(proc.stdout, stdout_chunks, sys.stdout if is_interactive else None),
+        daemon=True,
+    )
+    t_err = threading.Thread(
+        target=_drain,
+        args=(proc.stderr, stderr_chunks, sys.stderr if is_interactive else None),
+        daemon=True,
+    )
     t_out.start()
     t_err.start()
 
-    next_banner_update_at = time.monotonic() + BANNER_REFRESH_INTERVAL_SECONDS
     while True:
         try:
             proc.wait(timeout=PROCESS_POLL_INTERVAL_SECONDS)
             break
         except subprocess.TimeoutExpired:
-            if time.monotonic() >= next_banner_update_at:
-                banner.update(state)
-                next_banner_update_at = time.monotonic() + BANNER_REFRESH_INTERVAL_SECONDS
+            pass
 
     t_out.join()
     t_err.join()
+
+    if is_interactive:
+        banner.resume(state)
 
     return subprocess.CompletedProcess(
         proc.args,
@@ -515,6 +540,19 @@ def _run_process(
         "".join(stdout_chunks),
         "".join(stderr_chunks),
     )
+
+
+def _workflow_requires_git_tracking(
+    wf: WorkflowConfig,
+    config: WorkflowUserConfig,
+) -> bool:
+    for step in wf.steps.values():
+        for prompt_key in step.prompts:
+            prompt_text = config.prompts.get(prompt_key, "")
+            for skill_name in _REVIEW_SKILL_NAMES:
+                if skill_name in prompt_text:
+                    return True
+    return False
 
 
 def _make_banner(
@@ -598,6 +636,22 @@ def run_workflow(
             active_plan_path=active_plan_path,
         )
         raise WorkflowError(summary, run_dir=run_paths.run_dir) from exc
+
+    if _workflow_requires_git_tracking(wf, workflow_config):
+        plan_text = original_plan_path.read_text(encoding="utf-8")
+        if not plan_has_git_tracking(plan_text):
+            state.status_message = "failed"
+            banner.stop(state)
+            summary = (
+                f"workflow '{workflow_name}' requires a '## Git Tracking' section "
+                f"in the original plan at '{original_plan_path}'"
+            )
+            write_run_metadata(
+                run_paths, config, state, status="failed", failure_reason=summary,
+                workflow_name=workflow_name, original_plan_path=original_plan_path,
+                active_plan_path=active_plan_path,
+            )
+            raise WorkflowError(summary, run_dir=run_paths.run_dir)
 
     original_snapshot = parsed_plan.snapshot
     state.last_snapshot = original_snapshot
@@ -875,6 +929,9 @@ def run_workflow(
                 else None
             ),
         )
+
+        if not new_plan_exists and active_plan_path != original_plan_path:
+            active_plan_path = original_plan_path
 
         write_run_metadata(
             run_paths, config, state, status="running",

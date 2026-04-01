@@ -7,6 +7,8 @@ from pathlib import Path
 
 SECTION_RE = re.compile(r"^###\s+\[([ xX])\]\s+(Checkpoint\b.*)$")
 STEP_RE = re.compile(r"^\s*[-*]\s+\[([ xX])\]\s+")
+FENCE_RE = re.compile(r"^(`{3,}|~{3,})")
+GIT_TRACKING_RE = re.compile(r"^##\s+Git Tracking\b")
 
 
 @dataclass(frozen=True)
@@ -45,11 +47,55 @@ def _build_error(path: Path, message: str) -> PlanParseError:
     return PlanParseError(f"{path}: {message}")
 
 
+def plan_has_git_tracking(text: str) -> bool:
+    """Return True when the text contains a ## Git Tracking heading outside fenced blocks."""
+    in_fence = False
+    fence_char: str | None = None
+    fence_len = 0
+    for line in text.splitlines():
+        fence_match = FENCE_RE.match(line)
+        if fence_match:
+            marker = fence_match.group(1)
+            if not in_fence:
+                in_fence = True
+                fence_char = marker[0]
+                fence_len = len(marker)
+            elif marker[0] == fence_char and len(marker) >= fence_len:
+                in_fence = False
+                fence_char = None
+                fence_len = 0
+            continue
+        if in_fence:
+            continue
+        if GIT_TRACKING_RE.match(line):
+            return True
+    return False
+
+
 def parse_plan_text(text: str, *, source_path: Path) -> ParsedPlan:
     sections: list[CheckpointSection] = []
     current_section: dict[str, object] | None = None
+    in_fence = False
+    fence_char: str | None = None
+    fence_len = 0
 
     for line_number, line in enumerate(text.splitlines(), start=1):
+        fence_match = FENCE_RE.match(line)
+        if fence_match:
+            marker = fence_match.group(1)
+            if not in_fence:
+                in_fence = True
+                fence_char = marker[0]
+                fence_len = len(marker)
+            elif marker[0] == fence_char and len(marker) >= fence_len:
+                in_fence = False
+                fence_char = None
+                fence_len = 0
+            continue
+
+        if in_fence:
+            continue
+
         section_match = SECTION_RE.match(line)
         if section_match:
             if current_section is not None:

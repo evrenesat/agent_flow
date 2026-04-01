@@ -305,6 +305,14 @@ If a run reaches the hard loop limit without any transition to `END`, that is st
 
 Older run directories are pruned automatically. The retention count is controlled by `keep_runs` in `[aflow]` config (default: `20`). The default max turn limit is `15` and can be overridden with `--max-turns` / `-mt`.
 
+## Shipped Workflows
+
+The bundled `aflow.toml` includes three ready-to-use workflows:
+
+- `ralph` - single-step implementation loop, no review
+- `review_implement_review` - review, implement, then review again with `aflow-review-squash`. On approval the reviewer squashes all post-handoff commits into one final commit. This squash behavior is specific to this workflow, not an engine-wide invariant.
+- `review_implement_cp_review` - checkpoint-scoped review with `aflow-review-checkpoint` and a final no-squash audit with `aflow-review-final`. Checkpoint commit structure is preserved on approval.
+
 ## Included Skills
 
 This repo also ships optional skills under `aflow/bundled_skills/`. `aflow install-skills` copies them into the harness-specific skill roots listed above.

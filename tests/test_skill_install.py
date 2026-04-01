@@ -149,3 +149,39 @@ def test_auto_install_plan_uses_shared_agents_directory_for_gemini_and_pi(tmp_pa
     assert [target.harness for target in plan.targets] == ["gemini", "pi"]
     assert plan.targets[0].destination == Path("~/.agents/skills").expanduser()
     assert plan.targets[1].destination == Path("~/.agents/skills").expanduser()
+
+
+def test_auto_install_gemini_and_pi_grouped_preview(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from aflow.skill_installer import render_preview
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for executable in ("gemini", "pi"):
+        _write_executable(bin_dir / executable)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    plan = build_install_plan()
+    preview = render_preview(plan)
+
+    expanded_dest = str(Path("~/.agents/skills").expanduser())
+    assert "gemini, pi" in preview
+    assert "Total copy operations: 6" in preview
+    assert preview.count(expanded_dest) == 1
+
+
+def test_auto_install_gemini_and_pi_copies_only_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for executable in ("gemini", "pi"):
+        _write_executable(bin_dir / executable)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    agents_home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(agents_home))
+
+    copied = install_skills(yes=True, stdin=_FakeStdin(True), stdout=__import__('io').StringIO())
+
+    assert copied == 6
+    shared_dest = Path("~/.agents/skills").expanduser()
+    for skill_name in BUNDLED_SKILL_NAMES:
+        assert (shared_dest / skill_name).is_dir()
+        assert (shared_dest / skill_name / "SKILL.md").is_file()

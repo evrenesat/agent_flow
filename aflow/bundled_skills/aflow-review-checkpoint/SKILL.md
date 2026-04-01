@@ -37,6 +37,7 @@ Before reviewing, identify the active original aflow plan under `plans/in-progre
 Selection rules:
 
 1. If the user names a plan file, use it.
+2. Otherwise search plans/in-progress/ for original plan files containing Pre-Handoff Base HEAD.
 3. Filter candidates to the current branch recorded in `Plan Branch`.
 4. Ignore temporary fix plans when choosing the original long-lived plan.
 5. If exactly one original plan remains, use it.
