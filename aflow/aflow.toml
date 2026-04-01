@@ -1,5 +1,6 @@
 [aflow]
 default_workflow = "ralph"
+keep_runs = 20
 
 #### HARNESS PROFILES ####
 

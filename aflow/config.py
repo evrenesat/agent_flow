@@ -58,9 +58,13 @@ def _parse_profile_table(raw: Mapping[str, object], *, path: str) -> HarnessProf
     )
 
 
+DEFAULT_KEEP_RUNS = 20
+
+
 @dataclass(frozen=True)
 class AflowSection:
     default_workflow: str | None = None
+    keep_runs: int = DEFAULT_KEEP_RUNS
 
 
 @dataclass(frozen=True)
@@ -116,14 +120,21 @@ def _validate_condition_symbols(expression: str, *, path: str) -> None:
 
 
 def _parse_aflow_section(raw: Mapping[str, object], *, path: str) -> AflowSection:
-    allowed = {"default_workflow"}
+    allowed = {"default_workflow", "keep_runs"}
     unknown = sorted(set(raw) - allowed)
     if unknown:
         raise ConfigError(f"unsupported keys in {path}: {', '.join(unknown)}")
+    keep_runs = DEFAULT_KEEP_RUNS
+    if "keep_runs" in raw:
+        value = raw["keep_runs"]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ConfigError(f"{path}.keep_runs must be a positive integer")
+        keep_runs = value
     return AflowSection(
         default_workflow=_optional_text(
             raw.get("default_workflow"), path=f"{path}.default_workflow"
         ),
+        keep_runs=keep_runs,
     )
 
 

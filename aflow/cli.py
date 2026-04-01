@@ -17,16 +17,22 @@ from .workflow import WorkflowError, run_workflow
 
 
 DEFAULT_MAX_TURNS = 15
-DEFAULT_KEEP_RUNS = 20
-ROOT_HELP = """\
-Commands:
-  install-skills [DESTINATION] [--yes]
-    Install the bundled aflow skills into harness skill directories.
+
+RUN_HELP = """\
+Positional arguments:
+  [workflow_name]   Name of the workflow to run. Omit to use default_workflow from config.
+  plan_file         Path to the plan Markdown file.
+
+Extra instructions:
+  Append -- followed by free-form text to pass extra instructions to each step prompt.
 
 Examples:
-  aflow install-skills
-  aflow install-skills ~/.claude/skills
+  aflow run path/to/plan.md
+  aflow run ralph path/to/plan.md
+  aflow run -mt 10 path/to/plan.md
+  aflow run path/to/plan.md -- keep edits small and update docs if behavior changes
 """
+
 INSTALL_SKILLS_HELP = """\
 Auto mode: omit DESTINATION to install the bundled skills into each supported harness skill directory
 for the harness CLIs found on PATH.
@@ -54,26 +60,33 @@ def _positive_int(value: str) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="aflow",
+        description="Run plan-driven coding workflows through existing agent CLIs.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    subparsers = parser.add_subparsers(dest="command")
+
+    run_parser = subparsers.add_parser(
+        "run",
         description="Run an aflow workflow from a plan file.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=ROOT_HELP,
+        epilog=RUN_HELP,
     )
-    parser.add_argument("--workflow")
-    parser.add_argument("--max-turns", type=_positive_int, default=DEFAULT_MAX_TURNS)
-    parser.add_argument("--keep-runs", type=_positive_int, default=DEFAULT_KEEP_RUNS)
-    parser.add_argument("plan_file")
-    parser.add_argument("extra_instructions", nargs=argparse.REMAINDER)
-    return parser
+    run_parser.add_argument(
+        "--max-turns", "-mt",
+        type=_positive_int,
+        default=DEFAULT_MAX_TURNS,
+        metavar="N",
+        help=f"Maximum number of turns (default: {DEFAULT_MAX_TURNS}).",
+    )
+    run_parser.add_argument("run_args", nargs=argparse.REMAINDER)
 
-
-def build_install_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="aflow install-skills",
+    install_parser = subparsers.add_parser(
+        "install-skills",
         description="Install the bundled aflow skills into harness skill directories.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=INSTALL_SKILLS_HELP,
     )
-    parser.add_argument(
+    install_parser.add_argument(
         "destination",
         nargs="?",
         help=(
@@ -82,12 +95,42 @@ def build_install_parser() -> argparse.ArgumentParser:
             "global skill directory."
         ),
     )
-    parser.add_argument("--yes", action="store_true", help="Skip the confirmation prompt.")
+    install_parser.add_argument("--yes", action="store_true", help="Skip the confirmation prompt.")
+
     return parser
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    return build_parser().parse_args(argv)
+def _parse_run_args(
+    run_args: list[str],
+) -> tuple[str | None, str | None, tuple[str, ...]]:
+    """Split REMAINDER args into (workflow_name, plan_file, extra_instructions).
+
+    With '--' present: everything before is positionals, everything after is extra.
+    Without '--': all args are positionals, no extra instructions.
+
+    Positional rules:
+      1 positional  -> plan_file only, no workflow
+      2+ positionals -> first is workflow, second is plan_file
+    """
+    if "--" in run_args:
+        sep = run_args.index("--")
+        extra = tuple(run_args[sep + 1 :])
+        positionals = run_args[:sep]
+    else:
+        extra = ()
+        positionals = run_args
+
+    if not positionals:
+        return None, None, extra
+
+    if len(positionals) == 1:
+        return None, positionals[0], extra
+
+    workflow_name = positionals[0]
+    plan_file = positionals[1]
+    if len(positionals) > 2:
+        extra = tuple(positionals[2:]) + extra
+    return workflow_name, plan_file, extra
 
 
 def _format_success_summary(workflow_name: str, turns_completed: int, end_reason: WorkflowEndReason) -> str:
@@ -99,7 +142,8 @@ def _format_success_summary(workflow_name: str, turns_completed: int, end_reason
 
 
 def run_install_skills(argv: list[str] | None = None) -> int:
-    args = build_install_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(["install-skills"] + ([] if argv is None else argv))
     try:
         install_skills(destination=args.destination, yes=args.yes)
     except InstallerError as exc:
@@ -110,13 +154,31 @@ def run_install_skills(argv: list[str] | None = None) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     tokens = list(sys.argv[1:] if argv is None else argv)
-    if tokens and tokens[0] == "install-skills":
-        return run_install_skills(tokens[1:])
-    args = parse_args(tokens)
+    parser = build_parser()
+    args = parser.parse_args(tokens)
+
+    if args.command == "install-skills":
+        try:
+            install_skills(destination=args.destination, yes=args.yes)
+        except InstallerError as exc:
+            print(exc, file=sys.stderr)
+            return 1
+        return 0
+
+    if args.command != "run":
+        parser.print_help(sys.stderr)
+        return 1
+
+    workflow_arg, plan_file_arg, extra_instructions = _parse_run_args(args.run_args)
+
+    if plan_file_arg is None:
+        print("error: plan_file is required", file=sys.stderr)
+        return 1
+
     repo_root = Path(__file__).resolve().parents[1]
     working_dir = Path.cwd()
-    plan_path = Path(args.plan_file).expanduser().resolve()
-    extra_instructions = tuple(token for token in args.extra_instructions if token != "--")
+    plan_path = Path(plan_file_arg).expanduser().resolve()
+
     try:
         config_path = bootstrap_config()
         workflow_config = load_workflow_config(config_path)
@@ -142,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    workflow_name = args.workflow or workflow_config.aflow.default_workflow
+    workflow_name = workflow_arg or workflow_config.aflow.default_workflow
     if workflow_name is None:
         print(
             "No workflow specified and no default_workflow set in config.",
@@ -161,7 +223,7 @@ def main(argv: list[str] | None = None) -> int:
         repo_root=repo_root,
         plan_path=plan_path,
         max_turns=args.max_turns,
-        keep_runs=args.keep_runs,
+        keep_runs=workflow_config.aflow.keep_runs,
         extra_instructions=extra_instructions,
     )
 

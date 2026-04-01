@@ -19,7 +19,7 @@ That exposes the `aflow` command on your `PATH`.
 If you are working from a local checkout, you can also run:
 
 ```bash
-uv run python -m aflow path/to/plan.md
+uv run python -m aflow run path/to/plan.md
 ```
 
 ## Install Skills
@@ -56,13 +56,13 @@ The auto-install destination map is:
 ## Usage
 
 ```bash
-aflow path/to/plan.md
-aflow --workflow review_implement_review path/to/plan.md
-aflow --max-turns 10 path/to/plan.md
-aflow path/to/plan.md -- keep edits small and update docs if behavior changes
+aflow run path/to/plan.md
+aflow run review_implement_review path/to/plan.md
+aflow run -mt 10 path/to/plan.md
+aflow run path/to/plan.md -- keep edits small and update docs if behavior changes
 ```
 
-If `--workflow` is omitted, `aflow` uses `aflow.default_workflow` from config.
+If the workflow name is omitted, `aflow` uses `aflow.default_workflow` from config.
 
 ## Why This Exists
 
@@ -108,7 +108,7 @@ If that file does not exist, `aflow` copies the packaged `aflow/aflow.toml` into
 Example:
 
 ```bash
-aflow path/to/plan.md
+aflow run path/to/plan.md
 # Config bootstrapped at ~/.config/aflow/aflow.toml
 # Review the copied profiles and adjust them if needed, then run again
 ```
@@ -122,7 +122,22 @@ Config is standard TOML. The current schema has four top-level sections:
 - `workflow`
 - `prompts`
 
+### `[aflow]` options
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `default_workflow` | string | — | Workflow to run when none is specified on the CLI. |
+| `keep_runs` | int | `20` | Number of run log directories to retain under `.aflow/runs/`. Older directories are pruned automatically after each run. |
+
 Example:
+
+```toml
+[aflow]
+default_workflow = "review_implement_review"
+keep_runs = 10
+```
+
+### Full example
 
 ```toml
 [aflow]
@@ -288,7 +303,7 @@ Saved data includes:
 
 If a run reaches the hard loop limit without any transition to `END`, that is still a failure, even if the last turn also satisfies `MAX_TURNS_REACHED`.
 
-Older run directories are pruned automatically. The default retention is `20` runs. The default max turn limit is `15`.
+Older run directories are pruned automatically. The retention count is controlled by `keep_runs` in `[aflow]` config (default: `20`). The default max turn limit is `15` and can be overridden with `--max-turns` / `-mt`.
 
 ## Included Skills
 

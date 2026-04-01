@@ -11,7 +11,7 @@ import unittest
 from importlib import resources
 from aflow.config import AflowSection, ConfigError, GoTransition, HarnessProfileConfig, WorkflowConfig, WorkflowHarnessConfig, WorkflowStepConfig, WorkflowUserConfig, bootstrap_config, find_placeholders, load_workflow_config, validate_workflow_config
 from aflow.workflow import WorkflowError, _backup_original_plan, evaluate_condition, generate_new_plan_path, pick_transition, render_prompt, render_step_prompts, resolve_profile, run_workflow
-from aflow.cli import build_install_parser, build_parser, main
+from aflow.cli import _parse_run_args, build_parser, main
 from aflow.harnesses.claude import ClaudeAdapter
 from aflow.harnesses.codex import CodexAdapter
 from aflow.harnesses.gemini import GeminiAdapter
@@ -40,32 +40,65 @@ class WorkflowCliTests(unittest.TestCase):
         parser = build_parser()
         assert parser.prog == 'aflow'
 
-    def test_parser_accepts_workflow_flag(self) -> None:
-        args = build_parser().parse_args(['--workflow', 'simple', 'plan.md'])
-        assert args.workflow == 'simple'
+    def test_run_args_workflow_and_plan(self) -> None:
+        workflow, plan, extra = _parse_run_args(['ralph', 'plan.md'])
+        assert workflow == 'ralph'
+        assert plan == 'plan.md'
+        assert extra == ()
 
-    def test_parser_workflow_defaults_to_none(self) -> None:
-        args = build_parser().parse_args(['plan.md'])
-        assert args.workflow is None
+    def test_run_args_plan_only(self) -> None:
+        workflow, plan, extra = _parse_run_args(['plan.md'])
+        assert workflow is None
+        assert plan == 'plan.md'
+        assert extra == ()
+
+    def test_run_args_extra_instructions(self) -> None:
+        workflow, plan, extra = _parse_run_args(['plan.md', '--', 'keep edits small'])
+        assert workflow is None
+        assert plan == 'plan.md'
+        assert extra == ('keep edits small',)
+
+    def test_run_args_workflow_plan_extra(self) -> None:
+        workflow, plan, extra = _parse_run_args(['ralph', 'plan.md', '--', 'be careful'])
+        assert workflow == 'ralph'
+        assert plan == 'plan.md'
+        assert extra == ('be careful',)
+
+    def test_run_args_empty(self) -> None:
+        workflow, plan, extra = _parse_run_args([])
+        assert workflow is None
+        assert plan is None
+        assert extra == ()
+
+    def test_run_parser_max_turns_short_flag(self) -> None:
+        args = build_parser().parse_args(['run', '-mt', '5', 'plan.md'])
+        assert args.max_turns == 5
+
+    def test_run_parser_max_turns_long_flag(self) -> None:
+        args = build_parser().parse_args(['run', '--max-turns', '10', 'plan.md'])
+        assert args.max_turns == 10
 
     def test_parser_no_legacy_flags(self) -> None:
         parser = build_parser()
-        action_names = {a.dest for a in parser._actions}
-        assert 'harness' not in action_names
-        assert 'model' not in action_names
-        assert 'effort' not in action_names
-        assert 'profile' not in action_names
-        assert 'stagnation_limit' not in action_names
+        subparsers_action = next(a for a in parser._actions if hasattr(a, 'choices') and isinstance(a.choices, dict))
+        run_subparser = subparsers_action.choices['run']
+        run_actions = {a.dest for a in run_subparser._actions}
+        assert 'harness' not in run_actions
+        assert 'model' not in run_actions
+        assert 'effort' not in run_actions
+        assert 'profile' not in run_actions
+        assert 'stagnation_limit' not in run_actions
+        assert 'keep_runs' not in run_actions
+        assert 'workflow' not in run_actions
 
-    def test_install_parser_exposes_destination_and_yes(self) -> None:
-        args = build_install_parser().parse_args(['--yes'])
+    def test_install_subcommand_exposes_destination_and_yes(self) -> None:
+        args = build_parser().parse_args(['install-skills', '--yes'])
         assert args.destination is None
         assert args.yes is True
 
     def test_root_help_mentions_install_skills_command(self) -> None:
         help_text = build_parser().format_help()
         assert "install-skills" in help_text
-        assert "aflow install-skills ~/.claude/skills" in help_text
 
     def test_cli_bootstraps_missing_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -73,7 +106,7 @@ class WorkflowCliTests(unittest.TestCase):
             original_home = os.environ.get('HOME')
             try:
                 os.environ['HOME'] = str(home_dir)
-                result = main(['plan.md'])
+                result = main(['run', 'plan.md'])
             finally:
                 if original_home is None:
                     os.environ.pop('HOME', None)
@@ -90,7 +123,7 @@ class WorkflowCliTests(unittest.TestCase):
             original_home = os.environ.get('HOME')
             try:
                 os.environ['HOME'] = str(home_dir)
-                result = main(['plan.md'])
+                result = main(['run', 'plan.md'])
             finally:
                 if original_home is None:
                     os.environ.pop('HOME', None)
@@ -107,7 +140,7 @@ class WorkflowCliTests(unittest.TestCase):
             original_home = os.environ.get('HOME')
             try:
                 os.environ['HOME'] = str(home_dir)
-                result = main(['--workflow', 'other', str(plan_path)])
+                result = main(['run', 'other', str(plan_path)])
             finally:
                 if original_home is None:
                     os.environ.pop('HOME', None)
@@ -115,22 +148,21 @@ class WorkflowCliTests(unittest.TestCase):
                     os.environ['HOME'] = original_home
             assert result == 0
 
-    def test_cli_routes_install_skills_before_bootstrap(self) -> None:
+    def test_cli_install_skills_runs_without_config_bootstrap(self) -> None:
         import aflow.cli as cli_module
 
-        calls: list[list[str] | None] = []
-        original = cli_module.run_install_skills
+        calls: list[tuple[str | None, bool]] = []
+        original = cli_module.install_skills
         try:
-            def fake_run_install_skills(argv: list[str] | None = None) -> int:
-                calls.append(None if argv is None else list(argv))
-                return 0
+            def fake_install_skills(destination: str | None = None, *, yes: bool = False) -> None:
+                calls.append((destination, yes))
 
-            cli_module.run_install_skills = fake_run_install_skills
+            cli_module.install_skills = fake_install_skills
             result = main(['install-skills', '/tmp/dest', '--yes'])
         finally:
-            cli_module.run_install_skills = original
+            cli_module.install_skills = original
         assert result == 0
-        assert calls == [['/tmp/dest', '--yes']]
+        assert calls == [('/tmp/dest', True)]
 
     def test_cli_rejects_unknown_workflow(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -139,7 +171,7 @@ class WorkflowCliTests(unittest.TestCase):
             original_home = os.environ.get('HOME')
             try:
                 os.environ['HOME'] = str(home_dir)
-                result = main(['--workflow', 'nonexistent', 'plan.md'])
+                result = main(['run', 'nonexistent', 'plan.md'])
             finally:
                 if original_home is None:
                     os.environ.pop('HOME', None)
@@ -387,6 +419,46 @@ class RetentionTests(unittest.TestCase):
             remaining = sorted((path.name for path in runs_root.iterdir()))
             assert len(remaining) == 20
             assert remaining == sorted((f'20260329T120000Z-{22 - index:08x}' for index in range(3, 23)))
+
+class AflowSectionConfigTests(unittest.TestCase):
+
+    def _write_workflow_config(self, tmpdir: str, text: str) -> Path:
+        home_dir = Path(tmpdir)
+        config_path = home_dir / '.config' / 'aflow' / 'aflow.toml'
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(text, encoding='utf-8')
+        return config_path
+
+    def test_keep_runs_defaults_to_twenty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(tmpdir, '[aflow]\ndefault_workflow = "simple"\n\n[workflow.simple.steps.s]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n')
+            config = load_workflow_config(config_path)
+            assert config.aflow.keep_runs == 20
+
+    def test_keep_runs_reads_from_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(tmpdir, '[aflow]\ndefault_workflow = "simple"\nkeep_runs = 5\n\n[workflow.simple.steps.s]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n')
+            config = load_workflow_config(config_path)
+            assert config.aflow.keep_runs == 5
+
+    def test_keep_runs_rejects_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(tmpdir, '[aflow]\nkeep_runs = 0\n')
+            with pytest.raises(ConfigError):
+                load_workflow_config(config_path)
+
+    def test_keep_runs_rejects_negative(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(tmpdir, '[aflow]\nkeep_runs = -1\n')
+            with pytest.raises(ConfigError):
+                load_workflow_config(config_path)
+
+    def test_keep_runs_rejects_boolean(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(tmpdir, '[aflow]\nkeep_runs = true\n')
+            with pytest.raises(ConfigError):
+                load_workflow_config(config_path)
+
 
 class WorkflowConfigTests(unittest.TestCase):
 
@@ -1384,7 +1456,7 @@ def _workflow_test_env(repo_root: Path, *, scenario: str, plan_path: Path, count
     return env
 
 def _run_workflow_launcher(repo_root: Path, *args: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run([sys.executable, '-m', 'aflow', *args], cwd=repo_root, env=env, capture_output=True, text=True, check=False)
+    return subprocess.run([sys.executable, '-m', 'aflow', 'run', *args], cwd=repo_root, env=env, capture_output=True, text=True, check=False)
 
 class WorkflowEndToEndTests(unittest.TestCase):
 
