@@ -29,7 +29,7 @@ class CodexAdapter:
         if model is not None:
             argv.extend(["--model", model])
         if effort is not None:
-            argv.extend(["-c", f'model_reasoning_effort=\'"{effort}"\''])
+            argv.extend(["-c", f'model_reasoning_effort=\'{effort}\''])
         argv.append(effective_prompt)
         return HarnessInvocation(
             label=self.name,

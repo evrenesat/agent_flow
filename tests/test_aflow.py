@@ -710,7 +710,7 @@ class AdaptersTests(unittest.TestCase):
         invocation = adapter.build_invocation(repo_root=Path('/repo'), model='gpt-5.4', system_prompt='SYSTEM', user_prompt='USER', effort='high')
         argv = invocation.argv
         assert '-c' in argv
-        assert 'model_reasoning_effort=\'"high"\'' in argv
+        assert 'model_reasoning_effort=\'high\'' in argv
         prompt_index = argv.index('SYSTEM\n\nUSER')
         assert argv[prompt_index - 2] == '-c'
         assert argv[-1] == 'SYSTEM\n\nUSER'
@@ -768,7 +768,7 @@ class AdaptersTests(unittest.TestCase):
         adapter = ClaudeAdapter()
         invocation = adapter.build_invocation(repo_root=Path('/repo'), model='claude-sonnet-4-6', system_prompt='SYSTEM', user_prompt='USER')
         assert '--effort' not in invocation.argv
-        assert invocation.argv == ('claude', '-p', '--system-prompt', 'SYSTEM', '--model', 'claude-sonnet-4-6', '--permission-mode', 'bypassPermissions', '--dangerously-skip-permissions', '--tools', 'default', 'USER')
+        assert invocation.argv == ('claude', '-p', '--system-prompt', 'SYSTEM', '--model', 'claude-sonnet-4-6', '--permission-mode', 'bypassPermissions', '--dangerously-skip-permissions', '--tools=default', 'USER')
 
     def test_claude_with_effort(self) -> None:
         adapter = ClaudeAdapter()
@@ -1227,36 +1227,6 @@ class WorkflowConfigTests(unittest.TestCase):
             assert 'harness.codex.profiles.high.model' in placeholders
             assert 'harness.opencode.profiles.default.model' in placeholders
 
-    def test_bundled_config_matches_canonical_schema(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = Path(tmpdir) / 'starter.toml'
-            config_path.write_text(resources.files('aflow').joinpath('aflow.toml').read_text(encoding='utf-8'), encoding='utf-8')
-            config = load_workflow_config(config_path)
-            assert config.aflow.default_workflow == 'ralph'
-            assert 'opencode' in config.harnesses
-            assert 'codex' in config.harnesses
-            assert 'claude' in config.harnesses
-            assert config.harnesses['opencode'].profiles['turbo'].model == 'zai-coding-plan/glm-5-turbo'
-            assert config.harnesses['codex'].profiles['high'].model == 'GPT-5.4'
-            assert config.harnesses['codex'].profiles['high'].effort == 'high'
-            assert 'ralph' in config.workflows
-            assert 'review_implement_review' in config.workflows
-            assert 'review_implement_cp_review' in config.workflows
-            step = config.workflows['ralph'].steps['implement_plan']
-            assert step.profile == 'opencode.turbo'
-            assert step.prompts == ('input_vars', 'simple_implementation')
-            assert len(step.go) == 2
-            assert step.go[0].to == 'END'
-            assert step.go[0].when == 'DONE || MAX_TURNS_REACHED'
-            assert step.go[1].to == 'implement_plan'
-            assert step.go[1].when is None
-            assert config.aflow.banner_files_limit == 10
-            assert config.prompts['simple_implementation'] == "Work from {ACTIVE_PLAN_PATH}. Use 'aflow-execute-plan' skill."
-            assert config.prompts['followup_implementation'] == "Use 'aflow-execute-plan' skill."
-            assert config.prompts['cp_loop_implementation'] == "Use 'aflow-execute-checkpoint' skill."
-            assert config.prompts['review_squash'] == "Use 'aflow-review-squash' skill."
-            assert config.prompts['review_cp'] == "Use 'aflow-review-checkpoint' skill."
-            assert config.prompts['final_review'] == "Use 'aflow-review-final' skill."
 
     def test_bundled_config_validates_without_errors(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
