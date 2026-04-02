@@ -57,12 +57,23 @@ The auto-install destination map is:
 
 ```bash
 aflow run path/to/plan.md
+aflow run --start-step implement_plan path/to/plan.md
 aflow run review_implement_review path/to/plan.md
 aflow run -mt 10 path/to/plan.md
 aflow run path/to/plan.md -- keep edits small and update docs if behavior changes
 ```
 
 If the workflow name is omitted, `aflow` uses `aflow.default_workflow` from config.
+
+`--start-step` names a workflow step, not a plan checkpoint.
+
+If you omit `--start-step` and the plan is partly complete, `aflow` prompts you to pick a step when the workflow has more than one step. That prompt is interactive only.
+
+If that prompt or the startup recovery prompt would be needed and stdin/stdout are not TTYs, `aflow` exits with a clear error instead of guessing.
+
+If startup hits an `inconsistent_checkpoint_state` parse error, `aflow` asks whether to recover and resume from the affected checkpoint using the same retry path it uses for in-run retries. That recovery prompt is interactive only too.
+
+If you pass `--start-step` on a plan that is already complete, `aflow` exits with a clear error instead of ignoring the flag.
 
 ## Why This Exists
 

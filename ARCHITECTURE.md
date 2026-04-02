@@ -24,6 +24,7 @@ flowchart TD
     User --> CLI
     CLI --> Config
     Config --> CLI
+    CLI --> PlanParse
     CLI --> WorkflowLoop
     WorkflowLoop --> PlanParse
     PlanParse --> Backup
@@ -46,9 +47,19 @@ flowchart TD
 ### `cli.py`
 Entry point. Exposes two subcommands:
 - **`aflow run [workflow_name] plan.md [-- extra instructions]`** -- runs a workflow.
+- **`aflow run [workflow_name] --start-step STEP_NAME plan.md [-- extra instructions]`** -- starts a workflow from a named step.
 - **`aflow install-skills [destination]`** -- copies bundled skills into harness skill directories.
 
-Resolves the repo root via `git rev-parse`, loads and validates the TOML config, then calls `run_workflow()`.
+Resolves the repo root via `git rev-parse`, loads and validates the TOML config, resolves the selected workflow, and handles startup step selection or recovery before calling `run_workflow()`.
+
+Startup resolution happens in `main()` before the workflow loop starts:
+
+1. Resolve config and workflow.
+2. Load the original plan strictly.
+3. If the plan is complete and `--start-step` was given, fail with a clear error.
+4. If the plan is half-done and the workflow has more than one step, require a TTY and prompt for an explicit step unless `--start-step` was given.
+5. If strict plan loading fails with `inconsistent_checkpoint_state`, require a TTY and ask whether to recover.
+6. When recovery is accepted, load a tolerant snapshot from the invalid plan, seed startup retry state, and pass both the parsed plan and retry context into `run_workflow()`.
 
 ### `config.py`
 Loads `~/.config/aflow/aflow.toml` (bootstrapped from the bundled default on first run). Parses and validates:
@@ -73,7 +84,7 @@ Also detects `## Git Tracking` sections required by review skills.
 The core engine. `run_workflow()` executes the turn loop:
 
 1. Back up the original plan to `plans/backups/`.
-2. Parse the plan and check initial completion.
+2. Parse the plan unless `main()` already provided a pre-loaded `ParsedPlan`.
 3. For each turn (up to `max_turns`):
    a. Reload the plan from disk (the agent may have modified it).
    b. Resolve the step's harness profile to get model/effort settings.
@@ -85,7 +96,7 @@ The core engine. `run_workflow()` executes the turn loop:
    h. Log turn artifacts and update run metadata.
    i. If transition target is `END`, return. Otherwise, advance to the next step.
 
-A scheduled retry skips the pre-turn plan reload and reuses the last valid snapshot and saved prompt context. The same `ACTIVE_PLAN_PATH`, `NEW_PLAN_PATH`, and step selector are reused; the retry appendix (containing the exact parse error) is added to the prompt. Retry turns still count toward `max_turns`.
+A scheduled retry skips the pre-turn plan reload and reuses the last valid snapshot and saved prompt context. The same `ACTIVE_PLAN_PATH`, `NEW_PLAN_PATH`, and step selector are reused; the retry appendix (containing the exact parse error) is added to the prompt. Startup recovery seeds that same retry machinery by passing a `RetryContext` into `run_workflow()`, which stores it in `state.pending_retry` before turn 1. Retry turns still count toward `max_turns`.
 
 The condition evaluator is a full recursive-descent parser supporting `&&`, `||`, `!`, and parentheses over the three condition symbols.
 
@@ -110,6 +121,7 @@ Data classes for runtime state:
 - `ControllerConfig` -- immutable run parameters (repo root, plan path, max turns, keep runs, extra instructions).
 - `ControllerState` -- mutable per-run state (snapshot, turn count, issues, timing, status, pending retry context).
 - `RetryContext` -- frozen dataclass holding everything needed to rerun the same step on the next turn without re-parsing the broken plan (step name, profile, resolved harness/model/effort, pre-failure snapshot, saved plan paths, base prompt, parse error string, attempt counter, retry limit).
+- `ControllerConfig` also carries the selected startup step, if any, so the workflow loop can start from a non-default step without re-parsing CLI arguments.
 - `ControllerRunResult` -- final result with end reason.
 - `WorkflowEndReason` -- literal type: `already_complete`, `done`, `max_turns_reached`, `transition_end`.
 
@@ -204,6 +216,7 @@ plans/                 # user plan files and backups
 
 - **Plan as source of truth.** The Markdown plan file on disk is authoritative. The engine re-reads it before and after every turn because the agent subprocess may modify it (checking off steps/checkpoints).
 - **Harness-agnostic.** The engine doesn't know how any specific agent CLI works. Adapters translate a uniform interface into CLI-specific argv/env. Adding a new harness means one ~30-line adapter file.
+- **Interactive startup decisions live in the CLI.** Step picking and startup recovery happen before `run_workflow()` so the workflow loop only deals with an already-chosen step and, when needed, a seeded retry context.
 - **Condition-based transitions.** Step transitions use a small expression language over three boolean symbols rather than hardcoded control flow. This keeps workflow definitions declarative.
 - **Structured run logging.** Every turn's prompts, outputs, and snapshots are persisted to `.aflow/runs/` for debugging and auditability. Old runs are pruned automatically.
 - **Skills as Markdown.** The six bundled skills are plain SKILL.md files that get copied into each harness's skill directory. They contain behavioral instructions that the agent reads at runtime, not executable code.
