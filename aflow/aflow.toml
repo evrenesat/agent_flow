@@ -55,13 +55,13 @@ go = [
 # final commit. If not satisfied, the reviewer creates a fix-up follow-up plan
 # and the workflow loops back to implementation. This squash-on-approval behavior
 # is specific to this workflow, not an engine-wide invariant.
-#[workflow.review_implement_review.steps.review_plan]
-#profile = "claude.opus"
-#prompts = ["review_plan"]
-#go = [
-#  { to = "END", when = "MAX_TURNS_REACHED" },
-#  { to = "implement_plan" },
-#]
+[workflow.review_implement_review.steps.review_plan]
+profile = "claude.opus"
+prompts = ["review_plan"]
+go = [
+  { to = "END", when = "MAX_TURNS_REACHED" },
+  { to = "implement_plan" },
+]
 
 [workflow.review_implement_review.steps.implement_plan]
 profile = "codex.mini"

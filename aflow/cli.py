@@ -372,8 +372,9 @@ def main(argv: list[str] | None = None) -> int:
             print("error: plan is already complete, --start-step has no effect", file=sys.stderr)
             return 1
     else:
+        has_completed_checkpoint = any(section.heading_checked for section in parsed_plan.sections)
         if selected_start_step is None:
-            if len(workflow.steps) > 1:
+            if len(workflow.steps) > 1 and has_completed_checkpoint:
                 if not (sys.stdin.isatty() and sys.stdout.isatty()):
                     print(
                         f"error: workflow '{workflow_name}' has multiple steps and interactive startup selection requires a terminal. "
