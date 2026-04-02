@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 from pathlib import Path
+from datetime import datetime, timezone
 import os
 import shutil
 import subprocess
@@ -22,7 +23,7 @@ from aflow.harnesses.opencode import OpencodeAdapter
 from aflow.harnesses.pi import PiAdapter
 from aflow.harnesses.base import HarnessInvocation
 from aflow.plan import PlanParseError, PlanSnapshot, load_plan
-from aflow.run_state import ControllerConfig, ControllerState
+from aflow.run_state import ControllerConfig, ControllerState, TurnRecord
 from aflow.runlog import prune_old_runs
 from aflow.status import build_banner
 import pytest
@@ -380,7 +381,7 @@ class AdaptersTests(unittest.TestCase):
     def test_opencode_without_effort(self) -> None:
         adapter = OpencodeAdapter()
         invocation = adapter.build_invocation(repo_root=Path('/repo'), model='glm-5-turbo', system_prompt='SYSTEM', user_prompt='USER')
-        assert invocation.argv == ('opencode', 'run', '--model', 'glm-5-turbo', '--format', 'default', '--dir', '/repo', 'SYSTEM\n\nUSER')
+        assert invocation.argv == ('opencode', 'run', '--dangerously-skip-permissions', '--model', 'glm-5-turbo', '--format', 'default', '--dir', '/repo', 'SYSTEM\n\nUSER')
         assert invocation.prompt_mode == 'prefix-system-into-user-prompt'
         assert invocation.effective_prompt == 'SYSTEM\n\nUSER'
 
@@ -390,7 +391,7 @@ class AdaptersTests(unittest.TestCase):
         assert not adapter.supports_effort
         argv = invocation.argv
         assert 'effort' not in ' '.join(argv).lower()
-        assert argv == ('opencode', 'run', '--model', 'glm-5-turbo', '--format', 'default', '--dir', '/repo', 'SYSTEM\n\nUSER')
+        assert argv == ('opencode', 'run', '--dangerously-skip-permissions', '--model', 'glm-5-turbo', '--format', 'default', '--dir', '/repo', 'SYSTEM\n\nUSER')
 
     def test_opencode_without_model_omits_model_flag(self) -> None:
         adapter = OpencodeAdapter()
@@ -464,7 +465,111 @@ class LazyBannerTests(unittest.TestCase):
         assert panel is not None
         console = Console(record=True, width=80)
         console.print(panel)
-        assert 'default' in console.export_text()
+        text = console.export_text()
+        assert 'Harness/Model' in text
+        assert 'codex / default' in text
+
+    def test_banner_hides_speculative_followup_plan_path(self) -> None:
+        from rich.console import Console
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            original = root / 'plan.md'
+            original.write_text('# Plan\n\n### [ ] Checkpoint 1\n- [ ] step one\n', encoding='utf-8')
+            followup = root / 'plan-cp01-v01.md'
+            state = ControllerState(last_snapshot=PlanSnapshot(None, 0, 0, False))
+            panel = build_banner(
+                config_harness='codex',
+                config_model='gpt-5.4',
+                config_effort=None,
+                config_max_turns=15,
+                config_plan_path=original,
+                original_plan_path=original,
+                active_plan_path=original,
+                new_plan_path=followup,
+                state=state,
+            )
+            assert panel is not None
+            console = Console(record=True, width=100)
+            console.print(panel)
+            text = console.export_text()
+            assert followup.name not in text
+            assert 'Active Plan' in text
+
+    def test_banner_shows_active_followup_plan_when_file_exists(self) -> None:
+        from rich.console import Console
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            original = root / 'plan.md'
+            original.write_text('# Plan\n\n### [ ] Checkpoint 1\n- [ ] step one\n', encoding='utf-8')
+            followup = root / 'plan-cp01-v01.md'
+            followup.write_text('# Generated\n', encoding='utf-8')
+            state = ControllerState(last_snapshot=PlanSnapshot(None, 0, 0, False))
+            panel = build_banner(
+                config_harness='codex',
+                config_model='gpt-5.4',
+                config_effort=None,
+                config_max_turns=15,
+                config_plan_path=original,
+                original_plan_path=original,
+                active_plan_path=followup,
+                new_plan_path=followup,
+                state=state,
+            )
+            assert panel is not None
+            console = Console(record=True, width=100)
+            console.print(panel)
+            text = console.export_text()
+            assert followup.name in text
+            assert 'Active Plan' in text
+
+    def test_banner_renders_workflow_graph_and_turn_history(self) -> None:
+        from rich.console import Console
+        state = ControllerState(last_snapshot=PlanSnapshot('Checkpoint 1', 1, 0, False))
+        state.active_turn = 2
+        state.current_turn_started_at = datetime.now(timezone.utc)
+        state.turn_history.extend([
+            TurnRecord(
+                turn_number=1,
+                step_name='review',
+                resolved_harness_name='codex',
+                resolved_model_display='codex / gpt-5.4',
+                outcome='completed',
+                started_at=datetime.now(timezone.utc),
+                finished_at=datetime.now(timezone.utc),
+                duration_seconds=12.0,
+            ),
+            TurnRecord(
+                turn_number=2,
+                step_name='implement',
+                resolved_harness_name='opencode',
+                resolved_model_display='opencode / glm-5-turbo',
+                outcome='running',
+                started_at=datetime.now(timezone.utc),
+            ),
+        ])
+        panel = build_banner(
+            workflow_name='loop',
+            current_step_name='implement',
+            workflow_steps={
+                'review': WorkflowStepConfig(profile='codex.default', prompts=('p',), go=(GoTransition(to='implement'),)),
+                'implement': WorkflowStepConfig(profile='opencode.default', prompts=('p',), go=(GoTransition(to='END'),)),
+            },
+            config_harness='opencode',
+            config_model='glm-5-turbo',
+            config_effort=None,
+            config_max_turns=5,
+            config_plan_path=Path('/fake/plan.md'),
+            state=state,
+        )
+        assert panel is not None
+        console = Console(record=True, width=140)
+        console.print(panel)
+        text = console.export_text()
+        assert 'review' in text
+        assert 'implement' in text
+        assert 'go→' in text
+        assert 'Turn 001' in text
+        assert 'Turn 002' in text
 
 class RetentionTests(unittest.TestCase):
 
@@ -517,6 +622,36 @@ class AflowSectionConfigTests(unittest.TestCase):
     def test_keep_runs_rejects_boolean(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = self._write_workflow_config(tmpdir, '[aflow]\nkeep_runs = true\n')
+            with pytest.raises(ConfigError):
+                load_workflow_config(config_path)
+
+    def test_banner_files_limit_defaults_to_ten(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(tmpdir, '[aflow]\ndefault_workflow = "simple"\n\n[workflow.simple.steps.s]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n')
+            config = load_workflow_config(config_path)
+            assert config.aflow.banner_files_limit == 10
+
+    def test_banner_files_limit_reads_from_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(tmpdir, '[aflow]\nbanner_files_limit = 7\n\n[workflow.simple.steps.s]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n')
+            config = load_workflow_config(config_path)
+            assert config.aflow.banner_files_limit == 7
+
+    def test_banner_files_limit_rejects_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(tmpdir, '[aflow]\nbanner_files_limit = 0\n')
+            with pytest.raises(ConfigError):
+                load_workflow_config(config_path)
+
+    def test_banner_files_limit_rejects_negative(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(tmpdir, '[aflow]\nbanner_files_limit = -1\n')
+            with pytest.raises(ConfigError):
+                load_workflow_config(config_path)
+
+    def test_banner_files_limit_rejects_boolean(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(tmpdir, '[aflow]\nbanner_files_limit = true\n')
             with pytest.raises(ConfigError):
                 load_workflow_config(config_path)
 
@@ -708,6 +843,7 @@ class WorkflowConfigTests(unittest.TestCase):
             assert step.go[0].when == 'DONE || MAX_TURNS_REACHED'
             assert step.go[1].to == 'implement_plan'
             assert step.go[1].when is None
+            assert config.aflow.banner_files_limit == 10
             assert config.prompts['simple_implementation'] == "Work from {ACTIVE_PLAN_PATH}. Use 'aflow-execute-plan' skill."
             assert config.prompts['followup_implementation'] == "Use 'aflow-execute-plan' skill."
             assert config.prompts['cp_loop_implementation'] == "Use 'aflow-execute-checkpoint' skill."
@@ -1603,6 +1739,103 @@ class WorkflowArtifactTests(unittest.TestCase):
             assert 'active_plan_path' in result_json
             assert 'new_plan_path' in result_json
 
+    def test_turn_directory_exists_before_harness_completes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            config_dir = repo_root
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            wf_config = WorkflowUserConfig(
+                harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})},
+                workflows={'simple': WorkflowConfig(
+                    steps={'implement_plan': WorkflowStepConfig(
+                        profile='codex.default',
+                        prompts=('p',),
+                        go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='implement_plan')),
+                    )},
+                    first_step='implement_plan',
+                )},
+                prompts={'p': 'Work.'},
+            )
+
+            def runner(argv, **kwargs):
+                runs_root = repo_root / '.aflow' / 'runs'
+                run_dirs = sorted(runs_root.iterdir())
+                assert len(run_dirs) == 1
+                turn_dir = run_dirs[0] / 'turns' / 'turn-001'
+                assert turn_dir.is_dir()
+                for filename in ('system-prompt.txt', 'user-prompt.txt', 'effective-prompt.txt', 'argv.json', 'env.json', 'result.json'):
+                    assert (turn_dir / filename).exists()
+                start_result = json.loads((turn_dir / 'result.json').read_text(encoding='utf-8'))
+                assert start_result['status'] == 'starting'
+                assert start_result['snapshot_after'] is None
+                assert 'stdout' not in start_result
+                _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n')
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            result = run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=5),
+                wf_config,
+                'simple',
+                config_dir=config_dir,
+                adapter=CodexAdapter(),
+                runner=runner,
+            )
+            assert result.turns_completed == 1
+            turn_dir = result.run_dir / 'turns' / 'turn-001'
+            final_result = json.loads((turn_dir / 'result.json').read_text(encoding='utf-8'))
+            assert final_result['status'] == 'completed'
+            assert final_result['returncode'] == 0
+            assert final_result['stdout'] == 'ok'
+            assert final_result['stderr'] == ''
+            assert (turn_dir / 'stdout.txt').read_text(encoding='utf-8') == 'ok'
+            assert (turn_dir / 'stderr.txt').read_text(encoding='utf-8') == ''
+
+    def test_turn_artifacts_finalize_on_harness_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            config_dir = repo_root
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            wf_config = WorkflowUserConfig(
+                harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})},
+                workflows={'simple': WorkflowConfig(
+                    steps={'implement_plan': WorkflowStepConfig(
+                        profile='codex.default',
+                        prompts=('p',),
+                        go=(GoTransition(to='END', when='DONE'), GoTransition(to='implement_plan')),
+                    )},
+                    first_step='implement_plan',
+                )},
+                prompts={'p': 'Work.'},
+            )
+
+            def runner(argv, **kwargs):
+                runs_root = repo_root / '.aflow' / 'runs'
+                run_dirs = sorted(runs_root.iterdir())
+                assert len(run_dirs) == 1
+                turn_dir = run_dirs[0] / 'turns' / 'turn-001'
+                assert turn_dir.is_dir()
+                return subprocess.CompletedProcess(argv, 1, 'bad', 'err')
+
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=5),
+                    wf_config,
+                    'simple',
+                    config_dir=config_dir,
+                    adapter=CodexAdapter(),
+                    runner=runner,
+                )
+            turn_dir = ctx.value.run_dir / 'turns' / 'turn-001'
+            result_json = json.loads((turn_dir / 'result.json').read_text(encoding='utf-8'))
+            assert result_json['status'] == 'harness-failed'
+            assert result_json['returncode'] == 1
+            assert result_json['stdout'] == 'bad'
+            assert result_json['stderr'] == 'err'
+            assert (turn_dir / 'stdout.txt').read_text(encoding='utf-8') == 'bad'
+            assert (turn_dir / 'stderr.txt').read_text(encoding='utf-8') == 'err'
+
     def test_run_json_records_workflow_step_on_active_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = Path(tmpdir)
@@ -2481,7 +2714,7 @@ class GitBannerTests(unittest.TestCase):
         assert "Files" in text
         assert "foo.py" in text
 
-    def test_build_banner_files_row_truncates_at_three(self) -> None:
+    def test_build_banner_files_row_respects_config_limit(self) -> None:
         from rich.console import Console
         from aflow.git_status import GitSummary
         state = ControllerState(last_snapshot=PlanSnapshot(None, 0, 0, False))
@@ -2497,6 +2730,7 @@ class GitBannerTests(unittest.TestCase):
         panel = build_banner(
             config_max_turns=10,
             config_plan_path=Path("/fake/plan.md"),
+            config_banner_files_limit=3,
             state=state,
             git_summary=summary,
         )
@@ -2506,6 +2740,7 @@ class GitBannerTests(unittest.TestCase):
         text = console.export_text()
         assert "+2 more" in text
         assert "d.py" not in text
+        assert "a.py" in text
 
     def test_build_banner_no_git_summary_omits_git_rows(self) -> None:
         from rich.console import Console

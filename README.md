@@ -129,6 +129,7 @@ Config is standard TOML. The current schema has four top-level sections:
 | `default_workflow` | string | — | Workflow to run when none is specified on the CLI. |
 | `keep_runs` | int | `20` | Number of run log directories to retain under `.aflow/runs/`. Older directories are pruned automatically after each run. |
 | `retry_inconsistent_checkpoint_state` | int | `0` | How many times to automatically retry the same workflow step when the harness exits cleanly but leaves the plan in an inconsistent checkpoint state (a checkpoint heading marked complete with unchecked steps still present). `0` disables retries. Each retry consumes one normal turn and appends the exact parse error to the prompt. |
+| `banner_files_limit` | int | `10` | Maximum number of changed files to show in the live banner before it appends `+N more`. |
 
 Each workflow can also set `retry_inconsistent_checkpoint_state` directly in its own table to override the global default for that workflow.
 
@@ -278,11 +279,17 @@ Fields shown:
 
 - elapsed time (updates every second)
 - workflow and current step
-- harness, model, and effort
+- `Harness/Model` as one line, using `<harness> / <model> / <effort>` when effort exists
 - checkpoint progress and turn count
-- original, active, and generated plan paths
-- git summary: modified, added, and deleted file counts since workflow start, net line additions and removals, commits made since start, and up to 3 changed file paths (then `+N more`)
+- original and active plan paths, with the follow-up path only shown once the file exists
+- a larger workflow graph in the upper-right, with one box per step and `go` arrows between them
+- a growing turn-history area that keeps each completed/current turn visible for the whole run
+- git summary: modified, added, and deleted file counts since workflow start, net line additions and removals, commits made since start, and up to `[aflow].banner_files_limit` changed file paths (then `+N more`)
 - current run status
+
+The changed-file list uses `[aflow].banner_files_limit`, which defaults to `10`.
+
+The banner does not show a speculative follow-up plan path before the file exists. When a review step actually creates the follow-up file, `Active Plan` switches to that file.
 
 The git summary is based on a working-tree snapshot captured at workflow start, so pre-existing dirty state is excluded. If git is unavailable the git rows are omitted and the workflow still runs.
 
@@ -312,6 +319,8 @@ Each run writes structured artifacts under `.aflow/runs/<run-id>/`.
 
 Saved data includes:
 
+- turn directories are created at turn start, before the harness process launches
+- prompt files, argv, env, and a starting `result.json` stub are written immediately
 - rendered prompts
 - argv and environment metadata
 - stdout and stderr for each step
@@ -319,6 +328,8 @@ Saved data includes:
 - evaluated conditions and the chosen transition
 - `end_reason` on successful runs, both in `run.json` and in the final turn artifact
 - top-level run metadata such as workflow name, current step, turns completed, plan paths, and the terminal end reason
+
+After the harness exits, `aflow` finalizes the same turn directory in place with stdout, stderr, return code, the post-run snapshot, and the final turn outcome. If a harness crashes after the turn directory is created, the partial turn log is still inspectable.
 
 If a run reaches the hard loop limit without any transition to `END`, that is still a failure, even if the last turn also satisfies `MAX_TURNS_REACHED`.
 

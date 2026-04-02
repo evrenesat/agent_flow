@@ -32,7 +32,8 @@ class ClaudeAdapter:
             "--permission-mode",
             "bypassPermissions",
             "--dangerously-skip-permissions",
-            "--tools=default",
+            "--tools",
+            "default",
         ])
         argv.append(user_prompt)
         return HarnessInvocation(

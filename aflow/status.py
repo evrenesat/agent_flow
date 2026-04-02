@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .plan import PlanSnapshot
-from .run_state import ControllerState
+from .run_state import ControllerState, TurnRecord, format_harness_model_display
+from .config import WorkflowStepConfig
 
 if TYPE_CHECKING:
     from .git_status import GitSummary
@@ -15,6 +16,8 @@ if TYPE_CHECKING:
 _RICH_AVAILABLE = False
 try:
     from rich.console import Console
+    from rich.console import Group
+    from rich.align import Align
     from rich.panel import Panel
     from rich.table import Table
     from rich.live import Live
@@ -28,6 +31,8 @@ except ImportError:
 _STDERR_CONSOLE: Console | None = None
 if _RICH_AVAILABLE:
     _STDERR_CONSOLE = Console(file=None, stderr=True)  # type: ignore[call-arg]
+
+_UNSET = object()
 
 
 def _elapsed(started_at: datetime) -> str:
@@ -72,10 +77,10 @@ def _git_row(summary: GitSummary) -> str:
     )
 
 
-def _files_row(changed_paths: tuple[str, ...]) -> str | None:
+def _files_row(changed_paths: tuple[str, ...], *, limit: int) -> str | None:
     if not changed_paths:
         return None
-    shown = changed_paths[:3]
+    shown = changed_paths[:limit]
     extra = len(changed_paths) - len(shown)
     text = ", ".join(shown)
     if extra > 0:
@@ -83,24 +88,133 @@ def _files_row(changed_paths: tuple[str, ...]) -> str | None:
     return text
 
 
-def build_banner(
+def _duration_display(started_at: datetime, finished_at: datetime | None = None) -> str:
+    end_at = finished_at or datetime.now(timezone.utc)
+    delta = end_at - started_at
+    total_seconds = max(0, int(delta.total_seconds()))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours}h {minutes:02d}m {seconds:02d}s"
+    if minutes > 0:
+        return f"{minutes}m {seconds:02d}s"
+    return f"{seconds}s"
+
+
+def _turn_outcome_style(outcome: str, *, current: bool = False) -> str:
+    if current:
+        return "bold green"
+    if outcome == "completed":
+        return "green"
+    if outcome == "retry-scheduled":
+        return "magenta"
+    if outcome in {"harness-failed", "plan-invalid", "transition-failed", "failed"}:
+        return "red"
+    if outcome == "running":
+        return "yellow"
+    return "cyan"
+
+
+def _render_turn_history(state: ControllerState) -> Group | Text | None:
+    if not state.turn_history:
+        return None
+    panels: list[Panel] = []
+    for record in state.turn_history:
+        is_current = (
+            state.current_turn_started_at is not None
+            and record.turn_number == state.active_turn
+            and record.outcome == "running"
+        )
+        border_style = _turn_outcome_style(record.outcome, current=is_current)
+        body = Table.grid(padding=(0, 1))
+        body.add_column(style="bold cyan", no_wrap=True)
+        body.add_column()
+        body.add_row("Step", record.step_name)
+        body.add_row("Harness/Model", record.resolved_model_display)
+        body.add_row("Duration", _duration_display(record.started_at, record.finished_at))
+        body.add_row("Outcome", record.outcome)
+        panels.append(
+            Panel(
+                body,
+                title=f"Turn {record.turn_number:03d}",
+                border_style=border_style,
+                padding=(0, 1),
+            )
+        )
+    return Group(*panels)
+
+
+def _render_workflow_graph(
     *,
-    workflow_name: str | None = None,
-    current_step_name: str | None = None,
-    config_harness: str | None = None,
-    config_model: str | None = None,
-    config_effort: str | None = None,
+    workflow_name: str | None,
+    workflow_steps: dict[str, WorkflowStepConfig] | None,
+    current_step_name: str | None,
+    state: ControllerState,
+) -> Group | Text | None:
+    if not workflow_steps:
+        if workflow_name is None:
+            return None
+        return Text(workflow_name, style="bold magenta")
+
+    completed_steps = {record.step_name for record in state.turn_history if record.outcome != "running"}
+    graph_items: list[object] = []
+    step_names = list(workflow_steps)
+    for index, (step_name, step) in enumerate(workflow_steps.items()):
+        is_current = (
+            current_step_name == step_name
+            and state.turn_history
+            and state.turn_history[-1].turn_number == state.active_turn
+            and state.turn_history[-1].outcome == "running"
+        )
+        is_completed = step_name in completed_steps and not is_current
+        if is_current:
+            border_style = "bold green"
+            title_style = "bold green"
+        elif is_completed:
+            border_style = "green"
+            title_style = "green"
+        else:
+            border_style = "dim"
+            title_style = "dim"
+        body = Text()
+        body.append(step_name, style=title_style)
+        body.append("\n")
+        body.append(step.profile, style="dim")
+        graph_items.append(
+            Panel(
+                body,
+                border_style=border_style,
+                padding=(0, 1),
+            )
+        )
+        if index < len(step_names) - 1:
+            arrows = Text()
+            for transition in step.go:
+                arrows.append("  ├─go→ ", style="dim")
+                arrows.append(transition.to, style="bold")
+                if transition.when is not None:
+                    arrows.append(f" [{transition.when}]", style="dim")
+                arrows.append("\n")
+            graph_items.append(arrows)
+    return Align.right(Group(*graph_items))
+
+
+def _build_summary_table(
+    *,
+    workflow_name: str | None,
+    current_step_name: str | None,
+    config_harness: str | None,
+    config_model: str | None,
+    config_effort: str | None,
     config_max_turns: int,
     config_plan_path: Path,
-    original_plan_path: Path | None = None,
-    active_plan_path: Path | None = None,
-    new_plan_path: Path | None = None,
+    original_plan_path: Path | None,
+    active_plan_path: Path | None,
+    new_plan_path: Path | None,
     state: ControllerState,
-    git_summary: GitSummary | None = None,
-) -> Panel | None:
-    if not _RICH_AVAILABLE:
-        return None
-    snapshot = state.last_snapshot
+    git_summary: GitSummary | None,
+    banner_files_limit: int,
+) -> Table:
     table = Table.grid(padding=(0, 1))
     table.add_column(style="bold cyan")
     table.add_column()
@@ -112,19 +226,19 @@ def build_banner(
     if current_step_name is not None:
         table.add_row("Step", current_step_name)
 
-    if config_harness is not None:
-        table.add_row("Harness", config_harness)
-    if config_model is not None:
-        table.add_row("Model", config_model)
-    elif workflow_name is None:
-        table.add_row("Model", "default")
-    if config_effort is not None:
-        table.add_row("Effort", config_effort)
-    elif workflow_name is None:
-        table.add_row("Effort", "none")
+    harness_value = config_harness or "default"
+    model_value = config_model or "default"
+    table.add_row(
+        "Harness/Model",
+        format_harness_model_display(
+            harness_value,
+            model_value if config_model is not None else None,
+            config_effort,
+        ),
+    )
 
-    table.add_row("Checkpoint", _checkpoint_display(snapshot))
-    name = snapshot.current_checkpoint_name or "-"
+    table.add_row("Checkpoint", _checkpoint_display(state.last_snapshot))
+    name = state.last_snapshot.current_checkpoint_name or "-"
     table.add_row("Name", name)
     table.add_row("Turn", f"{state.active_turn}/{config_max_turns}")
     table.add_row("Issues", str(state.issues_accumulated))
@@ -133,7 +247,7 @@ def build_banner(
         table.add_row("Original Plan", original_plan_path.name)
     if active_plan_path is not None:
         table.add_row("Active Plan", active_plan_path.name)
-    if new_plan_path is not None:
+    if new_plan_path is not None and new_plan_path.is_file() and new_plan_path != active_plan_path:
         table.add_row("Generated Plan", new_plan_path.name)
 
     if workflow_name is None:
@@ -141,14 +255,65 @@ def build_banner(
 
     if git_summary is not None:
         table.add_row("Git", _git_row(git_summary))
-        files_text = _files_row(git_summary.changed_paths)
+        files_text = _files_row(git_summary.changed_paths, limit=banner_files_limit)
         if files_text is not None:
             table.add_row("Files", files_text)
 
     table.add_row("Status", _status_display(state))
+    return table
 
+
+def build_banner(
+    *,
+    workflow_name: str | None = None,
+    current_step_name: str | None = None,
+    workflow_steps: dict[str, WorkflowStepConfig] | None = None,
+    config_harness: str | None = None,
+    config_model: str | None = None,
+    config_effort: str | None = None,
+    config_max_turns: int,
+    config_plan_path: Path,
+    original_plan_path: Path | None = None,
+    active_plan_path: Path | None = None,
+    new_plan_path: Path | None = None,
+    config_banner_files_limit: int = 10,
+    state: ControllerState,
+    git_summary: GitSummary | None = None,
+) -> Panel | None:
+    if not _RICH_AVAILABLE:
+        return None
+    summary = _build_summary_table(
+        workflow_name=workflow_name,
+        current_step_name=current_step_name,
+        config_harness=config_harness,
+        config_model=config_model,
+        config_effort=config_effort,
+        config_max_turns=config_max_turns,
+        config_plan_path=config_plan_path,
+        original_plan_path=original_plan_path,
+        active_plan_path=active_plan_path,
+        new_plan_path=new_plan_path,
+        state=state,
+        git_summary=git_summary,
+        banner_files_limit=config_banner_files_limit,
+    )
+    turn_history = _render_turn_history(state)
+    workflow_graph = _render_workflow_graph(
+        workflow_name=workflow_name,
+        workflow_steps=workflow_steps,
+        current_step_name=current_step_name,
+        state=state,
+    )
+    left_items: list[object] = []
+    if turn_history is not None:
+        left_items.append(turn_history)
+    left_items.append(summary)
+    root = Table.grid(expand=True)
+    root.add_column(ratio=3)
+    root.add_column(ratio=2)
+    root.add_row(Group(*left_items), workflow_graph or Text(""))
     title = Text("aflow", style="bold magenta")
-    return Panel(table, title=title, border_style="blue")
+    return Panel(root, title=title, border_style="blue")
 
 
 class BannerRenderer:
@@ -158,8 +323,10 @@ class BannerRenderer:
         config_harness: str | None = None,
         config_model: str | None = None,
         config_effort: str | None = None,
+        workflow_steps: dict[str, WorkflowStepConfig] | None = None,
         config_max_turns: int,
         config_plan_path: Path,
+        config_banner_files_limit: int = 10,
         workflow_name: str | None = None,
         current_step_name: str | None = None,
         original_plan_path: Path | None = None,
@@ -173,8 +340,10 @@ class BannerRenderer:
         self._config_harness = config_harness
         self._config_model = config_model
         self._config_effort = config_effort
+        self._workflow_steps = workflow_steps
         self._config_max_turns = config_max_turns
         self._config_plan_path = config_plan_path
+        self._config_banner_files_limit = config_banner_files_limit
         self._workflow_name = workflow_name
         self._current_step_name = current_step_name
         self._original_plan_path = original_plan_path
@@ -194,36 +363,38 @@ class BannerRenderer:
     def set_context(
         self,
         *,
-        current_step_name: str | None = None,
-        active_plan_path: Path | None = None,
-        new_plan_path: Path | None = None,
-        config_harness: str | None = None,
-        config_model: str | None = None,
-        config_effort: str | None = None,
+        current_step_name: str | object = _UNSET,
+        active_plan_path: Path | object = _UNSET,
+        new_plan_path: Path | object = _UNSET,
+        config_harness: str | object = _UNSET,
+        config_model: str | object = _UNSET,
+        config_effort: str | object = _UNSET,
     ) -> None:
         with self._lock:
-            if current_step_name is not None:
+            if current_step_name is not _UNSET:
                 self._current_step_name = current_step_name
-            if active_plan_path is not None:
+            if active_plan_path is not _UNSET:
                 self._active_plan_path = active_plan_path
-            if new_plan_path is not None:
+            if new_plan_path is not _UNSET:
                 self._new_plan_path = new_plan_path
-            if config_harness is not None:
+            if config_harness is not _UNSET:
                 self._config_harness = config_harness
-            if config_model is not None:
+            if config_model is not _UNSET:
                 self._config_model = config_model
-            if config_effort is not None:
+            if config_effort is not _UNSET:
                 self._config_effort = config_effort
 
     def _build(self, state: ControllerState, git_summary: GitSummary | None = None) -> Panel | None:
         return build_banner(
             workflow_name=self._workflow_name,
             current_step_name=self._current_step_name,
+            workflow_steps=self._workflow_steps,
             config_harness=self._config_harness,
             config_model=self._config_model,
             config_effort=self._config_effort,
             config_max_turns=self._config_max_turns,
             config_plan_path=self._config_plan_path,
+            config_banner_files_limit=self._config_banner_files_limit,
             original_plan_path=self._original_plan_path,
             active_plan_path=self._active_plan_path,
             new_plan_path=self._new_plan_path,
@@ -283,7 +454,7 @@ class BannerRenderer:
         panel = self._build(state)
         if panel is None:
             return
-        self._live = Live(panel, console=self._console, refresh_per_second=4)
+        self._live = Live(panel, console=self._console, refresh_per_second=4, vertical_overflow="visible")
         self._live.start()
         self._start_refresh_thread()
 
@@ -317,7 +488,7 @@ class BannerRenderer:
         panel = self._build(state, git_summary)
         if panel is None:
             return
-        self._live = Live(panel, console=self._console, refresh_per_second=4)
+        self._live = Live(panel, console=self._console, refresh_per_second=4, vertical_overflow="visible")
         self._live.start()
         self._start_refresh_thread()
 

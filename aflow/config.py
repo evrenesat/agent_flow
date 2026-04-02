@@ -66,6 +66,7 @@ class AflowSection:
     default_workflow: str | None = None
     keep_runs: int = DEFAULT_KEEP_RUNS
     retry_inconsistent_checkpoint_state: int = 0
+    banner_files_limit: int = 10
 
 
 @dataclass(frozen=True)
@@ -122,7 +123,12 @@ def _validate_condition_symbols(expression: str, *, path: str) -> None:
 
 
 def _parse_aflow_section(raw: Mapping[str, object], *, path: str) -> AflowSection:
-    allowed = {"default_workflow", "keep_runs", "retry_inconsistent_checkpoint_state"}
+    allowed = {
+        "default_workflow",
+        "keep_runs",
+        "retry_inconsistent_checkpoint_state",
+        "banner_files_limit",
+    }
     unknown = sorted(set(raw) - allowed)
     if unknown:
         raise ConfigError(f"unsupported keys in {path}: {', '.join(unknown)}")
@@ -140,12 +146,21 @@ def _parse_aflow_section(raw: Mapping[str, object], *, path: str) -> AflowSectio
                 f"{path}.retry_inconsistent_checkpoint_state must be a non-negative integer"
             )
         retry_inconsistent_checkpoint_state = value
+    banner_files_limit = 10
+    if "banner_files_limit" in raw:
+        value = raw["banner_files_limit"]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ConfigError(
+                f"{path}.banner_files_limit must be a positive integer"
+            )
+        banner_files_limit = value
     return AflowSection(
         default_workflow=_optional_text(
             raw.get("default_workflow"), path=f"{path}.default_workflow"
         ),
         keep_runs=keep_runs,
         retry_inconsistent_checkpoint_state=retry_inconsistent_checkpoint_state,
+        banner_files_limit=banner_files_limit,
     )
 
 

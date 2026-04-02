@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -22,8 +23,8 @@ from .config import (
 from .harnesses import get_adapter
 from .harnesses.base import HarnessAdapter, HarnessInvocation
 from .plan import PlanParseError, PlanSnapshot, load_plan, plan_has_git_tracking
-from .run_state import ControllerConfig, ControllerRunResult, ControllerState, RetryContext, WorkflowEndReason
-from .runlog import create_run_paths, prune_old_runs, write_run_metadata, write_turn_artifacts
+from .run_state import ControllerConfig, ControllerRunResult, ControllerState, RetryContext, TurnRecord, WorkflowEndReason, format_harness_model_display
+from .runlog import create_run_paths, finalize_turn_artifacts, prune_old_runs, write_run_metadata, write_turn_artifacts_start
 from .status import BannerRenderer
 
 
@@ -564,12 +565,16 @@ def _workflow_requires_git_tracking(
 def _make_banner(
     config: ControllerConfig,
     *,
+    workflow_steps: dict[str, WorkflowStepConfig] | None = None,
     workflow_name: str | None = None,
     original_plan_path: Path | None = None,
+    banner_files_limit: int = 10,
 ) -> BannerRenderer:
     return BannerRenderer(
         config_max_turns=config.max_turns,
         config_plan_path=config.plan_path,
+        workflow_steps=workflow_steps,
+        config_banner_files_limit=banner_files_limit,
         workflow_name=workflow_name,
         original_plan_path=original_plan_path,
         repo_root=config.repo_root,
@@ -631,7 +636,13 @@ def run_workflow(
     )
 
     if banner is None:
-        banner = _make_banner(config, workflow_name=workflow_name, original_plan_path=original_plan_path)
+        banner = _make_banner(
+            config,
+            workflow_steps=wf.steps,
+            workflow_name=workflow_name,
+            original_plan_path=original_plan_path,
+            banner_files_limit=workflow_config.aflow.banner_files_limit,
+        )
     banner.start(state)
 
     try:
@@ -716,8 +727,114 @@ def run_workflow(
     new_plan_path: Path | None = None
     retry_limit = _effective_retry_limit(wf, workflow_config.aflow)
 
-    for turn_number in range(1, config.max_turns + 1):
+    def _start_turn(
+        *,
+        turn_number: int,
+        step_name: str,
+        step: WorkflowStepConfig,
+        resolved: ResolvedProfile,
+        active_path: Path,
+        new_path: Path,
+        invocation: HarnessInvocation,
+        snapshot_before: PlanSnapshot,
+    ) -> tuple[Path, datetime]:
+        started_at = datetime.now(timezone.utc)
         state.active_turn = turn_number
+        state.current_turn_started_at = started_at
+        state.turn_history.append(
+            TurnRecord(
+                turn_number=turn_number,
+                step_name=step_name,
+                resolved_harness_name=resolved.harness_name,
+                resolved_model_display=format_harness_model_display(
+                    resolved.harness_name,
+                    resolved.model,
+                    resolved.effort,
+                ),
+                started_at=started_at,
+            )
+        )
+        banner.set_context(
+            current_step_name=step_name,
+            active_plan_path=active_path,
+            new_plan_path=new_path if new_path.is_file() else None,
+            config_harness=resolved.harness_name,
+            config_model=resolved.model,
+            config_effort=resolved.effort,
+        )
+        turn_dir = write_turn_artifacts_start(
+            run_paths,
+            turn_number=turn_number,
+            invocation=invocation,
+            snapshot_before=snapshot_before,
+            started_at=started_at,
+            status="starting",
+            step_name=step_name,
+            selector=step.profile,
+            original_plan_path=original_plan_path,
+            active_plan_path=active_path,
+            new_plan_path=new_path if new_path.is_file() else None,
+        )
+        banner.update(state)
+        return turn_dir, started_at
+
+    def _finalize_turn_record(
+        *,
+        status: str,
+        started_at: datetime,
+        snapshot_before: PlanSnapshot,
+        snapshot_after: PlanSnapshot | None,
+        invocation: HarnessInvocation,
+        turn_dir: Path,
+        stdout: str,
+        stderr: str,
+        returncode: int,
+        error: str | None = None,
+        step_name: str | None = None,
+        selector: str | None = None,
+        active_path: Path | None = None,
+        new_path: Path | None = None,
+        conditions: dict[str, bool] | None = None,
+        chosen_transition: str | None = None,
+        end_reason: WorkflowEndReason | None = None,
+        retry_attempt: int | None = None,
+        retry_limit_value: int | None = None,
+        retry_reason: str | None = None,
+        retry_next_turn: bool | None = None,
+        was_retry: bool | None = None,
+    ) -> None:
+        finalize_turn_artifacts(
+            turn_dir,
+            turn_number=state.active_turn,
+            invocation=invocation,
+            stdout=stdout,
+            stderr=stderr,
+            returncode=returncode,
+            snapshot_before=snapshot_before,
+            snapshot_after=snapshot_after,
+            status=status,
+            started_at=started_at,
+            error=error,
+            step_name=step_name,
+            selector=selector,
+            original_plan_path=original_plan_path,
+            active_plan_path=active_path,
+            new_plan_path=new_path,
+            conditions=conditions,
+            chosen_transition=chosen_transition,
+            end_reason=end_reason,
+            retry_attempt=retry_attempt,
+            retry_limit=retry_limit_value,
+            retry_reason=retry_reason,
+            retry_next_turn=retry_next_turn,
+            was_retry=was_retry,
+        )
+        record = state.turn_history[-1]
+        record.outcome = "completed" if status in {"running", "completed"} else status
+        record.finished_at = datetime.now(timezone.utc)
+        record.duration_seconds = (record.finished_at - record.started_at).total_seconds()
+
+    for turn_number in range(1, config.max_turns + 1):
         retry_ctx = state.pending_retry
 
         if retry_ctx is not None:
@@ -745,6 +862,7 @@ def run_workflow(
                 user_prompt=user_prompt,
                 effort=resolved.effort,
             )
+            snapshot_before = retry_ctx.snapshot_before
         else:
             state.status_message = f"running turn {turn_number}: step {current_step_name}"
             write_run_metadata(
@@ -806,17 +924,18 @@ def run_workflow(
                 effort=resolved.effort,
             )
 
-        banner.set_context(
-            current_step_name=current_step_name,
-            active_plan_path=active_plan_path,
-            new_plan_path=new_plan_path,
-            config_harness=resolved.harness_name,
-            config_model=resolved.model,
-            config_effort=resolved.effort,
-        )
-        banner.update(state)
+            snapshot_before = state.last_snapshot
 
-        snapshot_before = state.last_snapshot
+        turn_dir, turn_started_at = _start_turn(
+            turn_number=turn_number,
+            step_name=current_step_name,
+            step=step,
+            resolved=resolved,
+            active_path=active_plan_path,
+            new_path=new_plan_path,
+            invocation=invocation,
+            snapshot_before=snapshot_before,
+        )
 
         if use_popen:
             completed = _run_process(invocation, config.repo_root, banner, state)
@@ -861,23 +980,24 @@ def run_workflow(
                     retry_limit=retry_limit,
                 )
                 state.pending_retry = new_retry_ctx
-                write_turn_artifacts(
-                    run_paths,
-                    turn_number=turn_number,
+                _finalize_turn_record(
+                    status="retry-scheduled",
+                    started_at=turn_started_at,
+                    snapshot_before=snapshot_before,
+                    snapshot_after=None,
                     invocation=invocation,
+                    turn_dir=turn_dir,
                     stdout=completed.stdout,
                     stderr=completed.stderr,
                     returncode=completed.returncode,
-                    snapshot_before=snapshot_before,
-                    snapshot_after=None,
-                    status="retry-scheduled",
                     error=str(exc),
-                    step_name=current_step_name, selector=step.profile,
-                    original_plan_path=original_plan_path, active_plan_path=active_plan_path,
-                    new_plan_path=new_plan_path,
+                    step_name=current_step_name,
+                    selector=step.profile,
+                    active_path=active_plan_path,
+                    new_path=new_plan_path,
                     conditions={"DONE": done, "NEW_PLAN_EXISTS": False, "MAX_TURNS_REACHED": turn_number >= config.max_turns},
                     retry_attempt=current_attempt,
-                    retry_limit=retry_limit,
+                    retry_limit_value=retry_limit,
                     retry_reason="inconsistent_checkpoint_state",
                     retry_next_turn=True,
                 )
@@ -889,25 +1009,27 @@ def run_workflow(
                     current_step_name=current_step_name, active_plan_path=active_plan_path,
                     new_plan_path=new_plan_path,
                 )
+                banner.update(state)
                 continue
 
             state.pending_retry = None
             state.status_message = "failed"
             state.issues_accumulated += 1
-            write_turn_artifacts(
-                run_paths,
-                turn_number=turn_number,
+            _finalize_turn_record(
+                status="plan-invalid",
+                started_at=turn_started_at,
+                snapshot_before=snapshot_before,
+                snapshot_after=None,
                 invocation=invocation,
+                turn_dir=turn_dir,
                 stdout=completed.stdout,
                 stderr=completed.stderr,
                 returncode=completed.returncode,
-                snapshot_before=snapshot_before,
-                snapshot_after=None,
-                status="plan-invalid",
                 error=str(exc),
-                step_name=current_step_name, selector=step.profile,
-                original_plan_path=original_plan_path, active_plan_path=active_plan_path,
-                new_plan_path=new_plan_path,
+                step_name=current_step_name,
+                selector=step.profile,
+                active_path=active_plan_path,
+                new_path=new_plan_path,
                 conditions={"DONE": done, "NEW_PLAN_EXISTS": False, "MAX_TURNS_REACHED": turn_number >= config.max_turns},
             )
             summary = _format_failure(
@@ -931,19 +1053,20 @@ def run_workflow(
         if completed.returncode != 0:
             state.status_message = "failed"
             state.issues_accumulated += 1
-            write_turn_artifacts(
-                run_paths,
-                turn_number=turn_number,
+            _finalize_turn_record(
+                status="harness-failed",
+                started_at=turn_started_at,
+                snapshot_before=snapshot_before,
+                snapshot_after=post_snapshot,
                 invocation=invocation,
+                turn_dir=turn_dir,
                 stdout=completed.stdout,
                 stderr=completed.stderr,
                 returncode=completed.returncode,
-                snapshot_before=snapshot_before,
-                snapshot_after=post_snapshot,
-                status="harness-failed",
-                step_name=current_step_name, selector=step.profile,
-                original_plan_path=original_plan_path, active_plan_path=active_plan_path,
-                new_plan_path=new_plan_path,
+                step_name=current_step_name,
+                selector=step.profile,
+                active_path=active_plan_path,
+                new_path=new_plan_path,
                 conditions={"DONE": post_snapshot.is_complete, "NEW_PLAN_EXISTS": False, "MAX_TURNS_REACHED": turn_number >= config.max_turns},
             )
             summary = _format_failure(
@@ -993,19 +1116,20 @@ def run_workflow(
         except WorkflowError as exc:
             state.status_message = "failed"
             state.issues_accumulated += 1
-            write_turn_artifacts(
-                run_paths,
-                turn_number=turn_number,
+            _finalize_turn_record(
+                status="transition-failed",
+                started_at=turn_started_at,
+                snapshot_before=snapshot_before,
+                snapshot_after=post_snapshot,
                 invocation=invocation,
+                turn_dir=turn_dir,
                 stdout=completed.stdout,
                 stderr=completed.stderr,
                 returncode=completed.returncode,
-                snapshot_before=snapshot_before,
-                snapshot_after=post_snapshot,
-                status="transition-failed",
-                step_name=current_step_name, selector=step.profile,
-                original_plan_path=original_plan_path, active_plan_path=active_plan_path,
-                new_plan_path=new_plan_path,
+                step_name=current_step_name,
+                selector=step.profile,
+                active_path=active_plan_path,
+                new_path=new_plan_path,
                 conditions=conditions,
             )
             summary = _format_failure(
@@ -1024,19 +1148,20 @@ def run_workflow(
             banner.stop(state)
             raise WorkflowError(summary, run_dir=run_paths.run_dir) from exc
 
-        write_turn_artifacts(
-            run_paths,
-            turn_number=turn_number,
+        _finalize_turn_record(
+            status="completed" if done else "running",
+            started_at=turn_started_at,
+            snapshot_before=snapshot_before,
+            snapshot_after=post_snapshot,
             invocation=invocation,
+            turn_dir=turn_dir,
             stdout=completed.stdout,
             stderr=completed.stderr,
             returncode=completed.returncode,
-            snapshot_before=snapshot_before,
-            snapshot_after=post_snapshot,
-            status="completed" if done else "running",
-            step_name=current_step_name, selector=step.profile,
-            original_plan_path=original_plan_path, active_plan_path=active_plan_path,
-            new_plan_path=new_plan_path,
+            step_name=current_step_name,
+            selector=step.profile,
+            active_path=active_plan_path,
+            new_path=new_plan_path,
             conditions=conditions,
             chosen_transition=transition_target,
             end_reason=(
@@ -1054,6 +1179,12 @@ def run_workflow(
 
         if not new_plan_exists and active_plan_path != original_plan_path:
             active_plan_path = original_plan_path
+
+        banner.set_context(
+            active_plan_path=active_plan_path,
+            new_plan_path=new_plan_path if new_plan_exists else None,
+        )
+        banner.update(state)
 
         write_run_metadata(
             run_paths, config, state, status="running",

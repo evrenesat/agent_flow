@@ -52,15 +52,40 @@ class RetryContext:
 
 
 @dataclass
+class TurnRecord:
+    turn_number: int
+    step_name: str
+    resolved_harness_name: str
+    resolved_model_display: str
+    outcome: str = "running"
+    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    finished_at: datetime | None = None
+    duration_seconds: float | None = None
+
+
+def format_harness_model_display(
+    harness_name: str,
+    model: str | None,
+    effort: str | None = None,
+) -> str:
+    model_text = model or "default"
+    if effort is not None:
+        return f"{harness_name} / {model_text} / {effort}"
+    return f"{harness_name} / {model_text}"
+
+
+@dataclass
 class ControllerState:
     last_snapshot: PlanSnapshot
     turns_completed: int = 0
     issues_accumulated: int = 0
     run_started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     active_turn: int = 0
+    current_turn_started_at: datetime | None = None
     status_message: str = "initializing"
     end_reason: WorkflowEndReason | None = None
     pending_retry: RetryContext | None = None
+    turn_history: list[TurnRecord] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

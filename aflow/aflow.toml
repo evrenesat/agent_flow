@@ -2,6 +2,7 @@
 default_workflow = "ralph"
 keep_runs = 20
 retry_inconsistent_checkpoint_state = 0
+banner_files_limit = 10
 
 #### HARNESS PROFILES ####
 
@@ -146,7 +147,7 @@ NEW_PLAN_PATH: "{NEW_PLAN_PATH}"
 
 review_plan = "Review the plan at {ORIGINAL_PLAN_PATH} for obvious/indisputable weak spots, ambiguity, and missing constraints and directly apply improvements to the plan file."
 
-simple_implementation = "Work from {ACTIVE_PLAN_PATH}. Use 'aflow-execute-checkpoint' skill."
+simple_implementation = "Work from {ACTIVE_PLAN_PATH}. Use 'aflow-execute-plan' skill."
 
 cp_loop_implementation = "Use 'aflow-execute-checkpoint' skill."
 
