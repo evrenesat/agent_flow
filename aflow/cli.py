@@ -128,6 +128,13 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help=f"Maximum number of turns (default: {DEFAULT_MAX_TURNS}).",
     )
+    run_parser.add_argument(
+        "--start-step",
+        type=str,
+        default=None,
+        metavar="STEP_NAME",
+        help="Start the workflow from a specific step instead of the first step.",
+    )
     run_parser.add_argument("run_args", nargs=argparse.REMAINDER)
 
     install_parser = subparsers.add_parser(
@@ -271,6 +278,15 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    workflow = workflow_config.workflows[workflow_name]
+    if args.start_step is not None and args.start_step not in workflow.steps:
+        print(
+            f"error: step '{args.start_step}' not found in workflow '{workflow_name}'. "
+            f"Available steps: {', '.join(workflow.steps.keys())}",
+            file=sys.stderr,
+        )
+        return 1
+
     probe = probe_worktree(repo_root)
     if probe is not None and probe.is_dirty:
         is_tty = sys.stdin.isatty() and sys.stdout.isatty()
@@ -297,6 +313,7 @@ def main(argv: list[str] | None = None) -> int:
         max_turns=args.max_turns,
         keep_runs=workflow_config.aflow.keep_runs,
         extra_instructions=extra_instructions,
+        start_step=args.start_step,
     )
 
     try:

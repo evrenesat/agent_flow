@@ -33,6 +33,7 @@ class ControllerConfig:
     max_turns: int = 15
     keep_runs: int = 20
     extra_instructions: tuple[str, ...] = ()
+    start_step: str | None = None
 
 
 @dataclass(frozen=True)

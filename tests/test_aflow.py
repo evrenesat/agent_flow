@@ -186,6 +186,44 @@ class WorkflowCliTests(unittest.TestCase):
                     os.environ['HOME'] = original_home
             assert result == 1
 
+    def test_run_parser_accepts_start_step(self) -> None:
+        args = build_parser().parse_args(['run', '--start-step', 'implement_plan', 'plan.md'])
+        assert args.start_step == 'implement_plan'
+
+    def test_run_parser_start_step_defaults_to_none(self) -> None:
+        args = build_parser().parse_args(['run', 'plan.md'])
+        assert args.start_step is None
+
+    def test_run_parser_start_step_with_workflow_name_and_plan(self) -> None:
+        args = build_parser().parse_args(['run', '--start-step', 'implement_plan', 'my_workflow', 'plan.md'])
+        assert args.start_step == 'implement_plan'
+        assert 'my_workflow' in args.run_args
+        assert 'plan.md' in args.run_args
+
+    def test_run_parser_start_step_with_extra_instructions(self) -> None:
+        args = build_parser().parse_args(['run', '--start-step', 'implement_plan', 'plan.md', '--', 'be careful'])
+        assert args.start_step == 'implement_plan'
+        assert 'plan.md' in args.run_args
+        assert '--' in args.run_args
+        assert 'be careful' in args.run_args
+
+    def test_cli_start_step_must_be_valid_workflow_step(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir)
+            _write_config(home_dir, '[aflow]\ndefault_workflow = "multi_step"\n\n[workflow.multi_step.steps.review_plan]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "implement_plan" }]\n\n[workflow.multi_step.steps.implement_plan]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n')
+            plan_path = Path(tmpdir) / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: Done\n- [x] step one\n')
+            original_home = os.environ.get('HOME')
+            try:
+                os.environ['HOME'] = str(home_dir)
+                result = main(['run', '--start-step', 'nonexistent', str(plan_path)])
+            finally:
+                if original_home is None:
+                    os.environ.pop('HOME', None)
+                else:
+                    os.environ['HOME'] = original_home
+            assert result == 1
+
 class PlanParserTests(unittest.TestCase):
 
     def test_parser_counts_only_checkpoint_section_checkboxes(self) -> None:
