@@ -17,8 +17,8 @@ The plan file is the source of truth. Do not rely on chat memory when the plan, 
 
 ## Core Rules
 
-- Execute exactly one checkpoint per invocation.
-- Start at the first unchecked checkpoint unless the prompt explicitly names a different checkpoint.
+- Execute exactly one checkpoint.
+- Work on the first unchecked checkpoint unless the prompt explicitly names a different checkpoint.
 - Re-read the plan from disk before acting on the checkpoint and again after verification.
 - Treat the on-disk plan as the source of truth for checkpoint scope, verification, and commit boundaries.
 - For checkpointed plans, treat step checkboxes as required workflow state, not optional notes.

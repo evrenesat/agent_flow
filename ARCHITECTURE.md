@@ -116,8 +116,18 @@ Persists run data under `.aflow/runs/<timestamp>-<uuid>/`:
 
 Prunes old run directories to respect `keep_runs`.
 
+### `git_status.py`
+Git snapshot helpers used by the banner and CLI. Provides three public data classes (`GitBaseline`, `GitSummary`, `WorktreeProbe`) and three functions:
+- `probe_worktree(repo_root)` — checks whether the working tree is dirty at startup.
+- `capture_baseline(repo_root)` — snapshots the current HEAD SHA and a working-tree tree OID (using a temporary `GIT_INDEX_FILE`) as a before-run baseline.
+- `summarize_since_baseline(repo_root, baseline)` — compares the current working tree against the baseline and returns file-change counts, net line deltas, commit count, and changed paths.
+
+All three functions return `None` when git is unavailable or fails, so the workflow always runs regardless of git state.
+
 ### `status.py`
-Rich-based live banner rendered to stderr during a run. Shows elapsed time, workflow/step name, harness, model, checkpoint progress, turn count, issues, plan paths, and status. Pauses during interactive subprocess execution, resumes after.
+Rich-based live banner rendered to stderr during a run. Shows elapsed time, workflow/step name, harness, model, checkpoint progress, turn count, issues, plan paths, git summary (if available), and status.
+
+`BannerRenderer` owns a background daemon thread that rebuilds and pushes the panel every `refresh_interval_seconds` (default 1 s) and polls for a new `GitSummary` every `git_poll_interval_seconds` (default 10 s). This keeps the elapsed timer alive between step transitions without requiring external pushes. `set_context(...)` is used to update mutable banner fields instead of directly writing private attributes.
 
 ### `skill_installer.py`
 Discovers the six bundled skills from package resources and copies them into harness-specific skill directories. Supports auto-detection (looks for harness CLIs on PATH) and manual mode (explicit destination path). Handles duplicate destinations when multiple harnesses share a path (e.g., gemini and pi both use `~/.agents/skills`).
@@ -150,13 +160,14 @@ The built-in workflow diagrams live in the README so the default workflow shapes
 ```
 aflow/
   __main__.py          # entrypoint
-  cli.py               # argument parsing, main()
+  cli.py               # argument parsing, main(), dirty-worktree gate
   config.py            # TOML config loading and validation
   plan.py              # Markdown plan parser
   workflow.py          # workflow engine (turn loop, conditions, transitions)
   run_state.py         # runtime data classes
   runlog.py            # run/turn artifact persistence
-  status.py            # Rich live banner
+  status.py            # Rich live banner with background refresh thread
+  git_status.py        # git snapshot helpers (probe, baseline, summary)
   skill_installer.py   # bundled skill installer
   aflow.toml           # default config (bootstrapped on first run)
   harnesses/

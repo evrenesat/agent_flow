@@ -12,6 +12,7 @@ from .config import (
     load_workflow_config,
     validate_workflow_config,
 )
+from .git_status import probe_worktree
 from .skill_installer import InstallerError, install_skills
 from .run_state import ControllerConfig, WorkflowEndReason, describe_end_reason
 from .workflow import WorkflowError, run_workflow
@@ -269,6 +270,26 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+
+    probe = probe_worktree(repo_root)
+    if probe is not None and probe.is_dirty:
+        is_tty = sys.stdin.isatty() and sys.stdout.isatty()
+        dirty_desc = f"M {probe.modified_count}, A {probe.added_count}, D {probe.removed_count}"
+        if not is_tty:
+            print(
+                f"error: worktree is dirty ({dirty_desc}). "
+                "Interactive confirmation is required to start with a dirty worktree.",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            response = input(
+                f"Worktree is dirty ({dirty_desc}). Start anyway? [y/N]: "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return 1
+        if response not in ("y", "yes"):
+            return 1
 
     config = ControllerConfig(
         repo_root=repo_root,

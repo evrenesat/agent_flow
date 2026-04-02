@@ -7,8 +7,10 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from importlib import resources
+from unittest.mock import patch
 from aflow.config import AflowSection, ConfigError, GoTransition, HarnessProfileConfig, WorkflowConfig, WorkflowHarnessConfig, WorkflowStepConfig, WorkflowUserConfig, bootstrap_config, find_placeholders, load_workflow_config, validate_workflow_config
 from aflow.workflow import WorkflowError, _backup_original_plan, evaluate_condition, generate_new_plan_path, pick_transition, render_prompt, render_step_prompts, resolve_profile, run_workflow
 from aflow.cli import _parse_run_args, build_parser, main
@@ -132,16 +134,20 @@ class WorkflowCliTests(unittest.TestCase):
             assert result == 1
 
     def test_cli_workflow_override(self) -> None:
+        import aflow.cli as cli_module
         with tempfile.TemporaryDirectory() as tmpdir:
             home_dir = Path(tmpdir)
             _write_config(home_dir, '[aflow]\ndefault_workflow = "simple"\n\n[workflow.simple.steps.implement_plan]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[workflow.other.steps.review]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n')
             plan_path = Path(tmpdir) / 'plan.md'
             _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n')
             original_home = os.environ.get('HOME')
+            original_probe = cli_module.probe_worktree
             try:
                 os.environ['HOME'] = str(home_dir)
+                cli_module.probe_worktree = lambda _: None
                 result = main(['run', 'other', str(plan_path)])
             finally:
+                cli_module.probe_worktree = original_probe
                 if original_home is None:
                     os.environ.pop('HOME', None)
                 else:
@@ -2051,6 +2057,402 @@ class WorkflowMaxTurnsEndToEndTests(unittest.TestCase):
             run_dirs = sorted((repo_root / '.aflow' / 'runs').iterdir())
             run_json = json.loads((run_dirs[0] / 'run.json').read_text(encoding='utf-8'))
             assert run_json['end_reason'] == 'max_turns_reached'
+
+
+def _make_git_repo(path: Path) -> None:
+    """Initialize a git repo with an initial commit in path."""
+    subprocess.run(["git", "init", str(path)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.email", "test@test.com"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.name", "Test"], check=True, capture_output=True)
+    (path / "README.md").write_text("init\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(path), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(path), "commit", "-m", "init"], check=True, capture_output=True)
+
+
+class GitStatusTests(unittest.TestCase):
+
+    def setUp(self) -> None:
+        from aflow.git_status import capture_baseline, probe_worktree, summarize_since_baseline
+        self._capture_baseline = capture_baseline
+        self._probe_worktree = probe_worktree
+        self._summarize_since_baseline = summarize_since_baseline
+
+    def test_probe_worktree_clean_returns_not_dirty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _make_git_repo(repo)
+            result = self._probe_worktree(repo)
+            assert result is not None
+            assert result.is_dirty is False
+            assert result.modified_count == 0
+            assert result.added_count == 0
+            assert result.removed_count == 0
+
+    def test_probe_worktree_modified_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _make_git_repo(repo)
+            (repo / "README.md").write_text("changed\n", encoding="utf-8")
+            result = self._probe_worktree(repo)
+            assert result is not None
+            assert result.is_dirty is True
+            assert result.modified_count == 1
+
+    def test_probe_worktree_added_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _make_git_repo(repo)
+            (repo / "new.py").write_text("x = 1\n", encoding="utf-8")
+            result = self._probe_worktree(repo)
+            assert result is not None
+            assert result.is_dirty is True
+            assert result.added_count >= 1
+
+    def test_capture_baseline_returns_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _make_git_repo(repo)
+            baseline = self._capture_baseline(repo)
+            assert baseline is not None
+            assert baseline.head_sha is not None
+            assert len(baseline.tree_oid) == 40
+
+    def test_summarize_clean_baseline_is_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _make_git_repo(repo)
+            baseline = self._capture_baseline(repo)
+            assert baseline is not None
+            summary = self._summarize_since_baseline(repo, baseline)
+            assert summary is not None
+            assert summary.modified_count == 0
+            assert summary.added_count == 0
+            assert summary.removed_count == 0
+            assert summary.lines_added == 0
+            assert summary.lines_removed == 0
+            assert summary.commit_count == 0
+            assert summary.changed_paths == ()
+
+    def test_summarize_modified_file_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _make_git_repo(repo)
+            baseline = self._capture_baseline(repo)
+            assert baseline is not None
+            (repo / "README.md").write_text("line1\nline2\n", encoding="utf-8")
+            summary = self._summarize_since_baseline(repo, baseline)
+            assert summary is not None
+            assert summary.modified_count == 1
+            assert summary.added_count == 0
+            assert summary.removed_count == 0
+            assert "README.md" in summary.changed_paths
+
+    def test_summarize_added_file_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _make_git_repo(repo)
+            baseline = self._capture_baseline(repo)
+            assert baseline is not None
+            (repo / "new.py").write_text("x = 1\n", encoding="utf-8")
+            summary = self._summarize_since_baseline(repo, baseline)
+            assert summary is not None
+            assert summary.added_count == 1
+            assert summary.lines_added >= 1
+            assert "new.py" in summary.changed_paths
+
+    def test_summarize_deleted_file_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _make_git_repo(repo)
+            baseline = self._capture_baseline(repo)
+            assert baseline is not None
+            (repo / "README.md").unlink()
+            summary = self._summarize_since_baseline(repo, baseline)
+            assert summary is not None
+            assert summary.removed_count == 1
+
+    def test_summarize_commit_after_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _make_git_repo(repo)
+            baseline = self._capture_baseline(repo)
+            assert baseline is not None
+            (repo / "new.py").write_text("x = 1\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-m", "add new"], check=True, capture_output=True)
+            summary = self._summarize_since_baseline(repo, baseline)
+            assert summary is not None
+            assert summary.commit_count == 1
+
+    def test_summarize_dirty_at_start_reports_only_post_baseline_delta(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _make_git_repo(repo)
+            (repo / "pre.py").write_text("pre = 1\n", encoding="utf-8")
+            baseline = self._capture_baseline(repo)
+            assert baseline is not None
+            (repo / "post.py").write_text("post = 1\n", encoding="utf-8")
+            summary = self._summarize_since_baseline(repo, baseline)
+            assert summary is not None
+            assert "post.py" in summary.changed_paths
+            assert "pre.py" not in summary.changed_paths
+
+    def test_summarize_returns_to_baseline_shows_clean(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _make_git_repo(repo)
+            original_content = (repo / "README.md").read_text(encoding="utf-8")
+            baseline = self._capture_baseline(repo)
+            assert baseline is not None
+            (repo / "README.md").write_text("changed\n", encoding="utf-8")
+            summary1 = self._summarize_since_baseline(repo, baseline)
+            assert summary1 is not None
+            assert summary1.modified_count == 1
+            (repo / "README.md").write_text(original_content, encoding="utf-8")
+            summary2 = self._summarize_since_baseline(repo, baseline)
+            assert summary2 is not None
+            assert summary2.modified_count == 0
+            assert summary2.changed_paths == ()
+
+    def test_capture_baseline_no_commits_returns_none_head(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t.com"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.name", "T"], check=True, capture_output=True)
+            (repo / "f.txt").write_text("x\n", encoding="utf-8")
+            baseline = self._capture_baseline(repo)
+            assert baseline is not None
+            assert baseline.head_sha is None
+
+    def test_probe_returns_none_outside_git_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            result = self._probe_worktree(repo)
+            assert result is None
+
+
+class GitBannerTests(unittest.TestCase):
+
+    def test_build_banner_renders_git_row_when_clean(self) -> None:
+        from rich.console import Console
+        from aflow.git_status import GitSummary
+        state = ControllerState(last_snapshot=PlanSnapshot(None, 0, 0, False))
+        summary = GitSummary(
+            modified_count=0,
+            added_count=0,
+            removed_count=0,
+            lines_added=0,
+            lines_removed=0,
+            commit_count=0,
+            changed_paths=(),
+        )
+        panel = build_banner(
+            config_max_turns=10,
+            config_plan_path=Path("/fake/plan.md"),
+            state=state,
+            git_summary=summary,
+        )
+        assert panel is not None
+        console = Console(record=True, width=100)
+        console.print(panel)
+        text = console.export_text()
+        assert "Git" in text
+        assert "clean since start" in text
+
+    def test_build_banner_renders_git_row_with_changes(self) -> None:
+        from rich.console import Console
+        from aflow.git_status import GitSummary
+        state = ControllerState(last_snapshot=PlanSnapshot(None, 0, 0, False))
+        summary = GitSummary(
+            modified_count=2,
+            added_count=1,
+            removed_count=0,
+            lines_added=10,
+            lines_removed=3,
+            commit_count=1,
+            changed_paths=("foo.py", "bar.py", "baz.py"),
+        )
+        panel = build_banner(
+            config_max_turns=10,
+            config_plan_path=Path("/fake/plan.md"),
+            state=state,
+            git_summary=summary,
+        )
+        assert panel is not None
+        console = Console(record=True, width=120)
+        console.print(panel)
+        text = console.export_text()
+        assert "Git" in text
+        assert "M 2" in text
+        assert "Files" in text
+        assert "foo.py" in text
+
+    def test_build_banner_files_row_truncates_at_three(self) -> None:
+        from rich.console import Console
+        from aflow.git_status import GitSummary
+        state = ControllerState(last_snapshot=PlanSnapshot(None, 0, 0, False))
+        summary = GitSummary(
+            modified_count=5,
+            added_count=0,
+            removed_count=0,
+            lines_added=0,
+            lines_removed=0,
+            commit_count=0,
+            changed_paths=("a.py", "b.py", "c.py", "d.py", "e.py"),
+        )
+        panel = build_banner(
+            config_max_turns=10,
+            config_plan_path=Path("/fake/plan.md"),
+            state=state,
+            git_summary=summary,
+        )
+        assert panel is not None
+        console = Console(record=True, width=120)
+        console.print(panel)
+        text = console.export_text()
+        assert "+2 more" in text
+        assert "d.py" not in text
+
+    def test_build_banner_no_git_summary_omits_git_rows(self) -> None:
+        from rich.console import Console
+        state = ControllerState(last_snapshot=PlanSnapshot(None, 0, 0, False))
+        panel = build_banner(
+            config_max_turns=10,
+            config_plan_path=Path("/fake/plan.md"),
+            state=state,
+        )
+        assert panel is not None
+        console = Console(record=True, width=100)
+        console.print(panel)
+        text = console.export_text()
+        assert "Git" not in text
+        assert "Files" not in text
+
+    def test_banner_renderer_refresh_thread_updates_live(self) -> None:
+        import aflow.status as status_mod
+        from unittest.mock import MagicMock, patch
+        live_updates: list[object] = []
+
+        class FakeLive:
+            def __init__(self, panel, **kwargs: object) -> None:
+                live_updates.append(panel)
+            def start(self) -> None:
+                pass
+            def update(self, panel: object) -> None:
+                live_updates.append(panel)
+            def stop(self) -> None:
+                pass
+
+        state = ControllerState(last_snapshot=PlanSnapshot(None, 0, 0, False))
+        with patch.object(status_mod, "_RICH_AVAILABLE", True), \
+             patch.object(status_mod, "Live", FakeLive):
+            renderer = status_mod.BannerRenderer(
+                config_max_turns=10,
+                config_plan_path=Path("/fake/plan.md"),
+                refresh_interval_seconds=0.05,
+                git_poll_interval_seconds=9999.0,
+            )
+            renderer.start(state)
+            time.sleep(0.2)
+            renderer.stop(state)
+        assert len(live_updates) >= 3
+
+
+class DirtyWorktreeCliTests(unittest.TestCase):
+
+    def _make_clean_repo(self, path: Path) -> None:
+        _make_git_repo(path)
+
+    def test_dirty_interactive_yes_proceeds(self) -> None:
+        import aflow.cli as cli_module
+        from aflow.git_status import WorktreeProbe
+        dirty_probe = WorktreeProbe(is_dirty=True, modified_count=2, added_count=1, removed_count=0, sample_paths=("a.py",))
+        original_probe = cli_module.probe_worktree
+        original_resolve = cli_module._resolve_repo_root
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir)
+            _write_config(home_dir, '[aflow]\ndefault_workflow = "simple"\n\n[workflow.simple.steps.implement_plan]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n')
+            plan_path = home_dir / "plan.md"
+            _write_plan(plan_path, "# Plan\n\n### [x] Checkpoint 1\n- [x] done\n")
+            original_home = os.environ.get("HOME")
+            try:
+                os.environ["HOME"] = str(home_dir)
+                cli_module.probe_worktree = lambda _: dirty_probe
+                cli_module._resolve_repo_root = lambda: home_dir
+                with patch("builtins.input", return_value="y"), \
+                     patch("sys.stdin.isatty", return_value=True), \
+                     patch("sys.stdout.isatty", return_value=True):
+                    result = cli_module.main(["run", str(plan_path)])
+            finally:
+                cli_module.probe_worktree = original_probe
+                cli_module._resolve_repo_root = original_resolve
+                if original_home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = original_home
+        assert result == 0
+
+    def test_dirty_interactive_no_aborts(self) -> None:
+        import aflow.cli as cli_module
+        from aflow.git_status import WorktreeProbe
+        dirty_probe = WorktreeProbe(is_dirty=True, modified_count=1, added_count=0, removed_count=0, sample_paths=())
+        original_probe = cli_module.probe_worktree
+        original_resolve = cli_module._resolve_repo_root
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir)
+            _write_config(home_dir, '[aflow]\ndefault_workflow = "simple"\n\n[workflow.simple.steps.implement_plan]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n')
+            plan_path = home_dir / "plan.md"
+            _write_plan(plan_path, "# Plan\n\n### [x] Checkpoint 1\n- [x] done\n")
+            original_home = os.environ.get("HOME")
+            try:
+                os.environ["HOME"] = str(home_dir)
+                cli_module.probe_worktree = lambda _: dirty_probe
+                cli_module._resolve_repo_root = lambda: home_dir
+                with patch("builtins.input", return_value=""), \
+                     patch("sys.stdin.isatty", return_value=True), \
+                     patch("sys.stdout.isatty", return_value=True):
+                    result = cli_module.main(["run", str(plan_path)])
+            finally:
+                cli_module.probe_worktree = original_probe
+                cli_module._resolve_repo_root = original_resolve
+                if original_home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = original_home
+        assert result == 1
+
+    def test_dirty_non_interactive_aborts_with_message(self) -> None:
+        import aflow.cli as cli_module
+        from aflow.git_status import WorktreeProbe
+        dirty_probe = WorktreeProbe(is_dirty=True, modified_count=1, added_count=0, removed_count=0, sample_paths=())
+        original_probe = cli_module.probe_worktree
+        original_resolve = cli_module._resolve_repo_root
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir)
+            _write_config(home_dir, '[aflow]\ndefault_workflow = "simple"\n\n[workflow.simple.steps.implement_plan]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n')
+            plan_path = home_dir / "plan.md"
+            _write_plan(plan_path, "# Plan\n\n### [x] Checkpoint 1\n- [x] done\n")
+            original_home = os.environ.get("HOME")
+            import io
+            stderr_capture = io.StringIO()
+            try:
+                os.environ["HOME"] = str(home_dir)
+                cli_module.probe_worktree = lambda _: dirty_probe
+                cli_module._resolve_repo_root = lambda: home_dir
+                with patch("sys.stdin.isatty", return_value=False), \
+                     patch("sys.stdout.isatty", return_value=False), \
+                     patch("sys.stderr", stderr_capture):
+                    result = cli_module.main(["run", str(plan_path)])
+            finally:
+                cli_module.probe_worktree = original_probe
+                cli_module._resolve_repo_root = original_resolve
+                if original_home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = original_home
+        assert result == 1
+        assert "dirty" in stderr_capture.getvalue().lower()
 
 
 if __name__ == '__main__':

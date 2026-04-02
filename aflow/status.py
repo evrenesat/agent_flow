@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .plan import PlanSnapshot
 from .run_state import ControllerState
+
+if TYPE_CHECKING:
+    from .git_status import GitSummary
 
 _RICH_AVAILABLE = False
 try:
@@ -56,6 +62,27 @@ def _status_display(state: ControllerState) -> str:
     return state.status_message
 
 
+def _git_row(summary: GitSummary) -> str:
+    if summary.modified_count == 0 and summary.added_count == 0 and summary.removed_count == 0:
+        return f"clean since start | +{summary.lines_added}/-{summary.lines_removed} | {summary.commit_count} commits"
+    return (
+        f"M {summary.modified_count}, A {summary.added_count}, D {summary.removed_count}"
+        f" | +{summary.lines_added}/-{summary.lines_removed}"
+        f" | {summary.commit_count} commits"
+    )
+
+
+def _files_row(changed_paths: tuple[str, ...]) -> str | None:
+    if not changed_paths:
+        return None
+    shown = changed_paths[:3]
+    extra = len(changed_paths) - len(shown)
+    text = ", ".join(shown)
+    if extra > 0:
+        text += f" +{extra} more"
+    return text
+
+
 def build_banner(
     *,
     workflow_name: str | None = None,
@@ -69,6 +96,7 @@ def build_banner(
     active_plan_path: Path | None = None,
     new_plan_path: Path | None = None,
     state: ControllerState,
+    git_summary: GitSummary | None = None,
 ) -> Panel | None:
     if not _RICH_AVAILABLE:
         return None
@@ -111,6 +139,12 @@ def build_banner(
     if workflow_name is None:
         table.add_row("Plan", str(config_plan_path))
 
+    if git_summary is not None:
+        table.add_row("Git", _git_row(git_summary))
+        files_text = _files_row(git_summary.changed_paths)
+        if files_text is not None:
+            table.add_row("Files", files_text)
+
     table.add_row("Status", _status_display(state))
 
     title = Text("aflow", style="bold magenta")
@@ -132,6 +166,9 @@ class BannerRenderer:
         active_plan_path: Path | None = None,
         new_plan_path: Path | None = None,
         console: Console | None = None,
+        repo_root: Path | None = None,
+        refresh_interval_seconds: float = 1.0,
+        git_poll_interval_seconds: float = 10.0,
     ) -> None:
         self._config_harness = config_harness
         self._config_model = config_model
@@ -144,9 +181,41 @@ class BannerRenderer:
         self._active_plan_path = active_plan_path
         self._new_plan_path = new_plan_path
         self._console = console or _STDERR_CONSOLE
+        self._repo_root = repo_root
+        self._refresh_interval_seconds = refresh_interval_seconds
+        self._git_poll_interval_seconds = git_poll_interval_seconds
         self._live: Live | None = None
+        self._lock = threading.Lock()
+        self._state: ControllerState | None = None
+        self._git_summary: GitSummary | None = None
+        self._stop_event = threading.Event()
+        self._refresh_thread: threading.Thread | None = None
 
-    def _build(self, state: ControllerState) -> Panel | None:
+    def set_context(
+        self,
+        *,
+        current_step_name: str | None = None,
+        active_plan_path: Path | None = None,
+        new_plan_path: Path | None = None,
+        config_harness: str | None = None,
+        config_model: str | None = None,
+        config_effort: str | None = None,
+    ) -> None:
+        with self._lock:
+            if current_step_name is not None:
+                self._current_step_name = current_step_name
+            if active_plan_path is not None:
+                self._active_plan_path = active_plan_path
+            if new_plan_path is not None:
+                self._new_plan_path = new_plan_path
+            if config_harness is not None:
+                self._config_harness = config_harness
+            if config_model is not None:
+                self._config_model = config_model
+            if config_effort is not None:
+                self._config_effort = config_effort
+
+    def _build(self, state: ControllerState, git_summary: GitSummary | None = None) -> Panel | None:
         return build_banner(
             workflow_name=self._workflow_name,
             current_step_name=self._current_step_name,
@@ -159,44 +228,108 @@ class BannerRenderer:
             active_plan_path=self._active_plan_path,
             new_plan_path=self._new_plan_path,
             state=state,
+            git_summary=git_summary,
         )
+
+    def _refresh_loop(self) -> None:
+        from .git_status import capture_baseline, summarize_since_baseline
+
+        baseline = None
+        if self._repo_root is not None:
+            baseline = capture_baseline(self._repo_root)
+
+        last_git_poll = 0.0
+
+        while not self._stop_event.is_set():
+            now = time.monotonic()
+
+            if self._repo_root is not None and baseline is not None:
+                if now - last_git_poll >= self._git_poll_interval_seconds:
+                    summary = summarize_since_baseline(self._repo_root, baseline)
+                    with self._lock:
+                        self._git_summary = summary
+                    last_git_poll = now
+
+            with self._lock:
+                state = self._state
+                git_summary = self._git_summary
+                live = self._live
+
+            if state is not None and live is not None:
+                with self._lock:
+                    panel = self._build(state, git_summary)
+                if panel is not None:
+                    live.update(panel)
+
+            self._stop_event.wait(timeout=self._refresh_interval_seconds)
+
+    def _start_refresh_thread(self) -> None:
+        self._stop_event.clear()
+        t = threading.Thread(target=self._refresh_loop, daemon=True, name="aflow-banner-refresh")
+        self._refresh_thread = t
+        t.start()
+
+    def _stop_refresh_thread(self) -> None:
+        self._stop_event.set()
+        if self._refresh_thread is not None:
+            self._refresh_thread.join(timeout=2.0)
+            self._refresh_thread = None
 
     def start(self, state: ControllerState) -> None:
         if not _RICH_AVAILABLE:
             return
+        with self._lock:
+            self._state = state
         panel = self._build(state)
         if panel is None:
             return
-        self._live = Live(panel, console=self._console, refresh_per_second=1)
+        self._live = Live(panel, console=self._console, refresh_per_second=4)
         self._live.start()
+        self._start_refresh_thread()
 
     def update(self, state: ControllerState) -> None:
-        if self._live is None or not _RICH_AVAILABLE:
+        if not _RICH_AVAILABLE:
             return
-        panel = self._build(state)
+        with self._lock:
+            self._state = state
+            git_summary = self._git_summary
+            live = self._live
+        if live is None:
+            return
+        panel = self._build(state, git_summary)
         if panel is None:
             return
-        self._live.update(panel)
+        live.update(panel)
 
     def pause(self) -> None:
         if self._live is None or not _RICH_AVAILABLE:
             return
+        self._stop_refresh_thread()
         self._live.stop()
         self._live = None
 
     def resume(self, state: ControllerState) -> None:
         if not _RICH_AVAILABLE:
             return
-        panel = self._build(state)
+        with self._lock:
+            self._state = state
+            git_summary = self._git_summary
+        panel = self._build(state, git_summary)
         if panel is None:
             return
-        self._live = Live(panel, console=self._console, refresh_per_second=1)
+        self._live = Live(panel, console=self._console, refresh_per_second=4)
         self._live.start()
+        self._start_refresh_thread()
 
     def stop(self, state: ControllerState) -> None:
-        if self._live is None or not _RICH_AVAILABLE:
+        if not _RICH_AVAILABLE:
             return
-        panel = self._build(state)
+        self._stop_refresh_thread()
+        if self._live is None:
+            return
+        with self._lock:
+            git_summary = self._git_summary
+        panel = self._build(state, git_summary)
         if panel is None:
             return
         self._live.update(panel)

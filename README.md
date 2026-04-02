@@ -265,14 +265,26 @@ Current adapter behavior:
 
 ## Live Status
 
-While a step is running, `aflow` shows a Rich status panel on stderr with:
+While a step is running, `aflow` shows a Rich status panel on stderr. The panel refreshes every second so the elapsed timer advances without waiting for a step transition. Git stats refresh every 10 seconds.
 
-- elapsed time
+Fields shown:
+
+- elapsed time (updates every second)
 - workflow and current step
 - harness, model, and effort
 - checkpoint progress and turn count
 - original, active, and generated plan paths
+- git summary: modified, added, and deleted file counts since workflow start, net line additions and removals, commits made since start, and up to 3 changed file paths (then `+N more`)
 - current run status
+
+The git summary is based on a working-tree snapshot captured at workflow start, so pre-existing dirty state is excluded. If git is unavailable the git rows are omitted and the workflow still runs.
+
+## Dirty Worktree
+
+`aflow run` checks the git working tree before starting. If the worktree is dirty:
+
+- in interactive mode (stdin and stdout are TTYs), it prompts: `Worktree is dirty (M N, A N, D N). Start anyway? [y/N]:`. Enter `y` or `yes` to continue. Any other input exits with code 1.
+- in non-interactive mode, it prints an error and exits with code 1.
 
 ## Success Reporting
 

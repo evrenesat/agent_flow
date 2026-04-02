@@ -566,6 +566,7 @@ def _make_banner(
         config_plan_path=config.plan_path,
         workflow_name=workflow_name,
         original_plan_path=original_plan_path,
+        repo_root=config.repo_root,
     )
 
 
@@ -748,12 +749,14 @@ def run_workflow(
             effort=resolved.effort,
         )
 
-        banner._current_step_name = current_step_name
-        banner._active_plan_path = active_plan_path
-        banner._new_plan_path = new_plan_path
-        banner._config_harness = resolved.harness_name
-        banner._config_model = resolved.model
-        banner._config_effort = resolved.effort
+        banner.set_context(
+            current_step_name=current_step_name,
+            active_plan_path=active_plan_path,
+            new_plan_path=new_plan_path,
+            config_harness=resolved.harness_name,
+            config_model=resolved.model,
+            config_effort=resolved.effort,
+        )
         banner.update(state)
 
         snapshot_before = state.last_snapshot

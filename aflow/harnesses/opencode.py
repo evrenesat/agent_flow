@@ -25,6 +25,7 @@ class OpencodeAdapter:
                 [
                     "opencode",
                     "run",
+                    " --dangerously-skip-permissions",
                     *([] if model is None else ["--model", model]),
                     "--format",
                     "default",
