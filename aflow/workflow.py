@@ -22,7 +22,7 @@ from .config import (
 from .harnesses import get_adapter
 from .harnesses.base import HarnessAdapter, HarnessInvocation
 from .plan import PlanParseError, PlanSnapshot, load_plan, plan_has_git_tracking
-from .run_state import ControllerConfig, ControllerRunResult, ControllerState, WorkflowEndReason
+from .run_state import ControllerConfig, ControllerRunResult, ControllerState, RetryContext, WorkflowEndReason
 from .runlog import create_run_paths, prune_old_runs, write_run_metadata, write_turn_artifacts
 from .status import BannerRenderer
 
@@ -576,6 +576,28 @@ def _make_banner(
     )
 
 
+_RETRY_APPENDIX_INTRO = (
+    "The previous attempt left the plan in an invalid checkpoint state: "
+    "a checkpoint heading was marked complete while one or more checkpoint-local "
+    "steps remained unchecked. Repair the plan file so that any checkpoint "
+    "marked complete has all its checkpoint-local steps also checked.\n\n"
+    "Parse error from the previous attempt:\n"
+)
+
+
+def _effective_retry_limit(
+    wf: WorkflowConfig,
+    global_section: object,
+) -> int:
+    if wf.retry_inconsistent_checkpoint_state is not None:
+        return wf.retry_inconsistent_checkpoint_state
+    return getattr(global_section, "retry_inconsistent_checkpoint_state", 0)
+
+
+def _build_retry_appendix(parse_error_str: str) -> str:
+    return f"{_RETRY_APPENDIX_INTRO}{parse_error_str}"
+
+
 def run_workflow(
     config: ControllerConfig,
     workflow_config: WorkflowUserConfig,
@@ -692,68 +714,97 @@ def run_workflow(
 
     use_popen = runner is None
     new_plan_path: Path | None = None
+    retry_limit = _effective_retry_limit(wf, workflow_config.aflow)
 
     for turn_number in range(1, config.max_turns + 1):
         state.active_turn = turn_number
-        state.status_message = f"running turn {turn_number}: step {current_step_name}"
-        write_run_metadata(
-            run_paths, config, state, status="running", last_snapshot=state.last_snapshot,
-            workflow_name=workflow_name, original_plan_path=original_plan_path,
-            current_step_name=current_step_name, active_plan_path=active_plan_path,
-        )
+        retry_ctx = state.pending_retry
 
-        try:
-            current_plan = load_plan(original_plan_path)
-        except (PlanParseError, FileNotFoundError) as exc:
-            state.status_message = "failed"
-            banner.stop(state)
-            summary = _format_failure(
-                reason=str(exc),
-                run_dir=run_paths.run_dir,
-                snapshot=state.last_snapshot,
+        if retry_ctx is not None:
+            state.status_message = (
+                f"running turn {turn_number}: step {current_step_name} "
+                f"(retry {retry_ctx.attempt}/{retry_ctx.retry_limit})"
             )
             write_run_metadata(
-                run_paths, config, state, status="failed", failure_reason=summary,
+                run_paths, config, state, status="running", last_snapshot=state.last_snapshot,
+                workflow_name=workflow_name, original_plan_path=original_plan_path,
+                current_step_name=current_step_name, active_plan_path=retry_ctx.active_plan_path,
+            )
+            done = retry_ctx.snapshot_before.is_complete
+            active_plan_path = retry_ctx.active_plan_path
+            new_plan_path = retry_ctx.new_plan_path
+            step = wf.steps[current_step_name]
+            step_path = f"workflow.{workflow_name}.steps.{current_step_name}"
+            resolved = resolve_profile(step.profile, workflow_config, step_path=step_path)
+            step_adapter = adapter or get_adapter(resolved.harness_name)
+            user_prompt = retry_ctx.base_user_prompt + "\n\n" + _build_retry_appendix(retry_ctx.parse_error_str)
+            invocation = step_adapter.build_invocation(
+                repo_root=config.repo_root,
+                model=resolved.model,
+                system_prompt="",
+                user_prompt=user_prompt,
+                effort=resolved.effort,
+            )
+        else:
+            state.status_message = f"running turn {turn_number}: step {current_step_name}"
+            write_run_metadata(
+                run_paths, config, state, status="running", last_snapshot=state.last_snapshot,
                 workflow_name=workflow_name, original_plan_path=original_plan_path,
                 current_step_name=current_step_name, active_plan_path=active_plan_path,
             )
-            raise WorkflowError(summary, run_dir=run_paths.run_dir) from exc
 
-        done = current_plan.snapshot.is_complete
-        checkpoint_index = current_plan.snapshot.current_checkpoint_index
+            try:
+                current_plan = load_plan(original_plan_path)
+            except (PlanParseError, FileNotFoundError) as exc:
+                state.status_message = "failed"
+                banner.stop(state)
+                summary = _format_failure(
+                    reason=str(exc),
+                    run_dir=run_paths.run_dir,
+                    snapshot=state.last_snapshot,
+                )
+                write_run_metadata(
+                    run_paths, config, state, status="failed", failure_reason=summary,
+                    workflow_name=workflow_name, original_plan_path=original_plan_path,
+                    current_step_name=current_step_name, active_plan_path=active_plan_path,
+                )
+                raise WorkflowError(summary, run_dir=run_paths.run_dir) from exc
 
-        new_plan_path = generate_new_plan_path(
-            original_plan_path,
-            checkpoint_index=checkpoint_index,
-        )
+            done = current_plan.snapshot.is_complete
+            checkpoint_index = current_plan.snapshot.current_checkpoint_index
 
-        step = wf.steps[current_step_name]
-        step_path = f"workflow.{workflow_name}.steps.{current_step_name}"
-        resolved = resolve_profile(step.profile, workflow_config, step_path=step_path)
+            new_plan_path = generate_new_plan_path(
+                original_plan_path,
+                checkpoint_index=checkpoint_index,
+            )
 
-        step_adapter = adapter or get_adapter(resolved.harness_name)
+            step = wf.steps[current_step_name]
+            step_path = f"workflow.{workflow_name}.steps.{current_step_name}"
+            resolved = resolve_profile(step.profile, workflow_config, step_path=step_path)
 
-        user_prompt = render_step_prompts(
-            step,
-            workflow_config,
-            config_dir=config_dir,
-            working_dir=working_dir,
-            original_plan_path=original_plan_path,
-            new_plan_path=new_plan_path,
-            active_plan_path=active_plan_path,
-        )
+            step_adapter = adapter or get_adapter(resolved.harness_name)
 
-        if config.extra_instructions:
-            extra_text = " ".join(config.extra_instructions).strip()
-            user_prompt = "\n\n".join((user_prompt, extra_text))
+            user_prompt = render_step_prompts(
+                step,
+                workflow_config,
+                config_dir=config_dir,
+                working_dir=working_dir,
+                original_plan_path=original_plan_path,
+                new_plan_path=new_plan_path,
+                active_plan_path=active_plan_path,
+            )
 
-        invocation = step_adapter.build_invocation(
-            repo_root=config.repo_root,
-            model=resolved.model,
-            system_prompt="",
-            user_prompt=user_prompt,
-            effort=resolved.effort,
-        )
+            if config.extra_instructions:
+                extra_text = " ".join(config.extra_instructions).strip()
+                user_prompt = "\n\n".join((user_prompt, extra_text))
+
+            invocation = step_adapter.build_invocation(
+                repo_root=config.repo_root,
+                model=resolved.model,
+                system_prompt="",
+                user_prompt=user_prompt,
+                effort=resolved.effort,
+            )
 
         banner.set_context(
             current_step_name=current_step_name,
@@ -784,6 +835,63 @@ def run_workflow(
             parsed_after = load_plan(original_plan_path)
             post_snapshot = parsed_after.snapshot
         except (PlanParseError, FileNotFoundError) as exc:
+            is_retryable = (
+                isinstance(exc, PlanParseError)
+                and exc.error_kind == "inconsistent_checkpoint_state"
+                and completed.returncode == 0
+            )
+            current_attempt = (retry_ctx.attempt if retry_ctx is not None else 0) + 1
+            base_prompt = retry_ctx.base_user_prompt if retry_ctx is not None else user_prompt
+
+            if is_retryable and current_attempt <= retry_limit and turn_number < config.max_turns:
+                state.issues_accumulated += 1
+                state.turns_completed += 1
+                new_retry_ctx = RetryContext(
+                    step_name=current_step_name,
+                    step_profile=step.profile,
+                    resolved_harness_name=resolved.harness_name,
+                    resolved_model=resolved.model,
+                    resolved_effort=resolved.effort,
+                    snapshot_before=snapshot_before,
+                    active_plan_path=active_plan_path,
+                    new_plan_path=new_plan_path,
+                    base_user_prompt=base_prompt,
+                    parse_error_str=str(exc),
+                    attempt=current_attempt,
+                    retry_limit=retry_limit,
+                )
+                state.pending_retry = new_retry_ctx
+                write_turn_artifacts(
+                    run_paths,
+                    turn_number=turn_number,
+                    invocation=invocation,
+                    stdout=completed.stdout,
+                    stderr=completed.stderr,
+                    returncode=completed.returncode,
+                    snapshot_before=snapshot_before,
+                    snapshot_after=None,
+                    status="retry-scheduled",
+                    error=str(exc),
+                    step_name=current_step_name, selector=step.profile,
+                    original_plan_path=original_plan_path, active_plan_path=active_plan_path,
+                    new_plan_path=new_plan_path,
+                    conditions={"DONE": done, "NEW_PLAN_EXISTS": False, "MAX_TURNS_REACHED": turn_number >= config.max_turns},
+                    retry_attempt=current_attempt,
+                    retry_limit=retry_limit,
+                    retry_reason="inconsistent_checkpoint_state",
+                    retry_next_turn=True,
+                )
+                write_run_metadata(
+                    run_paths, config, state, status="running",
+                    turns_completed=state.turns_completed,
+                    last_snapshot=state.last_snapshot,
+                    workflow_name=workflow_name, original_plan_path=original_plan_path,
+                    current_step_name=current_step_name, active_plan_path=active_plan_path,
+                    new_plan_path=new_plan_path,
+                )
+                continue
+
+            state.pending_retry = None
             state.status_message = "failed"
             state.issues_accumulated += 1
             write_turn_artifacts(
@@ -817,6 +925,8 @@ def run_workflow(
             )
             banner.stop(state)
             raise WorkflowError(summary, run_dir=run_paths.run_dir) from exc
+
+        state.pending_retry = None
 
         if completed.returncode != 0:
             state.status_message = "failed"
@@ -938,6 +1048,8 @@ def run_workflow(
                 if transition_target == "END" and selected_transition is not None
                 else None
             ),
+            was_retry=True if retry_ctx is not None else None,
+            retry_attempt=retry_ctx.attempt if retry_ctx is not None else None,
         )
 
         if not new_plan_exists and active_plan_path != original_plan_path:

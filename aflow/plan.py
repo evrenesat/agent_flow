@@ -50,6 +50,7 @@ class PlanParseError(ValueError):
         unchecked_step_count: int | None = None,
         checkpoint_index: int | None = None,
         total_checkpoint_count: int | None = None,
+        error_kind: str | None = None,
     ) -> None:
         super().__init__(message)
         self.checkpoint_name = checkpoint_name
@@ -57,6 +58,7 @@ class PlanParseError(ValueError):
         self.unchecked_step_count = unchecked_step_count
         self.checkpoint_index = checkpoint_index
         self.total_checkpoint_count = total_checkpoint_count
+        self.error_kind = error_kind
 
 
 def _build_error(path: Path, message: str) -> PlanParseError:
@@ -168,6 +170,7 @@ def parse_plan_text(text: str, *, source_path: Path) -> ParsedPlan:
                 unchecked_step_count=section.unchecked_step_count,
                 checkpoint_index=i + 1,
                 total_checkpoint_count=len(sections),
+                error_kind="inconsistent_checkpoint_state",
             )
 
     unchecked_checkpoint_count = sum(not section.heading_checked for section in sections)

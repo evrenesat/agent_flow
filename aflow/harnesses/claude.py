@@ -21,9 +21,9 @@ class ClaudeAdapter:
         argv: list[str] = [
             "claude",
             "-p",
-            "--system-prompt",
-            system_prompt,
         ]
+        if system_prompt:
+            argv.extend(["--system-prompt", system_prompt])
         if model is not None:
             argv.extend(["--model", model])
         if effort is not None:
@@ -32,8 +32,7 @@ class ClaudeAdapter:
             "--permission-mode",
             "bypassPermissions",
             "--dangerously-skip-permissions",
-            "--tools",
-            "default",
+            "--tools=default",
         ])
         argv.append(user_prompt)
         return HarnessInvocation(

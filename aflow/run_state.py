@@ -35,6 +35,22 @@ class ControllerConfig:
     extra_instructions: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class RetryContext:
+    step_name: str
+    step_profile: str
+    resolved_harness_name: str
+    resolved_model: str | None
+    resolved_effort: str | None
+    snapshot_before: PlanSnapshot
+    active_plan_path: Path
+    new_plan_path: Path
+    base_user_prompt: str
+    parse_error_str: str
+    attempt: int
+    retry_limit: int
+
+
 @dataclass
 class ControllerState:
     last_snapshot: PlanSnapshot
@@ -44,6 +60,7 @@ class ControllerState:
     active_turn: int = 0
     status_message: str = "initializing"
     end_reason: WorkflowEndReason | None = None
+    pending_retry: RetryContext | None = None
 
 
 @dataclass(frozen=True)

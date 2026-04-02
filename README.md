@@ -128,6 +128,9 @@ Config is standard TOML. The current schema has four top-level sections:
 |-----|------|---------|-------------|
 | `default_workflow` | string | — | Workflow to run when none is specified on the CLI. |
 | `keep_runs` | int | `20` | Number of run log directories to retain under `.aflow/runs/`. Older directories are pruned automatically after each run. |
+| `retry_inconsistent_checkpoint_state` | int | `0` | How many times to automatically retry the same workflow step when the harness exits cleanly but leaves the plan in an inconsistent checkpoint state (a checkpoint heading marked complete with unchecked steps still present). `0` disables retries. Each retry consumes one normal turn and appends the exact parse error to the prompt. |
+
+Each workflow can also set `retry_inconsistent_checkpoint_state` directly in its own table to override the global default for that workflow.
 
 Example:
 
@@ -135,6 +138,10 @@ Example:
 [aflow]
 default_workflow = "review_implement_review"
 keep_runs = 10
+retry_inconsistent_checkpoint_state = 1   # allow one retry globally
+
+[workflow.strict_review]
+retry_inconsistent_checkpoint_state = 0   # disable retries for this workflow
 ```
 
 ### Full example

@@ -2648,5 +2648,389 @@ class DirtyWorktreeCliTests(unittest.TestCase):
         assert "dirty" in stderr_capture.getvalue().lower()
 
 
+class RetryInconsistentCheckpointConfigTests(unittest.TestCase):
+
+    def _write_workflow_config(self, tmpdir: str, text: str) -> Path:
+        home_dir = Path(tmpdir)
+        config_path = home_dir / '.config' / 'aflow' / 'aflow.toml'
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(text, encoding='utf-8')
+        return config_path
+
+    def _minimal_config(self, extra_aflow: str = '', extra_workflow: str = '') -> str:
+        return (
+            f'[aflow]\n{extra_aflow}\n'
+            '[workflow.simple.steps.s]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n'
+            f'{extra_workflow}'
+            '[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n'
+        )
+
+    def test_global_retry_defaults_to_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(tmpdir, self._minimal_config())
+            config = load_workflow_config(config_path)
+            assert config.aflow.retry_inconsistent_checkpoint_state == 0
+
+    def test_global_retry_reads_positive_value(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir, self._minimal_config(extra_aflow='retry_inconsistent_checkpoint_state = 3')
+            )
+            config = load_workflow_config(config_path)
+            assert config.aflow.retry_inconsistent_checkpoint_state == 3
+
+    def test_global_retry_accepts_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir, self._minimal_config(extra_aflow='retry_inconsistent_checkpoint_state = 0')
+            )
+            config = load_workflow_config(config_path)
+            assert config.aflow.retry_inconsistent_checkpoint_state == 0
+
+    def test_global_retry_rejects_negative(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir, self._minimal_config(extra_aflow='retry_inconsistent_checkpoint_state = -1')
+            )
+            with pytest.raises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            assert 'retry_inconsistent_checkpoint_state' in str(ctx.value)
+
+    def test_global_retry_rejects_boolean(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir, self._minimal_config(extra_aflow='retry_inconsistent_checkpoint_state = true')
+            )
+            with pytest.raises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            assert 'retry_inconsistent_checkpoint_state' in str(ctx.value)
+
+    def test_workflow_retry_override_loads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                '[aflow]\nretry_inconsistent_checkpoint_state = 1\n'
+                '[workflow.simple]\nretry_inconsistent_checkpoint_state = 2\n'
+                '[workflow.simple.steps.s]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n'
+                '[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n',
+            )
+            config = load_workflow_config(config_path)
+            assert config.aflow.retry_inconsistent_checkpoint_state == 1
+            assert config.workflows['simple'].retry_inconsistent_checkpoint_state == 2
+
+    def test_workflow_retry_override_none_when_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(tmpdir, self._minimal_config())
+            config = load_workflow_config(config_path)
+            assert config.workflows['simple'].retry_inconsistent_checkpoint_state is None
+
+    def test_workflow_retry_override_rejects_negative(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                '[workflow.simple]\nretry_inconsistent_checkpoint_state = -1\n'
+                '[workflow.simple.steps.s]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n'
+                '[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n',
+            )
+            with pytest.raises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            assert 'retry_inconsistent_checkpoint_state' in str(ctx.value)
+
+    def test_workflow_retry_override_rejects_boolean(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                '[workflow.simple]\nretry_inconsistent_checkpoint_state = true\n'
+                '[workflow.simple.steps.s]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n'
+                '[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n',
+            )
+            with pytest.raises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            assert 'retry_inconsistent_checkpoint_state' in str(ctx.value)
+
+
+class RetryInconsistentCheckpointPlanTests(unittest.TestCase):
+
+    def test_error_kind_set_for_inconsistent_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_path = Path(tmpdir) / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: Broken\n- [ ] step one\n')
+            with pytest.raises(PlanParseError) as exc_info:
+                load_plan(plan_path)
+            assert exc_info.value.error_kind == 'inconsistent_checkpoint_state'
+
+    def test_error_kind_none_for_missing_checkpoints(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_path = Path(tmpdir) / 'plan.md'
+            _write_plan(plan_path, '# No checkpoints here\n')
+            with pytest.raises(PlanParseError) as exc_info:
+                load_plan(plan_path)
+            assert exc_info.value.error_kind is None
+
+
+def _make_simple_wf_config(
+    *,
+    global_retry: int = 0,
+    workflow_retry: int | None = None,
+) -> WorkflowUserConfig:
+    from aflow.config import WorkflowConfig
+    wf = WorkflowConfig(
+        steps={
+            'implement_plan': WorkflowStepConfig(
+                profile='codex.default',
+                prompts=('p',),
+                go=(
+                    GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'),
+                    GoTransition(to='implement_plan'),
+                ),
+            )
+        },
+        first_step='implement_plan',
+        retry_inconsistent_checkpoint_state=workflow_retry,
+    )
+    return WorkflowUserConfig(
+        aflow=AflowSection(retry_inconsistent_checkpoint_state=global_retry),
+        harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})},
+        workflows={'simple': wf},
+        prompts={'p': 'Work from {ACTIVE_PLAN_PATH}.'},
+    )
+
+
+_VALID_PLAN = '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n'
+_COMPLETE_PLAN = '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n'
+_BROKEN_PLAN = '# Plan\n\n### [x] Checkpoint 1: First\n- [ ] step one\n'
+
+
+class RetryInconsistentCheckpointWorkflowTests(unittest.TestCase):
+
+    def test_retry_disabled_fails_immediately_on_invalid_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = _make_simple_wf_config(global_retry=0)
+
+            def runner(argv, **kwargs):
+                _write_plan(plan_path, _BROKEN_PLAN)
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=5)
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(controller_config, wf_config, 'simple', config_dir=repo_root, adapter=CodexAdapter(), runner=runner)
+            assert 'inconsistent checkpoint state' in str(ctx.value).lower()
+
+    def test_retry_enabled_succeeds_when_second_attempt_fixes_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = _make_simple_wf_config(global_retry=1)
+            call_count = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    _write_plan(plan_path, _BROKEN_PLAN)
+                else:
+                    _write_plan(plan_path, _COMPLETE_PLAN)
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=5)
+            result = run_workflow(controller_config, wf_config, 'simple', config_dir=repo_root, adapter=CodexAdapter(), runner=runner)
+            assert result.turns_completed == 2
+            assert result.final_snapshot.is_complete
+
+    def test_retry_turn_reuses_same_new_plan_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = _make_simple_wf_config(global_retry=1)
+            captured_new_plan_paths: list[str] = []
+            call_count = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                prompt = ' '.join(argv)
+                import re as re_mod
+                match = re_mod.search(r'new_plan_path=(\S+)', prompt)
+                if not match:
+                    for tok in argv:
+                        if 'cp01' in tok:
+                            captured_new_plan_paths.append(tok)
+                            break
+                if call_count[0] == 1:
+                    _write_plan(plan_path, _BROKEN_PLAN)
+                else:
+                    _write_plan(plan_path, _COMPLETE_PLAN)
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=5)
+            run_workflow(controller_config, wf_config, 'simple', config_dir=repo_root, adapter=CodexAdapter(), runner=runner)
+
+            run_dirs = sorted((repo_root / '.aflow' / 'runs').iterdir())
+            turn1_result = json.loads((run_dirs[0] / 'turns' / 'turn-001' / 'result.json').read_text(encoding='utf-8'))
+            turn2_result = json.loads((run_dirs[0] / 'turns' / 'turn-002' / 'result.json').read_text(encoding='utf-8'))
+            assert turn1_result['new_plan_path'] == turn2_result['new_plan_path']
+
+    def test_retry_turn_prompt_includes_error_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = _make_simple_wf_config(global_retry=1)
+            captured_prompts: list[str] = []
+            call_count = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                captured_prompts.append(' '.join(argv))
+                if call_count[0] == 1:
+                    _write_plan(plan_path, _BROKEN_PLAN)
+                else:
+                    _write_plan(plan_path, _COMPLETE_PLAN)
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=5)
+            run_workflow(controller_config, wf_config, 'simple', config_dir=repo_root, adapter=CodexAdapter(), runner=runner)
+            assert len(captured_prompts) == 2
+            assert 'inconsistent checkpoint state' in captured_prompts[1].lower()
+
+    def test_workflow_override_zero_disables_retry_when_global_nonzero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = _make_simple_wf_config(global_retry=1, workflow_retry=0)
+
+            def runner(argv, **kwargs):
+                _write_plan(plan_path, _BROKEN_PLAN)
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=5)
+            with pytest.raises(WorkflowError):
+                run_workflow(controller_config, wf_config, 'simple', config_dir=repo_root, adapter=CodexAdapter(), runner=runner)
+
+    def test_workflow_override_enables_retry_when_global_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = _make_simple_wf_config(global_retry=0, workflow_retry=1)
+            call_count = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    _write_plan(plan_path, _BROKEN_PLAN)
+                else:
+                    _write_plan(plan_path, _COMPLETE_PLAN)
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=5)
+            result = run_workflow(controller_config, wf_config, 'simple', config_dir=repo_root, adapter=CodexAdapter(), runner=runner)
+            assert result.final_snapshot.is_complete
+
+    def test_retry_exhaustion_fails_on_latest_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = _make_simple_wf_config(global_retry=2)
+
+            def runner(argv, **kwargs):
+                _write_plan(plan_path, _BROKEN_PLAN)
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=10)
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(controller_config, wf_config, 'simple', config_dir=repo_root, adapter=CodexAdapter(), runner=runner)
+            assert 'inconsistent checkpoint state' in str(ctx.value).lower()
+
+    def test_max_turn_on_failed_turn_does_not_schedule_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = _make_simple_wf_config(global_retry=3)
+
+            def runner(argv, **kwargs):
+                _write_plan(plan_path, _BROKEN_PLAN)
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=1)
+            with pytest.raises(WorkflowError):
+                run_workflow(controller_config, wf_config, 'simple', config_dir=repo_root, adapter=CodexAdapter(), runner=runner)
+
+
+class RetryInconsistentCheckpointArtifactTests(unittest.TestCase):
+
+    def test_failed_turn_writes_retry_scheduled_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = _make_simple_wf_config(global_retry=1)
+            call_count = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    _write_plan(plan_path, _BROKEN_PLAN)
+                else:
+                    _write_plan(plan_path, _COMPLETE_PLAN)
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=5)
+            result = run_workflow(controller_config, wf_config, 'simple', config_dir=repo_root, adapter=CodexAdapter(), runner=runner)
+            turn1 = json.loads((result.run_dir / 'turns' / 'turn-001' / 'result.json').read_text(encoding='utf-8'))
+            assert turn1['status'] == 'retry-scheduled'
+            assert turn1['retry_attempt'] == 1
+            assert turn1['retry_limit'] == 1
+            assert turn1['retry_reason'] == 'inconsistent_checkpoint_state'
+            assert turn1['retry_next_turn'] is True
+            assert turn1['snapshot_after'] is None
+            assert 'error' in turn1
+
+    def test_run_json_exposes_pending_retry_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = _make_simple_wf_config(global_retry=1)
+
+            def runner(argv, **kwargs):
+                _write_plan(plan_path, _BROKEN_PLAN)
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=1)
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(controller_config, wf_config, 'simple', config_dir=repo_root, adapter=CodexAdapter(), runner=runner)
+            run_json = json.loads((ctx.value.run_dir / 'run.json').read_text(encoding='utf-8'))
+            assert run_json.get('pending_retry_step_name') is None
+
+    def test_successful_retry_turn_marks_was_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = _make_simple_wf_config(global_retry=1)
+            call_count = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    _write_plan(plan_path, _BROKEN_PLAN)
+                else:
+                    _write_plan(plan_path, _COMPLETE_PLAN)
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=5)
+            result = run_workflow(controller_config, wf_config, 'simple', config_dir=repo_root, adapter=CodexAdapter(), runner=runner)
+            turn2 = json.loads((result.run_dir / 'turns' / 'turn-002' / 'result.json').read_text(encoding='utf-8'))
+            assert turn2['was_retry'] is True
+            assert turn2['retry_attempt'] == 1
+
+
 if __name__ == '__main__':
     unittest.main()

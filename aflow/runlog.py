@@ -8,7 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from .plan import PlanSnapshot
-from .run_state import ControllerConfig, ControllerState, WorkflowEndReason
+from .run_state import ControllerConfig, ControllerState, RetryContext, WorkflowEndReason
 from .harnesses.base import HarnessInvocation
 
 
@@ -86,6 +86,7 @@ def write_run_metadata(
     original_plan_path: Path | None = None,
     active_plan_path: Path | None = None,
     new_plan_path: Path | None = None,
+    pending_retry: RetryContext | None = None,
 ) -> None:
     payload: dict[str, object] = {
         "repo_root": str(paths.repo_root),
@@ -118,6 +119,12 @@ def write_run_metadata(
         payload["end_reason"] = end_reason
     if failure_reason is not None:
         payload["failure_reason"] = failure_reason
+    effective_retry = pending_retry if pending_retry is not None else (state.pending_retry if state is not None else None)
+    if effective_retry is not None:
+        payload["pending_retry_step_name"] = effective_retry.step_name
+        payload["pending_retry_attempt"] = effective_retry.attempt
+        payload["pending_retry_limit"] = effective_retry.retry_limit
+        payload["pending_retry_reason"] = "inconsistent_checkpoint_state"
     _write_json(paths.run_json, payload)
 
 
@@ -141,6 +148,11 @@ def write_turn_artifacts(
     conditions: dict[str, bool] | None = None,
     chosen_transition: str | None = None,
     end_reason: WorkflowEndReason | None = None,
+    retry_attempt: int | None = None,
+    retry_limit: int | None = None,
+    retry_reason: str | None = None,
+    retry_next_turn: bool | None = None,
+    was_retry: bool | None = None,
 ) -> Path:
     turn_dir = paths.turns_dir / f"turn-{turn_number:03d}"
     turn_dir.mkdir(parents=False, exist_ok=False)
@@ -177,5 +189,15 @@ def write_turn_artifacts(
         result_payload["end_reason"] = end_reason
     if error is not None:
         result_payload["error"] = error
+    if retry_attempt is not None:
+        result_payload["retry_attempt"] = retry_attempt
+    if retry_limit is not None:
+        result_payload["retry_limit"] = retry_limit
+    if retry_reason is not None:
+        result_payload["retry_reason"] = retry_reason
+    if retry_next_turn is not None:
+        result_payload["retry_next_turn"] = retry_next_turn
+    if was_retry is not None:
+        result_payload["was_retry"] = was_retry
     _write_json(turn_dir / "result.json", result_payload)
     return turn_dir

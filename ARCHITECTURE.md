@@ -52,8 +52,9 @@ Resolves the repo root via `git rev-parse`, loads and validates the TOML config,
 
 ### `config.py`
 Loads `~/.config/aflow/aflow.toml` (bootstrapped from the bundled default on first run). Parses and validates:
-- **`[aflow]`** section: `default_workflow`, `keep_runs`.
+- **`[aflow]`** section: `default_workflow`, `keep_runs`, `retry_inconsistent_checkpoint_state`.
 - **`[harness.<name>.profiles.<profile>]`** tables: `model`, `effort` per harness profile.
+- **`[workflow.<name>]`** table: optional `retry_inconsistent_checkpoint_state` override that takes precedence over the `[aflow]` global when set.
 - **`[workflow.<name>.steps.<step>]`** tables: `profile` (harness.profile selector), `prompts` (list of prompt keys), `go` (transition array with `to` and optional `when` condition).
 - **`[prompts]`** section: named prompt templates.
 
@@ -79,10 +80,12 @@ The core engine. `run_workflow()` executes the turn loop:
    c. Render prompt templates with path placeholders (`{ORIGINAL_PLAN_PATH}`, `{NEW_PLAN_PATH}`, `{ACTIVE_PLAN_PATH}`).
    d. Build a `HarnessInvocation` via the adapter.
    e. Run the agent CLI as a subprocess, streaming stdout/stderr.
-   f. Reload the plan again to get the post-turn snapshot.
+   f. Reload the plan again to get the post-turn snapshot. If the plan is left in an inconsistent checkpoint state (heading marked complete but unchecked steps remain) and the harness exited cleanly, a retry may be scheduled instead of failing immediately (see `retry_inconsistent_checkpoint_state`).
    g. Evaluate `go` transitions using condition symbols (`DONE`, `NEW_PLAN_EXISTS`, `MAX_TURNS_REACHED`).
    h. Log turn artifacts and update run metadata.
    i. If transition target is `END`, return. Otherwise, advance to the next step.
+
+A scheduled retry skips the pre-turn plan reload and reuses the last valid snapshot and saved prompt context. The same `ACTIVE_PLAN_PATH`, `NEW_PLAN_PATH`, and step selector are reused; the retry appendix (containing the exact parse error) is added to the prompt. Retry turns still count toward `max_turns`.
 
 The condition evaluator is a full recursive-descent parser supporting `&&`, `||`, `!`, and parentheses over the three condition symbols.
 
@@ -105,7 +108,8 @@ All harnesses run in non-interactive, auto-approve mode with full tool access.
 ### `run_state.py`
 Data classes for runtime state:
 - `ControllerConfig` -- immutable run parameters (repo root, plan path, max turns, keep runs, extra instructions).
-- `ControllerState` -- mutable per-run state (snapshot, turn count, issues, timing, status).
+- `ControllerState` -- mutable per-run state (snapshot, turn count, issues, timing, status, pending retry context).
+- `RetryContext` -- frozen dataclass holding everything needed to rerun the same step on the next turn without re-parsing the broken plan (step name, profile, resolved harness/model/effort, pre-failure snapshot, saved plan paths, base prompt, parse error string, attempt counter, retry limit).
 - `ControllerRunResult` -- final result with end reason.
 - `WorkflowEndReason` -- literal type: `already_complete`, `done`, `max_turns_reached`, `transition_end`.
 

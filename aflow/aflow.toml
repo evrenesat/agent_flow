@@ -1,6 +1,7 @@
 [aflow]
 default_workflow = "ralph"
 keep_runs = 20
+retry_inconsistent_checkpoint_state = 0
 
 #### HARNESS PROFILES ####
 
@@ -11,13 +12,25 @@ model = "zai-coding-plan/glm-5-turbo"
 model = "zai-coding-plan/glm-4.7"
 
 [harness.claude.profiles.opus]
- model = "Opus-4.6"
+ model = "opus"
  effort = "medium"
+
+[harness.claude.profiles.sonnet]
+ model = "sonnet"
+
+[harness.claude.profiles.haiku]
+ model = "haiku"
 
 [harness.codex.profiles.high]
 model = "GPT-5.4"
 effort = "high"
 
+[harness.codex.profiles.mini]
+model = "GPT-5.4-Mini"
+effort = "high"
+
+[harness.codex.profiles.nano]
+model = "GPT-5.4-Nano"
 
 #### WORKFLOWS ####
 # RALPH LOOP
@@ -82,7 +95,7 @@ go = [
 ]
 
 [workflow.review_implement_cp_review.steps.implement_plan]
-profile = "opencode.turbo"
+profile = "claude.haiku"
 prompts = ["input_vars","cp_loop_implementation"]
 go = [
   { to = "END", when = "MAX_TURNS_REACHED" },
@@ -90,7 +103,7 @@ go = [
 ]
 
 [workflow.review_implement_cp_review.steps.review_cp_implementation]
-profile = "codex.high"
+profile = "claude.sonnet"
 prompts = ["input_vars","output_vars","review_cp"]
 go = [
   { to = "END", when = "MAX_TURNS_REACHED" },
@@ -100,7 +113,7 @@ go = [
 
 # Make a final review against original plan for the complete implementation.
 [workflow.review_implement_cp_review.steps.final_review]
-profile = "codex.high"
+profile = "claude.opus"
 prompts = ["input_vars","output_vars","final_review"]
 go = [
   { to = "END", when = "MAX_TURNS_REACHED" },
@@ -109,7 +122,7 @@ go = [
 ]
 
 [workflow.review_implement_cp_review.steps.followup]
-profile = "opencode.turbo"
+profile = "claude.haiku"
 prompts = ["input_vars","followup_implementation"]
 go = [
   { to = "END", when = "MAX_TURNS_REACHED" },

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dataclass_replace
 from importlib import resources
 from pathlib import Path
 from collections.abc import Mapping
@@ -65,6 +65,7 @@ DEFAULT_KEEP_RUNS = 20
 class AflowSection:
     default_workflow: str | None = None
     keep_runs: int = DEFAULT_KEEP_RUNS
+    retry_inconsistent_checkpoint_state: int = 0
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,7 @@ class WorkflowStepConfig:
 class WorkflowConfig:
     steps: dict[str, WorkflowStepConfig] = field(default_factory=dict)
     first_step: str | None = None
+    retry_inconsistent_checkpoint_state: int | None = None
 
 
 @dataclass(frozen=True)
@@ -120,7 +122,7 @@ def _validate_condition_symbols(expression: str, *, path: str) -> None:
 
 
 def _parse_aflow_section(raw: Mapping[str, object], *, path: str) -> AflowSection:
-    allowed = {"default_workflow", "keep_runs"}
+    allowed = {"default_workflow", "keep_runs", "retry_inconsistent_checkpoint_state"}
     unknown = sorted(set(raw) - allowed)
     if unknown:
         raise ConfigError(f"unsupported keys in {path}: {', '.join(unknown)}")
@@ -130,11 +132,20 @@ def _parse_aflow_section(raw: Mapping[str, object], *, path: str) -> AflowSectio
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
             raise ConfigError(f"{path}.keep_runs must be a positive integer")
         keep_runs = value
+    retry_inconsistent_checkpoint_state = 0
+    if "retry_inconsistent_checkpoint_state" in raw:
+        value = raw["retry_inconsistent_checkpoint_state"]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ConfigError(
+                f"{path}.retry_inconsistent_checkpoint_state must be a non-negative integer"
+            )
+        retry_inconsistent_checkpoint_state = value
     return AflowSection(
         default_workflow=_optional_text(
             raw.get("default_workflow"), path=f"{path}.default_workflow"
         ),
         keep_runs=keep_runs,
+        retry_inconsistent_checkpoint_state=retry_inconsistent_checkpoint_state,
     )
 
 
@@ -286,7 +297,7 @@ def _parse_workflow_user_config(
             wf_table = _require_table(
                 wf_value, path=f"{path}.workflow.{wf_key}"
             )
-            wf_allowed = {"steps"}
+            wf_allowed = {"steps", "retry_inconsistent_checkpoint_state"}
             wf_unknown = sorted(set(wf_table) - wf_allowed)
             if wf_unknown:
                 raise ConfigError(
@@ -295,12 +306,22 @@ def _parse_workflow_user_config(
                 )
             if "steps" not in wf_table:
                 raise ConfigError(f"missing 'steps' in {path}.workflow.{wf_key}")
+            wf_retry: int | None = None
+            if "retry_inconsistent_checkpoint_state" in wf_table:
+                retry_value = wf_table["retry_inconsistent_checkpoint_state"]
+                if not isinstance(retry_value, int) or isinstance(retry_value, bool) or retry_value < 0:
+                    raise ConfigError(
+                        f"{path}.workflow.{wf_key}.retry_inconsistent_checkpoint_state "
+                        f"must be a non-negative integer"
+                    )
+                wf_retry = retry_value
             steps_table = _require_table(
                 wf_table["steps"], path=f"{path}.workflow.{wf_key}.steps"
             )
-            wf_config = _parse_workflow_steps(
+            wf_config_base = _parse_workflow_steps(
                 steps_table, path=f"{path}.workflow.{wf_key}.steps"
             )
+            wf_config = dataclass_replace(wf_config_base, retry_inconsistent_checkpoint_state=wf_retry)
             known_steps = set(wf_config.steps)
             for step_name, step_config in wf_config.steps.items():
                 for j, transition in enumerate(step_config.go):
