@@ -84,6 +84,9 @@ class ControllerState:
     active_turn: int = 0
     current_turn_started_at: datetime | None = None
     status_message: str = "initializing"
+    selected_start_step: str | None = None
+    startup_recovery_used: bool = False
+    startup_recovery_reason: str | None = None
     end_reason: WorkflowEndReason | None = None
     pending_retry: RetryContext | None = None
     turn_history: list[TurnRecord] = field(default_factory=list)

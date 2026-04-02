@@ -14,7 +14,7 @@ from importlib import resources
 from unittest.mock import patch
 from aflow.config import AflowSection, ConfigError, GoTransition, HarnessProfileConfig, WorkflowConfig, WorkflowHarnessConfig, WorkflowStepConfig, WorkflowUserConfig, bootstrap_config, find_placeholders, load_workflow_config, validate_workflow_config
 from aflow.workflow import WorkflowError, _backup_original_plan, evaluate_condition, generate_new_plan_path, pick_transition, render_prompt, render_step_prompts, resolve_profile, run_workflow
-from aflow.cli import _parse_run_args, build_parser, main
+from aflow.cli import _confirm_startup_recovery, _parse_run_args, _pick_workflow_step, build_parser, main
 from aflow.harnesses.claude import ClaudeAdapter
 from aflow.harnesses.codex import CodexAdapter
 from aflow.harnesses.gemini import GeminiAdapter
@@ -223,6 +223,354 @@ class WorkflowCliTests(unittest.TestCase):
                 else:
                     os.environ['HOME'] = original_home
             assert result == 1
+
+class WorkflowStartupFlowTests(unittest.TestCase):
+
+    def _write_workflow_config(self, home_dir: Path, *, workflow_name: str, multi_step: bool) -> None:
+        if multi_step:
+            workflow_block = (
+                f'[workflow.{workflow_name}.steps.review_plan]\n'
+                'profile = "codex.default"\n'
+                'prompts = ["review_prompt"]\n'
+                'go = [{ to = "implement_plan" }]\n\n'
+                f'[workflow.{workflow_name}.steps.implement_plan]\n'
+                'profile = "codex.default"\n'
+                'prompts = ["impl_prompt"]\n'
+                'go = [{ to = "END", when = "DONE || MAX_TURNS_REACHED" }, { to = "review_plan" }]\n'
+            )
+        else:
+            workflow_block = (
+                f'[workflow.{workflow_name}.steps.implement_plan]\n'
+                'profile = "codex.default"\n'
+                'prompts = ["impl_prompt"]\n'
+                'go = [{ to = "END", when = "DONE || MAX_TURNS_REACHED" }, { to = "implement_plan" }]\n'
+            )
+        _write_config(
+            home_dir,
+            (
+                f'[aflow]\n'
+                f'default_workflow = "{workflow_name}"\n\n'
+                '[harness.codex.profiles.default]\n'
+                'model = "gpt-5.4"\n\n'
+                f'{workflow_block}'
+                '[prompts]\n'
+                'review_prompt = "Review {ACTIVE_PLAN_PATH}."\n'
+                'impl_prompt = "Implement from {ACTIVE_PLAN_PATH}."\n'
+            ),
+        )
+
+    def test_pick_workflow_step_reprompts_on_invalid_input(self) -> None:
+        steps = {
+            'review_plan': WorkflowStepConfig(profile='codex.default', prompts=('review_prompt',), go=(GoTransition(to='implement_plan'),)),
+            'implement_plan': WorkflowStepConfig(profile='codex.default', prompts=('impl_prompt',), go=(GoTransition(to='END'),)),
+        }
+        with patch('builtins.input', side_effect=['abc', '2']) as mock_input:
+            chosen = _pick_workflow_step(steps)
+        assert chosen == 'implement_plan'
+        assert mock_input.call_count == 2
+
+    def test_confirm_startup_recovery_accepts_yes_and_rejects_no(self) -> None:
+        with patch('builtins.input', return_value='yes'):
+            assert _confirm_startup_recovery('error: boom') is True
+        with patch('builtins.input', return_value='n'):
+            assert _confirm_startup_recovery('error: boom') is False
+
+    def test_cli_rejects_start_step_on_complete_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            repo_root = tmp_path
+            home_dir = tmp_path / 'home'
+            home_dir.mkdir()
+            self._write_workflow_config(home_dir, workflow_name='multi_step', multi_step=True)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: Done\n- [x] step one\n')
+            env = _workflow_test_env(
+                repo_root,
+                scenario='complete',
+                plan_path=plan_path,
+                count_file=repo_root / 'count.txt',
+                home_dir=home_dir,
+                completed_plan_path=repo_root / 'completed.md',
+            )
+            original_cwd = Path.cwd()
+            import io
+            import aflow.cli as cli_module
+            original_probe = cli_module.probe_worktree
+            stderr_capture = io.StringIO()
+            try:
+                with patch.dict(os.environ, env, clear=True):
+                    cli_module.probe_worktree = lambda _: None
+                    os.chdir(repo_root)
+                    with patch('builtins.input', side_effect=AssertionError('unexpected input')), \
+                         patch('sys.stderr', stderr_capture):
+                        result = main(['run', '--start-step', 'implement_plan', str(plan_path)])
+            finally:
+                os.chdir(original_cwd)
+                cli_module.probe_worktree = original_probe
+            assert result == 1
+            assert 'plan is already complete, --start-step has no effect' in stderr_capture.getvalue()
+            assert not (repo_root / '.aflow').exists()
+
+    def test_cli_prompts_for_start_step_on_half_done_multi_step_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            repo_root = tmp_path
+            home_dir = tmp_path / 'home'
+            home_dir.mkdir()
+            self._write_workflow_config(home_dir, workflow_name='multi_step', multi_step=True)
+            plan_path = repo_root / 'plan.md'
+            completed_plan_path = repo_root / 'completed.md'
+            count_file = repo_root / 'count.txt'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            _write_plan(completed_plan_path, '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n')
+            _write_workflow_harness_script(repo_root, 'codex')
+            env = _workflow_test_env(
+                repo_root,
+                scenario='complete',
+                plan_path=plan_path,
+                count_file=count_file,
+                home_dir=home_dir,
+                completed_plan_path=completed_plan_path,
+            )
+            original_cwd = Path.cwd()
+            import io
+            import aflow.cli as cli_module
+            original_probe = cli_module.probe_worktree
+            stderr_capture = io.StringIO()
+            try:
+                with patch.dict(os.environ, env, clear=True):
+                    cli_module.probe_worktree = lambda _: None
+                    os.chdir(repo_root)
+                    with patch('sys.stdin.isatty', return_value=True), \
+                         patch('sys.stdout.isatty', return_value=True), \
+                         patch('builtins.input', side_effect=['2']), \
+                         patch('sys.stderr', stderr_capture):
+                        result = main(['run', str(plan_path)])
+            finally:
+                os.chdir(original_cwd)
+                cli_module.probe_worktree = original_probe
+            assert result == 0
+            run_dirs = sorted((repo_root / '.aflow' / 'runs').iterdir())
+            assert len(run_dirs) == 1
+            run_json = json.loads((run_dirs[0] / 'run.json').read_text(encoding='utf-8'))
+            assert run_json['selected_start_step'] == 'implement_plan'
+            assert run_json['startup_recovery_used'] is False
+            assert run_json['startup_recovery_reason'] is None
+            turn_result = json.loads((run_dirs[0] / 'turns' / 'turn-001' / 'result.json').read_text(encoding='utf-8'))
+            assert turn_result['step_name'] == 'implement_plan'
+            assert turn_result['status'] == 'completed'
+
+    def test_cli_startup_recovery_prompts_and_seeds_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            repo_root = tmp_path
+            home_dir = tmp_path / 'home'
+            home_dir.mkdir()
+            self._write_workflow_config(home_dir, workflow_name='multi_step', multi_step=True)
+            plan_path = repo_root / 'plan.md'
+            completed_plan_path = repo_root / 'completed.md'
+            count_file = repo_root / 'count.txt'
+            broken_plan = '# Plan\n\n### [x] Checkpoint 1: Broken\n- [ ] step one\n'
+            complete_plan = '# Plan\n\n### [x] Checkpoint 1: Broken\n- [x] step one\n'
+            _write_plan(plan_path, broken_plan)
+            _write_plan(completed_plan_path, complete_plan)
+            _write_workflow_harness_script(repo_root, 'codex')
+            env = _workflow_test_env(
+                repo_root,
+                scenario='complete',
+                plan_path=plan_path,
+                count_file=count_file,
+                home_dir=home_dir,
+                completed_plan_path=completed_plan_path,
+            )
+            original_cwd = Path.cwd()
+            import io
+            import aflow.cli as cli_module
+            original_probe = cli_module.probe_worktree
+            stderr_capture = io.StringIO()
+            try:
+                with patch.dict(os.environ, env, clear=True):
+                    cli_module.probe_worktree = lambda _: None
+                    os.chdir(repo_root)
+                    with patch('sys.stdin.isatty', return_value=True), \
+                         patch('sys.stdout.isatty', return_value=True), \
+                         patch('builtins.input', side_effect=['y', '2']), \
+                         patch('sys.stderr', stderr_capture):
+                        result = main(['run', str(plan_path)])
+            finally:
+                os.chdir(original_cwd)
+                cli_module.probe_worktree = original_probe
+            assert result == 0
+            run_dirs = sorted((repo_root / '.aflow' / 'runs').iterdir())
+            assert len(run_dirs) == 1
+            run_json = json.loads((run_dirs[0] / 'run.json').read_text(encoding='utf-8'))
+            assert run_json['selected_start_step'] == 'implement_plan'
+            assert run_json['startup_recovery_used'] is True
+            assert 'inconsistent checkpoint state' in run_json['startup_recovery_reason']
+            turn_result = json.loads((run_dirs[0] / 'turns' / 'turn-001' / 'result.json').read_text(encoding='utf-8'))
+            assert turn_result['was_retry'] is True
+            assert turn_result['retry_attempt'] == 1
+            user_prompt = (run_dirs[0] / 'turns' / 'turn-001' / 'user-prompt.txt').read_text(encoding='utf-8')
+            assert 'inconsistent checkpoint state' in user_prompt.lower()
+
+    def test_cli_declining_startup_recovery_exits_before_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            repo_root = tmp_path
+            home_dir = tmp_path / 'home'
+            home_dir.mkdir()
+            self._write_workflow_config(home_dir, workflow_name='multi_step', multi_step=True)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: Broken\n- [ ] step one\n')
+            env = _workflow_test_env(
+                repo_root,
+                scenario='complete',
+                plan_path=plan_path,
+                count_file=repo_root / 'count.txt',
+                home_dir=home_dir,
+                completed_plan_path=repo_root / 'completed.md',
+            )
+            original_cwd = Path.cwd()
+            import io
+            import aflow.cli as cli_module
+            original_probe = cli_module.probe_worktree
+            stderr_capture = io.StringIO()
+            try:
+                with patch.dict(os.environ, env, clear=True):
+                    cli_module.probe_worktree = lambda _: None
+                    os.chdir(repo_root)
+                    with patch('sys.stdin.isatty', return_value=True), \
+                         patch('sys.stdout.isatty', return_value=True), \
+                         patch('builtins.input', side_effect=['n']), \
+                         patch('sys.stderr', stderr_capture):
+                        result = main(['run', str(plan_path)])
+            finally:
+                os.chdir(original_cwd)
+                cli_module.probe_worktree = original_probe
+            assert result == 1
+            assert 'startup aborted' in stderr_capture.getvalue().lower()
+            assert not (repo_root / '.aflow').exists()
+
+    def test_cli_requires_tty_for_multi_step_start_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            repo_root = tmp_path
+            home_dir = tmp_path / 'home'
+            home_dir.mkdir()
+            self._write_workflow_config(home_dir, workflow_name='multi_step', multi_step=True)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            env = _workflow_test_env(
+                repo_root,
+                scenario='complete',
+                plan_path=plan_path,
+                count_file=repo_root / 'count.txt',
+                home_dir=home_dir,
+                completed_plan_path=repo_root / 'completed.md',
+            )
+            original_cwd = Path.cwd()
+            import io
+            import aflow.cli as cli_module
+            original_probe = cli_module.probe_worktree
+            stderr_capture = io.StringIO()
+            try:
+                with patch.dict(os.environ, env, clear=True):
+                    cli_module.probe_worktree = lambda _: None
+                    os.chdir(repo_root)
+                    with patch('sys.stdin.isatty', return_value=False), \
+                         patch('sys.stdout.isatty', return_value=False), \
+                         patch('builtins.input', side_effect=AssertionError('unexpected input')), \
+                         patch('sys.stderr', stderr_capture):
+                        result = main(['run', str(plan_path)])
+            finally:
+                os.chdir(original_cwd)
+                cli_module.probe_worktree = original_probe
+            assert result == 1
+            assert 'interactive startup selection requires a terminal' in stderr_capture.getvalue().lower()
+
+    def test_cli_requires_tty_for_startup_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            repo_root = tmp_path
+            home_dir = tmp_path / 'home'
+            home_dir.mkdir()
+            self._write_workflow_config(home_dir, workflow_name='multi_step', multi_step=True)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: Broken\n- [ ] step one\n')
+            env = _workflow_test_env(
+                repo_root,
+                scenario='complete',
+                plan_path=plan_path,
+                count_file=repo_root / 'count.txt',
+                home_dir=home_dir,
+                completed_plan_path=repo_root / 'completed.md',
+            )
+            original_cwd = Path.cwd()
+            import io
+            import aflow.cli as cli_module
+            original_probe = cli_module.probe_worktree
+            stderr_capture = io.StringIO()
+            try:
+                with patch.dict(os.environ, env, clear=True):
+                    cli_module.probe_worktree = lambda _: None
+                    os.chdir(repo_root)
+                    with patch('sys.stdin.isatty', return_value=False), \
+                         patch('sys.stdout.isatty', return_value=False), \
+                         patch('builtins.input', side_effect=AssertionError('unexpected input')), \
+                         patch('sys.stderr', stderr_capture):
+                        result = main(['run', str(plan_path)])
+            finally:
+                os.chdir(original_cwd)
+                cli_module.probe_worktree = original_probe
+            assert result == 1
+            assert 'startup recovery for inconsistent checkpoint state requires an interactive terminal' in stderr_capture.getvalue().lower()
+
+    def test_cli_one_step_workflow_skips_picker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            repo_root = tmp_path
+            home_dir = tmp_path / 'home'
+            home_dir.mkdir()
+            self._write_workflow_config(home_dir, workflow_name='single_step', multi_step=False)
+            plan_path = repo_root / 'plan.md'
+            completed_plan_path = repo_root / 'completed.md'
+            count_file = repo_root / 'count.txt'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            _write_plan(completed_plan_path, '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n')
+            _write_workflow_harness_script(repo_root, 'codex')
+            env = _workflow_test_env(
+                repo_root,
+                scenario='complete',
+                plan_path=plan_path,
+                count_file=count_file,
+                home_dir=home_dir,
+                completed_plan_path=completed_plan_path,
+            )
+            original_cwd = Path.cwd()
+            import io
+            import aflow.cli as cli_module
+            original_probe = cli_module.probe_worktree
+            stderr_capture = io.StringIO()
+            try:
+                with patch.dict(os.environ, env, clear=True):
+                    cli_module.probe_worktree = lambda _: None
+                    os.chdir(repo_root)
+                    with patch('sys.stdin.isatty', return_value=False), \
+                         patch('sys.stdout.isatty', return_value=False), \
+                         patch('builtins.input', side_effect=AssertionError('picker should not run')), \
+                         patch('sys.stderr', stderr_capture):
+                        result = main(['run', str(plan_path)])
+            finally:
+                os.chdir(original_cwd)
+                cli_module.probe_worktree = original_probe
+            assert result == 0
+            run_dirs = sorted((repo_root / '.aflow' / 'runs').iterdir())
+            assert len(run_dirs) == 1
+            run_json = json.loads((run_dirs[0] / 'run.json').read_text(encoding='utf-8'))
+            assert run_json['selected_start_step'] == 'implement_plan'
+            assert run_json['startup_recovery_used'] is False
+            turn_result = json.loads((run_dirs[0] / 'turns' / 'turn-001' / 'result.json').read_text(encoding='utf-8'))
+            assert turn_result['step_name'] == 'implement_plan'
 
 class PlanParserTests(unittest.TestCase):
 
@@ -1758,6 +2106,9 @@ class WorkflowArtifactTests(unittest.TestCase):
             assert run_json['original_plan_path'] == str(plan_path)
             assert run_json['status'] == 'completed'
             assert run_json['end_reason'] == 'already_complete'
+            assert run_json['selected_start_step'] is None
+            assert run_json['startup_recovery_used'] is False
+            assert run_json['startup_recovery_reason'] is None
 
     def test_turn_artifacts_include_workflow_step_and_transition(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2050,7 +2401,7 @@ class WorkflowEndToEndTests(unittest.TestCase):
                 new_plan = plan_path.parent / 'plan-cp01-v01.md'
                 scenario = 'create_plan' if call_count[0] == 1 else 'complete'
                 return _workflow_test_env(repo_root, scenario=scenario, plan_path=plan_path, count_file=count_file, home_dir=home_dir, completed_plan_path=completed_plan_path, new_plan_path=new_plan if call_count[0] == 1 else None)
-            result = _run_workflow_launcher(repo_root, '--max-turns', '5', str(plan_path), env=count_env())
+            result = _run_workflow_launcher(repo_root, '--max-turns', '5', '--start-step', 'review', str(plan_path), env=count_env())
             assert result.returncode == 0
             run_dirs = sorted((repo_root / '.aflow' / 'runs').iterdir())
             assert len(run_dirs) == 1
@@ -2075,7 +2426,7 @@ class WorkflowEndToEndTests(unittest.TestCase):
             _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n- [ ] step two\n')
             _write_plan(completed_plan_path, '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n- [x] step two\n')
             _write_workflow_harness_script(repo_root, 'codex')
-            result = _run_workflow_launcher(repo_root, '--max-turns', '4', str(plan_path), env=_workflow_test_env(repo_root, scenario='noop', plan_path=plan_path, count_file=count_file, home_dir=home_dir, completed_plan_path=completed_plan_path))
+            result = _run_workflow_launcher(repo_root, '--max-turns', '4', '--start-step', 'review', str(plan_path), env=_workflow_test_env(repo_root, scenario='noop', plan_path=plan_path, count_file=count_file, home_dir=home_dir, completed_plan_path=completed_plan_path))
             assert result.returncode == 0
             run_dirs = sorted((repo_root / '.aflow' / 'runs').iterdir())
             run_json = json.loads((run_dirs[0] / 'run.json').read_text(encoding='utf-8'))
@@ -2537,7 +2888,7 @@ class WorkflowMaxTurnsEndToEndTests(unittest.TestCase):
             count_file = tmp_path / 'count.txt'
             _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
             _write_workflow_harness_script(repo_root, 'codex')
-            result = _run_workflow_launcher(repo_root, '--max-turns', '1', str(plan_path), env=_workflow_test_env(repo_root, scenario='noop', plan_path=plan_path, count_file=count_file, home_dir=home_dir))
+            result = _run_workflow_launcher(repo_root, '--max-turns', '1', '--start-step', 'review_plan', str(plan_path), env=_workflow_test_env(repo_root, scenario='noop', plan_path=plan_path, count_file=count_file, home_dir=home_dir))
             assert result.returncode == 0
             run_dirs = sorted((repo_root / '.aflow' / 'runs').iterdir())
             run_json = json.loads((run_dirs[0] / 'run.json').read_text(encoding='utf-8'))

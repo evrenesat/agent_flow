@@ -187,8 +187,15 @@ def write_run_metadata(
         payload["run_started_at"] = state.run_started_at.isoformat()
         payload["active_turn"] = state.active_turn
         payload["status_message"] = state.status_message
+        payload["selected_start_step"] = state.selected_start_step
+        payload["startup_recovery_used"] = state.startup_recovery_used
+        payload["startup_recovery_reason"] = state.startup_recovery_reason
         if end_reason is None:
             end_reason = state.end_reason
+    else:
+        payload["selected_start_step"] = None
+        payload["startup_recovery_used"] = False
+        payload["startup_recovery_reason"] = None
     if end_reason is not None:
         payload["end_reason"] = end_reason
     if failure_reason is not None:

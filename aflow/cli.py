@@ -11,11 +11,20 @@ from .config import (
     find_placeholders,
     load_workflow_config,
     validate_workflow_config,
+    WorkflowStepConfig,
 )
 from .git_status import probe_worktree
+from .plan import PlanParseError, load_plan, load_plan_tolerant
 from .skill_installer import InstallerError, install_skills
-from .run_state import ControllerConfig, WorkflowEndReason, describe_end_reason
-from .workflow import WorkflowError, run_workflow
+from .run_state import ControllerConfig, RetryContext, WorkflowEndReason, describe_end_reason
+from .workflow import (
+    WorkflowError,
+    _effective_retry_limit,
+    generate_new_plan_path,
+    render_step_prompts,
+    resolve_profile,
+    run_workflow,
+)
 
 
 DEFAULT_MAX_TURNS = 15
@@ -198,6 +207,45 @@ def _format_success_summary(workflow_name: str, turns_completed: int, end_reason
     )
 
 
+def _pick_workflow_step(steps: dict[str, WorkflowStepConfig]) -> str | None:
+    step_names = list(steps.keys())
+    if not step_names:
+        return None
+
+    while True:
+        print("Select the workflow step to start from:")
+        for index, step_name in enumerate(step_names, start=1):
+            print(f"  {index}. {step_name}")
+        try:
+            response = input(f"Enter a number between 1 and {len(step_names)}: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        try:
+            choice = int(response)
+        except ValueError:
+            print(
+                f"error: enter a number between 1 and {len(step_names)}",
+                file=sys.stderr,
+            )
+            continue
+        if choice < 1 or choice > len(step_names):
+            print(
+                f"error: enter a number between 1 and {len(step_names)}",
+                file=sys.stderr,
+            )
+            continue
+        return step_names[choice - 1]
+
+
+def _confirm_startup_recovery(error_message: str) -> bool:
+    print(error_message, file=sys.stderr)
+    try:
+        response = input("Recover using the existing retry flow? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return response in ("y", "yes")
+
+
 def run_install_skills(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(["install-skills"] + ([] if argv is None else argv))
@@ -287,6 +335,95 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    parsed_plan = None
+    startup_retry: RetryContext | None = None
+    selected_start_step = args.start_step
+    try:
+        parsed_plan = load_plan(plan_path)
+    except PlanParseError as exc:
+        if exc.error_kind != "inconsistent_checkpoint_state":
+            print(exc, file=sys.stderr)
+            return 1
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            print(
+                "error: startup recovery for inconsistent checkpoint state requires an interactive terminal.",
+                file=sys.stderr,
+            )
+            return 1
+        if not _confirm_startup_recovery(str(exc)):
+            print("startup aborted", file=sys.stderr)
+            return 1
+        try:
+            tolerant_result = load_plan_tolerant(plan_path)
+        except FileNotFoundError as exc2:
+            print(exc2, file=sys.stderr)
+            return 1
+        parsed_plan = tolerant_result.parsed_plan
+        startup_retry_error = str(tolerant_result.parse_error or exc)
+    except FileNotFoundError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    else:
+        startup_retry_error = None
+
+    assert parsed_plan is not None
+    if parsed_plan.snapshot.is_complete:
+        if args.start_step is not None:
+            print("error: plan is already complete, --start-step has no effect", file=sys.stderr)
+            return 1
+    else:
+        if selected_start_step is None:
+            if len(workflow.steps) > 1:
+                if not (sys.stdin.isatty() and sys.stdout.isatty()):
+                    print(
+                        f"error: workflow '{workflow_name}' has multiple steps and interactive startup selection requires a terminal. "
+                        "Re-run with --start-step STEP_NAME.",
+                        file=sys.stderr,
+                    )
+                    return 1
+                selected_start_step = _pick_workflow_step(workflow.steps)
+                if selected_start_step is None:
+                    print("startup aborted", file=sys.stderr)
+                    return 1
+            else:
+                selected_start_step = workflow.first_step
+
+        if startup_retry_error is not None:
+            if selected_start_step is None:
+                print(
+                    f"workflow '{workflow_name}' has no steps",
+                    file=sys.stderr,
+                )
+                return 1
+            step = workflow.steps[selected_start_step]
+            step_path = f"workflow.{workflow_name}.steps.{selected_start_step}"
+            resolved = resolve_profile(step.profile, workflow_config, step_path=step_path)
+            checkpoint_index = parsed_plan.snapshot.current_checkpoint_index or 1
+            new_plan_path = generate_new_plan_path(plan_path, checkpoint_index=checkpoint_index)
+            base_user_prompt = render_step_prompts(
+                step,
+                workflow_config,
+                config_dir=config_path.parent,
+                working_dir=working_dir,
+                original_plan_path=plan_path,
+                new_plan_path=new_plan_path,
+                active_plan_path=plan_path,
+            )
+            startup_retry = RetryContext(
+                step_name=selected_start_step,
+                step_profile=step.profile,
+                resolved_harness_name=resolved.harness_name,
+                resolved_model=resolved.model,
+                resolved_effort=resolved.effort,
+                snapshot_before=parsed_plan.snapshot,
+                active_plan_path=plan_path,
+                new_plan_path=new_plan_path,
+                base_user_prompt=base_user_prompt,
+                parse_error_str=startup_retry_error,
+                attempt=1,
+                retry_limit=_effective_retry_limit(workflow, workflow_config.aflow),
+            )
+
     probe = probe_worktree(repo_root)
     if probe is not None and probe.is_dirty:
         is_tty = sys.stdin.isatty() and sys.stdout.isatty()
@@ -313,7 +450,7 @@ def main(argv: list[str] | None = None) -> int:
         max_turns=args.max_turns,
         keep_runs=workflow_config.aflow.keep_runs,
         extra_instructions=extra_instructions,
-        start_step=args.start_step,
+        start_step=selected_start_step,
     )
 
     try:
@@ -321,6 +458,8 @@ def main(argv: list[str] | None = None) -> int:
             config,
             workflow_config,
             workflow_name,
+            parsed_plan=parsed_plan,
+            startup_retry=startup_retry,
             config_dir=config_path.parent,
             working_dir=working_dir,
         )

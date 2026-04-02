@@ -625,12 +625,15 @@ def run_workflow(
 
     original_plan_path = config.plan_path
     active_plan_path = original_plan_path
-    current_step_name = wf.first_step
+    current_step_name = config.start_step or wf.first_step
     working_dir = working_dir or Path.cwd()
 
     run_paths = create_run_paths(config)
     state = ControllerState(last_snapshot=PlanSnapshot(None, 0, 0, False))
     state.status_message = "initializing"
+    state.selected_start_step = config.start_step
+    state.startup_recovery_used = startup_retry is not None
+    state.startup_recovery_reason = startup_retry.parse_error_str if startup_retry is not None else None
     write_run_metadata(
         run_paths, config, state, status="initializing",
         workflow_name=workflow_name, original_plan_path=original_plan_path,
