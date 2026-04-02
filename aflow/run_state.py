@@ -90,6 +90,8 @@ class ControllerState:
     end_reason: WorkflowEndReason | None = None
     pending_retry: RetryContext | None = None
     turn_history: list[TurnRecord] = field(default_factory=list)
+    consec_step_name: str | None = None
+    consec_step_count: int = 0
 
 
 @dataclass(frozen=True)

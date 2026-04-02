@@ -63,7 +63,7 @@ Startup resolution happens in `main()` before the workflow loop starts:
 
 ### `config.py`
 Loads `~/.config/aflow/aflow.toml` (bootstrapped from the bundled default on first run). Parses and validates:
-- **`[aflow]`** section: `default_workflow`, `keep_runs`, `retry_inconsistent_checkpoint_state`.
+- **`[aflow]`** section: `default_workflow`, `keep_runs`, `retry_inconsistent_checkpoint_state`, `max_same_step_turns`.
 - **`[harness.<name>.profiles.<profile>]`** tables: `model`, `effort` per harness profile.
 - **`[workflow.<name>]`** table: optional `retry_inconsistent_checkpoint_state` override that takes precedence over the `[aflow]` global when set.
 - **`[workflow.<name>.steps.<step>]`** tables: `profile` (harness.profile selector), `prompts` (list of prompt keys), `go` (transition array with `to` and optional `when` condition).
@@ -94,7 +94,7 @@ The core engine. `run_workflow()` executes the turn loop:
    f. Reload the plan again to get the post-turn snapshot. If the plan is left in an inconsistent checkpoint state (heading marked complete but unchecked steps remain) and the harness exited cleanly, a retry may be scheduled instead of failing immediately (see `retry_inconsistent_checkpoint_state`).
    g. Evaluate `go` transitions using condition symbols (`DONE`, `NEW_PLAN_EXISTS`, `MAX_TURNS_REACHED`).
    h. Log turn artifacts and update run metadata.
-   i. If transition target is `END`, return. Otherwise, advance to the next step.
+   i. If transition target is `END`, return. For multi-step workflows, check the same-step cap: if the same step has been selected consecutively `max_same_step_turns` times, fail the run before starting the next turn. Otherwise, advance to the next step.
 
 A scheduled retry skips the pre-turn plan reload and reuses the last valid snapshot and saved prompt context. The same `ACTIVE_PLAN_PATH`, `NEW_PLAN_PATH`, and step selector are reused; the retry appendix (containing the exact parse error) is added to the prompt. Startup recovery seeds that same retry machinery by passing a `RetryContext` into `run_workflow()`, which stores it in `state.pending_retry` before turn 1. Retry turns still count toward `max_turns`.
 
@@ -119,7 +119,7 @@ All harnesses run in non-interactive, auto-approve mode with full tool access.
 ### `run_state.py`
 Data classes for runtime state:
 - `ControllerConfig` -- immutable run parameters (repo root, plan path, max turns, keep runs, extra instructions).
-- `ControllerState` -- mutable per-run state (snapshot, turn count, issues, timing, status, pending retry context).
+- `ControllerState` -- mutable per-run state (snapshot, turn count, issues, timing, status, pending retry context, consecutive same-step streak tracking).
 - `RetryContext` -- frozen dataclass holding everything needed to rerun the same step on the next turn without re-parsing the broken plan (step name, profile, resolved harness/model/effort, pre-failure snapshot, saved plan paths, base prompt, parse error string, attempt counter, retry limit).
 - `ControllerConfig` also carries the selected startup step, if any, so the workflow loop can start from a non-default step without re-parsing CLI arguments.
 - `ControllerRunResult` -- final result with end reason.

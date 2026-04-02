@@ -1,5 +1,33 @@
 # DEVLOG
 
+## 2026-04-02 — AFLOW_STOP sentinel and same-step cap guardrails
+
+### What changed
+
+- **`aflow/workflow.py`**: Added `_detect_stop_marker(stdout, stderr)` which scans both output streams line-by-line for a line starting with the exact prefix `AFLOW_STOP:`. When found, `run_workflow()` fails the current turn immediately before plan reload or transition selection, writes a failed `run.json`, and raises `WorkflowError` with the extracted reason. A blank reason falls back to a fixed message.
+
+  Also added the multi-step consecutive same-step cap. After each successful turn selects its next transition target, the engine checks whether the same step has been selected `max_same_step_turns` times in a row. On limit, it fails with a clear message naming the step and the count. The check is skipped for single-step workflows, for `END` transitions, and when `max_same_step_turns = 0`. Streak tracking fields (`consec_step_name`, `consec_step_count`) live on `ControllerState`.
+
+- **`aflow/config.py`**: Added `max_same_step_turns: int = 5` to `AflowSection`. Parser validates non-negative integers and rejects booleans. Added `DEFAULT_MAX_SAME_STEP_TURNS = 5` constant.
+
+- **`aflow/run_state.py`**: Added `consec_step_name: str | None = None` and `consec_step_count: int = 0` to `ControllerState` for same-step streak tracking.
+
+- **`aflow/aflow.toml`**: Added `max_same_step_turns = 5` with an explanatory comment under `[aflow]`.
+
+- **`aflow/bundled_skills/aflow-execute-plan/SKILL.md`** and **`aflow/bundled_skills/aflow-execute-checkpoint/SKILL.md`**: Added documentation that irrecoverable blockers must emit `AFLOW_STOP: <reason>` on its own line so the engine stops immediately instead of looping.
+
+- **`aflow/bundled_skills/aflow-plan/SKILL.md`**: Updated the checkpoint skeleton's "Stop and Escalate If" instruction to tell plan authors to document the `AFLOW_STOP: <reason>` contract for implementers.
+
+- **`tests/test_aflow.py`**: Added `SameStepCapConfigTests` (5 tests), `SameStepCapWorkflowTests` (5 tests), and `StopMarkerTests` (7 tests). 17 new tests total.
+
+- **`README.md`** and **`ARCHITECTURE.md`**: Documented `max_same_step_turns`, the same-step cap behavior, and updated the workflow engine description.
+
+### Gotchas
+
+- The same-step cap check happens AFTER transition selection and BEFORE the next turn starts. If the cap triggers, the turn that caused the failure has already been finalized as completed, so the failure appears as a run-level error, not a turn-level artifact.
+- Single-step workflows (like `ralph`) are intentionally excluded from the cap regardless of `max_same_step_turns`. The check uses `len(wf.steps) > 1`.
+- The streak resets to zero when a DIFFERENT step is selected, not just when it executes. If the next turn picks a different step, `consec_step_count` resets before that turn runs.
+
 ## 2026-04-02 — Retry inconsistent checkpoint state
 
 ### What changed

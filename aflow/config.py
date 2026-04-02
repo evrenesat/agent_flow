@@ -61,12 +61,16 @@ def _parse_profile_table(raw: Mapping[str, object], *, path: str) -> HarnessProf
 DEFAULT_KEEP_RUNS = 20
 
 
+DEFAULT_MAX_SAME_STEP_TURNS = 5
+
+
 @dataclass(frozen=True)
 class AflowSection:
     default_workflow: str | None = None
     keep_runs: int = DEFAULT_KEEP_RUNS
     retry_inconsistent_checkpoint_state: int = 0
     banner_files_limit: int = 10
+    max_same_step_turns: int = DEFAULT_MAX_SAME_STEP_TURNS
 
 
 @dataclass(frozen=True)
@@ -128,6 +132,7 @@ def _parse_aflow_section(raw: Mapping[str, object], *, path: str) -> AflowSectio
         "keep_runs",
         "retry_inconsistent_checkpoint_state",
         "banner_files_limit",
+        "max_same_step_turns",
     }
     unknown = sorted(set(raw) - allowed)
     if unknown:
@@ -154,6 +159,14 @@ def _parse_aflow_section(raw: Mapping[str, object], *, path: str) -> AflowSectio
                 f"{path}.banner_files_limit must be a positive integer"
             )
         banner_files_limit = value
+    max_same_step_turns = DEFAULT_MAX_SAME_STEP_TURNS
+    if "max_same_step_turns" in raw:
+        value = raw["max_same_step_turns"]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ConfigError(
+                f"{path}.max_same_step_turns must be a non-negative integer"
+            )
+        max_same_step_turns = value
     return AflowSection(
         default_workflow=_optional_text(
             raw.get("default_workflow"), path=f"{path}.default_workflow"
@@ -161,6 +174,7 @@ def _parse_aflow_section(raw: Mapping[str, object], *, path: str) -> AflowSectio
         keep_runs=keep_runs,
         retry_inconsistent_checkpoint_state=retry_inconsistent_checkpoint_state,
         banner_files_limit=banner_files_limit,
+        max_same_step_turns=max_same_step_turns,
     )
 
 

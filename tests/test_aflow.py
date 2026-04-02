@@ -3805,6 +3805,228 @@ class RetryInconsistentCheckpointArtifactTests(unittest.TestCase):
             assert turn2['retry_attempt'] == 1
 
 
+def _make_multistep_wf_config(max_same_step_turns: int = 5) -> WorkflowUserConfig:
+    from aflow.config import WorkflowConfig
+    wf = WorkflowConfig(
+        steps={
+            'review': WorkflowStepConfig(
+                profile='codex.default',
+                prompts=('p',),
+                go=(GoTransition(to='implement'),),
+            ),
+            'implement': WorkflowStepConfig(
+                profile='codex.default',
+                prompts=('p',),
+                go=(
+                    GoTransition(to='END', when='DONE'),
+                    GoTransition(to='implement'),
+                ),
+            ),
+        },
+        first_step='review',
+    )
+    return WorkflowUserConfig(
+        aflow=AflowSection(max_same_step_turns=max_same_step_turns),
+        harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})},
+        workflows={'loop': wf},
+        prompts={'p': 'Work from {ACTIVE_PLAN_PATH}.'},
+    )
+
+
+class SameStepCapConfigTests(unittest.TestCase):
+
+    def _write_workflow_config(self, tmpdir: str, text: str) -> Path:
+        home_dir = Path(tmpdir)
+        config_path = home_dir / '.config' / 'aflow' / 'aflow.toml'
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(text, encoding='utf-8')
+        return config_path
+
+    def _minimal_config(self, extra_aflow: str = '') -> str:
+        return (
+            f'[aflow]\n{extra_aflow}\n'
+            '[workflow.simple.steps.s]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n'
+            '[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n'
+        )
+
+    def test_max_same_step_turns_defaults_to_five(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(tmpdir, self._minimal_config())
+            config = load_workflow_config(config_path)
+            assert config.aflow.max_same_step_turns == 5
+
+    def test_max_same_step_turns_reads_positive_value(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir, self._minimal_config(extra_aflow='max_same_step_turns = 3')
+            )
+            config = load_workflow_config(config_path)
+            assert config.aflow.max_same_step_turns == 3
+
+    def test_max_same_step_turns_accepts_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir, self._minimal_config(extra_aflow='max_same_step_turns = 0')
+            )
+            config = load_workflow_config(config_path)
+            assert config.aflow.max_same_step_turns == 0
+
+    def test_max_same_step_turns_rejects_negative(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir, self._minimal_config(extra_aflow='max_same_step_turns = -1')
+            )
+            with pytest.raises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            assert 'max_same_step_turns' in str(ctx.value)
+
+    def test_max_same_step_turns_rejects_boolean(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir, self._minimal_config(extra_aflow='max_same_step_turns = true')
+            )
+            with pytest.raises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            assert 'max_same_step_turns' in str(ctx.value)
+
+
+class SameStepCapWorkflowTests(unittest.TestCase):
+
+    def test_multi_step_same_step_cap_fails_before_sixth_consecutive_visit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = _make_multistep_wf_config(max_same_step_turns=5)
+            call_steps: list[str] = []
+
+            def runner(argv, **kwargs):
+                step = argv[0] if argv else 'unknown'
+                call_steps.append(step)
+                return subprocess.CompletedProcess(argv, 0, stdout='ok', stderr='')
+
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=20),
+                    wf_config, 'loop', config_dir=repo_root, adapter=CodexAdapter(), runner=runner,
+                )
+            assert 'same-step cap' in str(ctx.value).lower()
+            assert 'implement' in str(ctx.value)
+            assert '5' in str(ctx.value)
+            implement_count = sum(1 for s in call_steps if 'codex' in s or True)
+            assert len(call_steps) < 20
+
+    def test_multi_step_same_step_cap_fails_before_exceeding_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = _make_multistep_wf_config(max_same_step_turns=3)
+            call_count = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                return subprocess.CompletedProcess(argv, 0, stdout='ok', stderr='')
+
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=20),
+                    wf_config, 'loop', config_dir=repo_root, adapter=CodexAdapter(), runner=runner,
+                )
+            assert 'same-step cap' in str(ctx.value).lower()
+            assert '3' in str(ctx.value)
+            assert call_count[0] <= 4
+
+    def test_multi_step_streak_resets_after_different_step_executes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+
+            from aflow.config import WorkflowConfig
+            wf = WorkflowConfig(
+                steps={
+                    'review': WorkflowStepConfig(
+                        profile='codex.default',
+                        prompts=('p',),
+                        go=(
+                            GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'),
+                            GoTransition(to='implement'),
+                        ),
+                    ),
+                    'implement': WorkflowStepConfig(
+                        profile='codex.default',
+                        prompts=('p',),
+                        go=(
+                            GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'),
+                            GoTransition(to='review'),
+                        ),
+                    ),
+                },
+                first_step='review',
+            )
+            wf_config = WorkflowUserConfig(
+                aflow=AflowSection(max_same_step_turns=2),
+                harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})},
+                workflows={'alternating': wf},
+                prompts={'p': 'Work.'},
+            )
+            turn_count = [0]
+
+            def runner(argv, **kwargs):
+                turn_count[0] += 1
+                if turn_count[0] >= 8:
+                    _write_plan(plan_path, _COMPLETE_PLAN)
+                return subprocess.CompletedProcess(argv, 0, stdout='ok', stderr='')
+
+            result = run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=20),
+                wf_config, 'alternating', config_dir=repo_root, adapter=CodexAdapter(), runner=runner,
+            )
+            assert result.final_snapshot.is_complete
+
+    def test_single_step_workflow_ignores_same_step_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = _make_simple_wf_config()
+            call_count = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                if call_count[0] >= 6:
+                    _write_plan(plan_path, _COMPLETE_PLAN)
+                return subprocess.CompletedProcess(argv, 0, stdout='ok', stderr='')
+
+            result = run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=20),
+                wf_config, 'simple', config_dir=repo_root, adapter=CodexAdapter(), runner=runner,
+            )
+            assert result.final_snapshot.is_complete
+            assert call_count[0] >= 6
+
+    def test_same_step_cap_zero_disables_guardrail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = _make_multistep_wf_config(max_same_step_turns=0)
+            call_count = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                if call_count[0] >= 8:
+                    _write_plan(plan_path, _COMPLETE_PLAN)
+                return subprocess.CompletedProcess(argv, 0, stdout='ok', stderr='')
+
+            result = run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=20),
+                wf_config, 'loop', config_dir=repo_root, adapter=CodexAdapter(), runner=runner,
+            )
+            assert result.final_snapshot.is_complete
+
+
 class StopMarkerTests(unittest.TestCase):
 
     def _make_wf_config(self) -> WorkflowUserConfig:

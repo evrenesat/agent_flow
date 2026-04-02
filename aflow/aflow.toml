@@ -3,6 +3,10 @@ default_workflow = "ralph"
 keep_runs = 20
 retry_inconsistent_checkpoint_state = 0
 banner_files_limit = 10
+# max_same_step_turns limits how many consecutive turns the same workflow step
+# can be selected before the run fails. Applies only to multi-step workflows.
+# Set to 0 to disable. Default: 5.
+max_same_step_turns = 5
 
 #### HARNESS PROFILES ####
 

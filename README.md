@@ -141,6 +141,7 @@ Config is standard TOML. The current schema has four top-level sections:
 | `keep_runs` | int | `20` | Number of run log directories to retain under `.aflow/runs/`. Older directories are pruned automatically after each run. |
 | `retry_inconsistent_checkpoint_state` | int | `0` | How many times to automatically retry the same workflow step when the harness exits cleanly but leaves the plan in an inconsistent checkpoint state (a checkpoint heading marked complete with unchecked steps still present). `0` disables retries. Each retry consumes one normal turn and appends the exact parse error to the prompt. |
 | `banner_files_limit` | int | `10` | Maximum number of changed files to show in the live banner before it appends `+N more`. |
+| `max_same_step_turns` | int | `5` | Maximum number of consecutive turns the same workflow step can be selected before the run fails. Applies only to multi-step workflows. `0` disables the guardrail. |
 
 Each workflow can also set `retry_inconsistent_checkpoint_state` directly in its own table to override the global default for that workflow.
 
@@ -256,6 +257,9 @@ Other things can stop a run earlier, but they are not extra turn-limit mechanism
 - no `go` transition matches for the current step
 - the harness exits non-zero
 - the original plan becomes unreadable or invalid
+- the same-step cap triggers (multi-step workflows only)
+
+For multi-step workflows, `max_same_step_turns` (default `5`) limits how many consecutive turns the same step can be selected. When the same step would be selected for the (limit + 1)-th turn in a row without any other step executing in between, the run fails with a clear message naming the step and the limit. The streak resets only after a different step actually executes. Single-step workflows like `ralph` are not affected by this cap.
 
 ## Harnesses
 

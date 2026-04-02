@@ -1279,6 +1279,41 @@ def run_workflow(
             banner.stop(state)
             return result
 
+        if len(wf.steps) > 1:
+            max_cap = workflow_config.aflow.max_same_step_turns
+            if transition_target == current_step_name:
+                new_streak = (
+                    state.consec_step_count + 1
+                    if state.consec_step_name == current_step_name
+                    else 1
+                )
+                if max_cap > 0 and new_streak >= max_cap:
+                    state.status_message = "failed"
+                    state.issues_accumulated += 1
+                    summary = _format_failure(
+                        reason=(
+                            f"same-step cap reached: step '{current_step_name}' "
+                            f"selected {new_streak} consecutive times (limit: {max_cap})"
+                        ),
+                        run_dir=run_paths.run_dir,
+                        snapshot=post_snapshot,
+                    )
+                    write_run_metadata(
+                        run_paths, config, state, status="failed", failure_reason=summary,
+                        turns_completed=state.turns_completed,
+                        last_snapshot=post_snapshot,
+                        workflow_name=workflow_name, original_plan_path=original_plan_path,
+                        current_step_name=current_step_name, active_plan_path=active_plan_path,
+                        new_plan_path=new_plan_path,
+                    )
+                    banner.stop(state)
+                    raise WorkflowError(summary, run_dir=run_paths.run_dir)
+                state.consec_step_name = current_step_name
+                state.consec_step_count = new_streak
+            else:
+                state.consec_step_name = None
+                state.consec_step_count = 0
+
         current_step_name = transition_target
 
     state.status_message = "failed"
