@@ -22,7 +22,7 @@ from .config import (
 )
 from .harnesses import get_adapter
 from .harnesses.base import HarnessAdapter, HarnessInvocation
-from .plan import PlanParseError, PlanSnapshot, load_plan, plan_has_git_tracking
+from .plan import ParsedPlan, PlanParseError, PlanSnapshot, load_plan, plan_has_git_tracking
 from .run_state import ControllerConfig, ControllerRunResult, ControllerState, RetryContext, TurnRecord, WorkflowEndReason, format_harness_model_display
 from .runlog import create_run_paths, finalize_turn_artifacts, prune_old_runs, write_run_metadata, write_turn_artifacts_start
 from .status import BannerRenderer
@@ -608,6 +608,8 @@ def run_workflow(
     workflow_config: WorkflowUserConfig,
     workflow_name: str,
     *,
+    parsed_plan: ParsedPlan | None = None,
+    startup_retry: RetryContext | None = None,
     config_dir: Path,
     working_dir: Path | None = None,
     adapter: HarnessAdapter | None = None,
@@ -647,7 +649,8 @@ def run_workflow(
 
     try:
         _backup_original_plan(config.repo_root, original_plan_path)
-        parsed_plan = load_plan(original_plan_path)
+        if parsed_plan is None:
+            parsed_plan = load_plan(original_plan_path)
     except WorkflowError as exc:
         state.status_message = "failed"
         banner.stop(state)
@@ -695,6 +698,8 @@ def run_workflow(
 
     original_snapshot = parsed_plan.snapshot
     state.last_snapshot = original_snapshot
+    if startup_retry is not None:
+        state.pending_retry = startup_retry
     write_run_metadata(
         run_paths, config, state, status="running", last_snapshot=original_snapshot,
         workflow_name=workflow_name, original_plan_path=original_plan_path,

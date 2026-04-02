@@ -22,8 +22,8 @@ from aflow.harnesses.kiro import KiroAdapter
 from aflow.harnesses.opencode import OpencodeAdapter
 from aflow.harnesses.pi import PiAdapter
 from aflow.harnesses.base import HarnessInvocation
-from aflow.plan import PlanParseError, PlanSnapshot, load_plan
-from aflow.run_state import ControllerConfig, ControllerState, TurnRecord
+from aflow.plan import PlanParseError, PlanSnapshot, load_plan, load_plan_tolerant
+from aflow.run_state import ControllerConfig, ControllerState, RetryContext, TurnRecord
 from aflow.runlog import prune_old_runs
 from aflow.status import build_banner
 import pytest
@@ -254,6 +254,27 @@ class PlanParserTests(unittest.TestCase):
             _write_plan(plan_path, '# No checkpoints\n- [ ] ignored\n')
             with pytest.raises(PlanParseError):
                 load_plan(plan_path)
+
+    def test_startup_tolerant_loader_builds_recovery_snapshot_from_inconsistent_checkpoint_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_path = Path(tmpdir) / 'plan.md'
+            _write_plan(
+                plan_path,
+                '# Plan\n\n'
+                '### [x] Checkpoint 1: Broken\n- [ ] step one\n\n'
+                '### [ ] Checkpoint 2: Later\n- [ ] step two\n',
+            )
+            result = load_plan_tolerant(plan_path)
+            assert result.parse_error is not None
+            assert result.parse_error.error_kind == 'inconsistent_checkpoint_state'
+            snapshot = result.parsed_plan.snapshot
+            assert snapshot.current_checkpoint_name == 'Checkpoint 1: Broken'
+            assert snapshot.current_checkpoint_index == 1
+            assert snapshot.current_checkpoint_unchecked_step_count == 1
+            assert snapshot.unchecked_checkpoint_count == 2
+            assert snapshot.total_checkpoint_count == 2
+            assert not snapshot.is_complete
+            assert len(result.parsed_plan.sections) == 2
 
     def test_parser_total_checkpoint_count(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3039,6 +3060,85 @@ class RetryInconsistentCheckpointPlanTests(unittest.TestCase):
             with pytest.raises(PlanParseError) as exc_info:
                 load_plan(plan_path)
             assert exc_info.value.error_kind is None
+
+
+class RetryInconsistentCheckpointStartupTests(unittest.TestCase):
+
+    def test_startup_retry_seeding_for_inconsistent_checkpoint_state_uses_retry_appendix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            broken_plan = '# Plan\n\n### [x] Checkpoint 1: Broken\n- [ ] step one\n'
+            complete_plan = '# Plan\n\n### [x] Checkpoint 1: Broken\n- [x] step one\n'
+            _write_plan(plan_path, broken_plan)
+            wf_config = _make_simple_wf_config(global_retry=1)
+            recovery = load_plan_tolerant(plan_path)
+            assert recovery.parse_error is not None
+            captured_user_prompts: list[str] = []
+
+            class CapturingAdapter:
+                name = 'codex'
+                supports_effort = False
+
+                def build_invocation(self, *, repo_root, model, system_prompt, user_prompt, effort=None):
+                    captured_user_prompts.append(user_prompt)
+                    return HarnessInvocation(
+                        label='codex',
+                        argv=('codex', 'run', user_prompt),
+                        env={},
+                        prompt_mode='prefix-system-into-user-prompt',
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        effective_prompt=f'{system_prompt}\n\n{user_prompt}' if system_prompt else user_prompt,
+                    )
+
+            def runner(argv, **kwargs):
+                _write_plan(plan_path, complete_plan)
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            step = wf_config.workflows['simple'].steps['implement_plan']
+            base_user_prompt = render_step_prompts(
+                step,
+                wf_config,
+                config_dir=repo_root,
+                working_dir=repo_root,
+                original_plan_path=plan_path,
+                new_plan_path=generate_new_plan_path(plan_path, checkpoint_index=1),
+                active_plan_path=plan_path,
+            )
+            retry_ctx = RetryContext(
+                step_name='implement_plan',
+                step_profile='codex.default',
+                resolved_harness_name='codex',
+                resolved_model='gpt-5.4',
+                resolved_effort=None,
+                snapshot_before=recovery.parsed_plan.snapshot,
+                active_plan_path=plan_path,
+                new_plan_path=generate_new_plan_path(plan_path, checkpoint_index=1),
+                base_user_prompt=base_user_prompt,
+                parse_error_str=str(recovery.parse_error),
+                attempt=1,
+                retry_limit=1,
+            )
+            controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=2)
+            result = run_workflow(
+                controller_config,
+                wf_config,
+                'simple',
+                config_dir=repo_root,
+                adapter=CapturingAdapter(),
+                runner=runner,
+                parsed_plan=recovery.parsed_plan,
+                startup_retry=retry_ctx,
+            )
+
+            assert captured_user_prompts
+            assert base_user_prompt in captured_user_prompts[0]
+            assert 'inconsistent checkpoint state' in captured_user_prompts[0].lower()
+            assert str(recovery.parse_error) in captured_user_prompts[0]
+            turn1 = json.loads((result.run_dir / 'turns' / 'turn-001' / 'result.json').read_text(encoding='utf-8'))
+            assert turn1['was_retry'] is True
+            assert turn1['retry_attempt'] == 1
 
 
 def _make_simple_wf_config(

@@ -40,6 +40,12 @@ class ParsedPlan:
     snapshot: PlanSnapshot
 
 
+@dataclass(frozen=True)
+class TolerantPlanLoadResult:
+    parsed_plan: ParsedPlan
+    parse_error: PlanParseError | None
+
+
 class PlanParseError(ValueError):
     def __init__(
         self,
@@ -90,7 +96,7 @@ def plan_has_git_tracking(text: str) -> bool:
     return False
 
 
-def parse_plan_text(text: str, *, source_path: Path) -> ParsedPlan:
+def _collect_sections(text: str, *, source_path: Path) -> tuple[CheckpointSection, ...]:
     sections: list[CheckpointSection] = []
     current_section: dict[str, object] | None = None
     in_fence = False
@@ -159,6 +165,10 @@ def parse_plan_text(text: str, *, source_path: Path) -> ParsedPlan:
     if not sections:
         raise _build_error(source_path, "no checkpoint sections were found")
 
+    return tuple(sections)
+
+
+def _validate_sections(sections: tuple[CheckpointSection, ...], *, source_path: Path) -> None:
     for i, section in enumerate(sections):
         if section.heading_checked and section.unchecked_step_count > 0:
             raise PlanParseError(
@@ -173,12 +183,14 @@ def parse_plan_text(text: str, *, source_path: Path) -> ParsedPlan:
                 error_kind="inconsistent_checkpoint_state",
             )
 
+
+def _build_snapshot_from_sections(sections: tuple[CheckpointSection, ...]) -> PlanSnapshot:
     unchecked_checkpoint_count = sum(not section.heading_checked for section in sections)
     total_checkpoint_count = len(sections)
     current_checkpoint = next((section for section in sections if not section.heading_checked), None)
 
     if current_checkpoint is None:
-        snapshot = PlanSnapshot(
+        return PlanSnapshot(
             current_checkpoint_name=None,
             unchecked_checkpoint_count=0,
             current_checkpoint_unchecked_step_count=0,
@@ -186,21 +198,68 @@ def parse_plan_text(text: str, *, source_path: Path) -> ParsedPlan:
             total_checkpoint_count=total_checkpoint_count,
             current_checkpoint_index=None,
         )
-    else:
-        current_checkpoint_index = sections.index(current_checkpoint) + 1
-        snapshot = PlanSnapshot(
-            current_checkpoint_name=current_checkpoint.name,
-            unchecked_checkpoint_count=unchecked_checkpoint_count,
-            current_checkpoint_unchecked_step_count=current_checkpoint.unchecked_step_count,
-            is_complete=False,
-            total_checkpoint_count=total_checkpoint_count,
-            current_checkpoint_index=current_checkpoint_index,
-        )
 
-    return ParsedPlan(path=source_path, sections=tuple(sections), snapshot=snapshot)
+    current_checkpoint_index = sections.index(current_checkpoint) + 1
+    return PlanSnapshot(
+        current_checkpoint_name=current_checkpoint.name,
+        unchecked_checkpoint_count=unchecked_checkpoint_count,
+        current_checkpoint_unchecked_step_count=current_checkpoint.unchecked_step_count,
+        is_complete=False,
+        total_checkpoint_count=total_checkpoint_count,
+        current_checkpoint_index=current_checkpoint_index,
+    )
+
+
+def _build_recovery_snapshot(error: PlanParseError) -> PlanSnapshot:
+    if (
+        error.checkpoint_name is None
+        or error.checkpoint_index is None
+        or error.unchecked_step_count is None
+        or error.total_checkpoint_count is None
+    ):
+        raise ValueError("inconsistent checkpoint parse error is missing recovery metadata")
+
+    return PlanSnapshot(
+        current_checkpoint_name=error.checkpoint_name,
+        unchecked_checkpoint_count=error.total_checkpoint_count - (error.checkpoint_index - 1),
+        current_checkpoint_unchecked_step_count=error.unchecked_step_count,
+        is_complete=False,
+        total_checkpoint_count=error.total_checkpoint_count,
+        current_checkpoint_index=error.checkpoint_index,
+    )
+
+
+def parse_plan_text(text: str, *, source_path: Path) -> ParsedPlan:
+    sections = _collect_sections(text, source_path=source_path)
+    _validate_sections(sections, source_path=source_path)
+    snapshot = _build_snapshot_from_sections(sections)
+    return ParsedPlan(path=source_path, sections=sections, snapshot=snapshot)
 
 
 def load_plan(path: Path) -> ParsedPlan:
     if not path.is_file():
         raise _build_error(path, "plan file does not exist")
     return parse_plan_text(path.read_text(encoding="utf-8"), source_path=path)
+
+
+def load_plan_tolerant(path: Path) -> TolerantPlanLoadResult:
+    if not path.is_file():
+        raise _build_error(path, "plan file does not exist")
+
+    text = path.read_text(encoding="utf-8")
+    sections = _collect_sections(text, source_path=path)
+    try:
+        _validate_sections(sections, source_path=path)
+    except PlanParseError as exc:
+        if exc.error_kind != "inconsistent_checkpoint_state":
+            raise
+        snapshot = _build_recovery_snapshot(exc)
+        return TolerantPlanLoadResult(
+            parsed_plan=ParsedPlan(path=path, sections=sections, snapshot=snapshot),
+            parse_error=exc,
+        )
+
+    return TolerantPlanLoadResult(
+        parsed_plan=ParsedPlan(path=path, sections=sections, snapshot=_build_snapshot_from_sections(sections)),
+        parse_error=None,
+    )
