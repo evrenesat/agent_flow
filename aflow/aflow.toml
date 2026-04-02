@@ -64,7 +64,7 @@ go = [
 ]
 
 [workflow.review_implement_review.steps.implement_plan]
-profile = "opencode.turbo"
+profile = "codex.mini"
 prompts = ["input_vars", "cp_loop_implementation", "simple_implementation"]
 go = [
   { to = "END", when = "MAX_TURNS_REACHED" },
