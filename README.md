@@ -313,6 +313,44 @@ The bundled `aflow.toml` includes three ready-to-use workflows:
 - `review_implement_review` - review, implement, then review again with `aflow-review-squash`. On approval the reviewer squashes all post-handoff commits into one final commit. This squash behavior is specific to this workflow, not an engine-wide invariant.
 - `review_implement_cp_review` - checkpoint-scoped review with `aflow-review-checkpoint` and a final no-squash audit with `aflow-review-final`. Checkpoint commit structure is preserved on approval.
 
+## Built-In Workflow Diagrams
+
+These diagrams show the default workflow shapes. The labels use generic role names, not the bundled harness/profile defaults, because most people will swap those models out in their own config.
+
+```mermaid
+flowchart LR
+    subgraph ralph ["ralph (simple loop)"]
+        R_impl["implement_plan<br/>Implementer model"] -->|"DONE || MAX_TURNS"| R_end["END"]
+        R_impl -->|"else"| R_impl
+    end
+
+    subgraph rir ["review_implement_review"]
+        RIR_rev["review_plan<br/>Architect model"] -->|"MAX_TURNS"| RIR_end1["END"]
+        RIR_rev -->|"else"| RIR_impl["implement_plan<br/>Implementer model"]
+        RIR_impl -->|"MAX_TURNS"| RIR_end2["END"]
+        RIR_impl -->|"DONE"| RIR_review["review_implementation<br/>Reviewer model"]
+        RIR_impl -->|"else"| RIR_impl
+        RIR_review -->|"MAX_TURNS"| RIR_end3["END"]
+        RIR_review -->|"NEW_PLAN_EXISTS"| RIR_impl
+        RIR_review -->|"else"| RIR_end4["END"]
+    end
+
+    subgraph ricr ["review_implement_cp_review"]
+        RICR_rev["review_plan<br/>Architect model"] -->|"MAX_TURNS"| RICR_end1["END"]
+        RICR_rev -->|"else"| RICR_impl["implement_plan<br/>Implementer model"]
+        RICR_impl -->|"MAX_TURNS"| RICR_end2["END"]
+        RICR_impl -->|"else"| RICR_cprev["review_cp<br/>Reviewer model"]
+        RICR_cprev -->|"MAX_TURNS"| RICR_end3["END"]
+        RICR_cprev -->|"NEW_PLAN || !DONE"| RICR_impl
+        RICR_cprev -->|"else"| RICR_final["final_review<br/>Reviewer model"]
+        RICR_final -->|"MAX_TURNS"| RICR_end4["END"]
+        RICR_final -->|"NEW_PLAN_EXISTS"| RICR_followup["followup<br/>Implementer model"]
+        RICR_final -->|"else"| RICR_end5["END"]
+        RICR_followup -->|"MAX_TURNS"| RICR_end6["END"]
+        RICR_followup -->|"else"| RICR_final
+    end
+```
+
 ## Included Skills
 
 This repo also ships optional skills under `aflow/bundled_skills/`. `aflow install-skills` copies them into the harness-specific skill roots listed above.
