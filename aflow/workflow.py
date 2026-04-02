@@ -460,14 +460,20 @@ def _format_failure(
     reason: str,
     run_dir: Path,
     snapshot: PlanSnapshot,
+    parse_error: PlanParseError | None = None,
 ) -> str:
-    current = snapshot.current_checkpoint_name or "none"
+    if parse_error is not None and parse_error.checkpoint_name is not None:
+        current = parse_error.checkpoint_name
+        unchecked_steps = parse_error.unchecked_step_count or 0
+    else:
+        current = snapshot.current_checkpoint_name or "none"
+        unchecked_steps = snapshot.current_checkpoint_unchecked_step_count
     return (
         f"{reason}\n"
         f"run log directory: {run_dir}\n"
         f"current checkpoint: {current}\n"
         f"unchecked checkpoint count: {snapshot.unchecked_checkpoint_count}\n"
-        f"current checkpoint unchecked step count: {snapshot.current_checkpoint_unchecked_step_count}"
+        f"current checkpoint unchecked step count: {unchecked_steps}"
     )
 
 
@@ -800,6 +806,7 @@ def run_workflow(
                 reason=str(exc),
                 run_dir=run_paths.run_dir,
                 snapshot=snapshot_before,
+                parse_error=exc if isinstance(exc, PlanParseError) else None,
             )
             write_run_metadata(
                 run_paths, config, state, status="failed", failure_reason=summary,

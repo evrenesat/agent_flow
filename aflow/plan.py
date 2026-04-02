@@ -9,6 +9,7 @@ SECTION_RE = re.compile(r"^###\s+\[([ xX])\]\s+(Checkpoint\b.*)$")
 STEP_RE = re.compile(r"^\s*[-*]\s+\[([ xX])\]\s+")
 FENCE_RE = re.compile(r"^(`{3,}|~{3,})")
 GIT_TRACKING_RE = re.compile(r"^##\s+Git Tracking\b")
+NON_CHECKPOINT_HEADING_RE = re.compile(r"^#{1,3}\s+")
 
 
 @dataclass(frozen=True)
@@ -40,7 +41,22 @@ class ParsedPlan:
 
 
 class PlanParseError(ValueError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        checkpoint_name: str | None = None,
+        checkpoint_line: int | None = None,
+        unchecked_step_count: int | None = None,
+        checkpoint_index: int | None = None,
+        total_checkpoint_count: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.checkpoint_name = checkpoint_name
+        self.checkpoint_line = checkpoint_line
+        self.unchecked_step_count = unchecked_step_count
+        self.checkpoint_index = checkpoint_index
+        self.total_checkpoint_count = total_checkpoint_count
 
 
 def _build_error(path: Path, message: str) -> PlanParseError:
@@ -78,6 +94,7 @@ def parse_plan_text(text: str, *, source_path: Path) -> ParsedPlan:
     in_fence = False
     fence_char: str | None = None
     fence_len = 0
+    in_checkpoint_scope = False
 
     for line_number, line in enumerate(text.splitlines(), start=1):
         fence_match = FENCE_RE.match(line)
@@ -113,9 +130,14 @@ def parse_plan_text(text: str, *, source_path: Path) -> ParsedPlan:
                 "heading_checked": section_match.group(1).lower() == "x",
                 "unchecked_step_count": 0,
             }
+            in_checkpoint_scope = True
             continue
 
-        if current_section is None:
+        if NON_CHECKPOINT_HEADING_RE.match(line):
+            in_checkpoint_scope = False
+            continue
+
+        if current_section is None or not in_checkpoint_scope:
             continue
 
         step_match = STEP_RE.match(line)
@@ -135,13 +157,17 @@ def parse_plan_text(text: str, *, source_path: Path) -> ParsedPlan:
     if not sections:
         raise _build_error(source_path, "no checkpoint sections were found")
 
-    for section in sections:
+    for i, section in enumerate(sections):
         if section.heading_checked and section.unchecked_step_count > 0:
-            raise _build_error(
-                source_path,
-                f"inconsistent checkpoint state at line {section.line_number}: "
+            raise PlanParseError(
+                f"{source_path}: inconsistent checkpoint state at line {section.line_number}: "
                 f"'{section.name}' is marked complete but still has "
                 f"{section.unchecked_step_count} unchecked step(s)",
+                checkpoint_name=section.name,
+                checkpoint_line=section.line_number,
+                unchecked_step_count=section.unchecked_step_count,
+                checkpoint_index=i + 1,
+                total_checkpoint_count=len(sections),
             )
 
     unchecked_checkpoint_count = sum(not section.heading_checked for section in sections)

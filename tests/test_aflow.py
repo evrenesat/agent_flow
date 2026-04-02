@@ -201,8 +201,13 @@ class PlanParserTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             plan_path = Path(tmpdir) / 'plan.md'
             _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: Broken\n- [ ] step one\n')
-            with pytest.raises(PlanParseError):
+            with pytest.raises(PlanParseError) as exc_info:
                 load_plan(plan_path)
+            exc = exc_info.value
+            assert exc.checkpoint_name == 'Checkpoint 1: Broken'
+            assert exc.unchecked_step_count == 1
+            assert exc.checkpoint_index == 1
+            assert exc.total_checkpoint_count == 1
 
     def test_parser_rejects_files_without_checkpoint_sections(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -232,6 +237,56 @@ class PlanParserTests(unittest.TestCase):
             parsed = load_plan(plan_path)
             assert parsed.snapshot.is_complete
             assert parsed.snapshot.current_checkpoint_index is None
+
+    def test_parser_global_section_after_last_checkpoint_does_not_affect_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_path = Path(tmpdir) / 'plan.md'
+            _write_plan(
+                plan_path,
+                '# Plan\n\n'
+                '### [x] Checkpoint 1: First\n'
+                '- [x] step one\n\n'
+                '## Final Checklist\n'
+                '- [ ] cleanup item one\n'
+                '- [ ] cleanup item two\n',
+            )
+            parsed = load_plan(plan_path)
+            assert parsed.snapshot.is_complete
+            assert parsed.snapshot.current_checkpoint_name is None
+            assert parsed.snapshot.unchecked_checkpoint_count == 0
+
+    def test_parser_non_checkpoint_heading_ends_step_counting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_path = Path(tmpdir) / 'plan.md'
+            _write_plan(
+                plan_path,
+                '# Plan\n\n'
+                '### [ ] Checkpoint 1: First\n'
+                '- [ ] real step\n\n'
+                '## Constraints\n'
+                '- [ ] global constraint one\n'
+                '- [ ] global constraint two\n',
+            )
+            parsed = load_plan(plan_path)
+            assert parsed.snapshot.current_checkpoint_unchecked_step_count == 1
+
+    def test_parser_unchecked_items_between_checkpoints_under_global_heading_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_path = Path(tmpdir) / 'plan.md'
+            _write_plan(
+                plan_path,
+                '# Plan\n\n'
+                '### [x] Checkpoint 1: Done\n'
+                '- [x] step one\n\n'
+                '## Global Notes\n'
+                '- [ ] global note\n\n'
+                '### [ ] Checkpoint 2: Current\n'
+                '- [ ] step two\n',
+            )
+            parsed = load_plan(plan_path)
+            assert parsed.sections[0].unchecked_step_count == 0
+            assert parsed.sections[1].unchecked_step_count == 1
+            assert parsed.snapshot.current_checkpoint_unchecked_step_count == 1
 
 class AdaptersTests(unittest.TestCase):
 
@@ -1353,6 +1408,144 @@ class WorkflowRuntimeTests(unittest.TestCase):
             turn_result = json.loads((result.run_dir / 'turns' / 'turn-001' / 'result.json').read_text(encoding='utf-8'))
             assert turn_result['end_reason'] == 'done'
             assert turn_result['status'] == 'completed'
+
+    def test_workflow_completes_when_all_checkpoints_done_despite_unchecked_final_checklist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            config_dir = repo_root
+            plan_path = repo_root / 'plan.md'
+            initial_plan = (
+                '# Plan\n\n'
+                '### [x] Checkpoint 1: Setup\n- [x] step a\n\n'
+                '### [x] Checkpoint 2: Core\n- [x] step b\n\n'
+                '### [x] Checkpoint 3: Tests\n- [x] step c\n\n'
+                '### [ ] Checkpoint 4: Cleanup\n'
+                '- [ ] cleanup step one\n'
+                '- [ ] cleanup step two\n'
+                '- [ ] cleanup step three\n'
+                '- [ ] cleanup step four\n'
+                '- [ ] cleanup step five\n'
+                '- [ ] cleanup step six\n'
+                '- [ ] cleanup step seven\n'
+                '- [ ] cleanup step eight\n\n'
+                '## Final Checklist\n'
+                '- [ ] final item one\n'
+                '- [ ] final item two\n'
+                '- [ ] final item three\n'
+                '- [ ] final item four\n'
+                '- [ ] final item five\n'
+                '- [ ] final item six\n'
+                '- [ ] final item seven\n'
+            )
+            completed_plan = (
+                '# Plan\n\n'
+                '### [x] Checkpoint 1: Setup\n- [x] step a\n\n'
+                '### [x] Checkpoint 2: Core\n- [x] step b\n\n'
+                '### [x] Checkpoint 3: Tests\n- [x] step c\n\n'
+                '### [x] Checkpoint 4: Cleanup\n'
+                '- [x] cleanup step one\n'
+                '- [x] cleanup step two\n'
+                '- [x] cleanup step three\n'
+                '- [x] cleanup step four\n'
+                '- [x] cleanup step five\n'
+                '- [x] cleanup step six\n'
+                '- [x] cleanup step seven\n'
+                '- [x] cleanup step eight\n\n'
+                '## Final Checklist\n'
+                '- [ ] final item one\n'
+                '- [ ] final item two\n'
+                '- [ ] final item three\n'
+                '- [ ] final item four\n'
+                '- [ ] final item five\n'
+                '- [ ] final item six\n'
+                '- [ ] final item seven\n'
+            )
+            _write_plan(plan_path, initial_plan)
+            wf_config = WorkflowUserConfig(
+                harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})},
+                workflows={'simple': WorkflowConfig(
+                    steps={'implement_plan': WorkflowStepConfig(
+                        profile='codex.default',
+                        prompts=('p',),
+                        go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='implement_plan')),
+                    )},
+                    first_step='implement_plan',
+                )},
+                prompts={'p': 'Work.'},
+            )
+
+            def runner(argv, **kwargs):
+                _write_plan(plan_path, completed_plan)
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=5)
+            result = run_workflow(controller_config, wf_config, 'simple', config_dir=config_dir, adapter=CodexAdapter(), runner=runner)
+            assert result.end_reason == 'done'
+            assert result.final_snapshot.is_complete
+
+    def test_workflow_invalid_plan_failure_reports_parse_error_counts_not_stale_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            config_dir = repo_root
+            plan_path = repo_root / 'plan.md'
+            initial_plan = (
+                '# Plan\n\n'
+                '### [x] Checkpoint 1: Done\n- [x] step a\n\n'
+                '### [ ] Checkpoint 2: Current\n'
+                '- [ ] real step one\n'
+                '- [ ] real step two\n'
+                '- [ ] real step three\n'
+                '- [ ] real step four\n'
+                '- [ ] real step five\n'
+                '- [ ] real step six\n'
+                '- [ ] real step seven\n'
+                '- [ ] real step eight\n'
+                '- [ ] real step nine\n'
+                '- [ ] real step ten\n'
+                '- [ ] real step eleven\n'
+                '- [ ] real step twelve\n'
+                '- [ ] real step thirteen\n'
+                '- [ ] real step fourteen\n'
+                '- [ ] real step fifteen\n'
+            )
+            broken_plan = (
+                '# Plan\n\n'
+                '### [x] Checkpoint 1: Done\n- [x] step a\n\n'
+                '### [x] Checkpoint 2: Current\n'
+                '- [x] real step one\n'
+                '- [ ] real step two\n'
+                '- [ ] real step three\n'
+            )
+            _write_plan(plan_path, initial_plan)
+            wf_config = WorkflowUserConfig(
+                harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})},
+                workflows={'simple': WorkflowConfig(
+                    steps={'implement_plan': WorkflowStepConfig(
+                        profile='codex.default',
+                        prompts=('p',),
+                        go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='implement_plan')),
+                    )},
+                    first_step='implement_plan',
+                )},
+                prompts={'p': 'Work.'},
+            )
+
+            def runner(argv, **kwargs):
+                _write_plan(plan_path, broken_plan)
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=5)
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(controller_config, wf_config, 'simple', config_dir=config_dir, adapter=CodexAdapter(), runner=runner)
+            error_msg = str(ctx.value)
+            assert 'Checkpoint 2: Current' in error_msg
+            assert 'current checkpoint unchecked step count: 2' in error_msg
+            assert 'current checkpoint unchecked step count: 15' not in error_msg
+            run_dir = ctx.value.run_dir
+            assert run_dir is not None
+            run_json = json.loads((run_dir / 'run.json').read_text(encoding='utf-8'))
+            assert 'current checkpoint unchecked step count: 2' in run_json['failure_reason']
+            assert 'current checkpoint unchecked step count: 15' not in run_json['failure_reason']
 
 class WorkflowArtifactTests(unittest.TestCase):
 
