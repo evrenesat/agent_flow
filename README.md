@@ -242,7 +242,7 @@ Extra CLI instructions after the plan path are appended to the rendered step pro
 
 ## Loop Limits
 
-`max_turns` is the only built-in hard cap on turn count. The workflow runner executes turns with a fixed `1..max_turns` loop, so a workflow cannot exceed that number of turns even if its `go` transitions keep routing back to earlier steps.
+`max_turns` is the primary hard cap on turn count. The workflow runner executes turns with a fixed `1..max_turns` loop, so a workflow cannot exceed that number of turns even if its `go` transitions keep routing back to earlier steps.
 
 That hard cap does not end the run by itself in the success path. On the last allowed turn:
 
