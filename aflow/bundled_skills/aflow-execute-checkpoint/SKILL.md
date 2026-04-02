@@ -98,3 +98,11 @@ Do not use this skill to invent a second execution spec. The plan should already
 - the worktree contains unrelated dirty changes that make the checkpoint or commit ambiguous
 - the plan requires a destructive git action you were not explicitly authorized to perform
 - verification still fails after reasonable diagnosis and the failure suggests the plan is wrong or incomplete
+
+When any of the above conditions is irrecoverable and cannot be resolved within the current turn, emit exactly the following line on its own in stdout or stderr before stopping:
+
+```
+AFLOW_STOP: <reason>
+```
+
+The workflow engine detects this line and fails the run immediately with the extracted reason instead of spending more turns on the same blocker. Do not emit this sentinel for normal plan-not-done states; use it only for hard blockers that require human intervention.

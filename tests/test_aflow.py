@@ -3805,5 +3805,165 @@ class RetryInconsistentCheckpointArtifactTests(unittest.TestCase):
             assert turn2['retry_attempt'] == 1
 
 
+class StopMarkerTests(unittest.TestCase):
+
+    def _make_wf_config(self) -> WorkflowUserConfig:
+        return _make_simple_wf_config()
+
+    def test_stop_marker_in_stdout_fails_workflow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = self._make_wf_config()
+
+            def runner(argv, **kwargs):
+                return subprocess.CompletedProcess(
+                    argv, 0,
+                    stdout='some output\nAFLOW_STOP: dirty worktree blocks verification\nmore output\n',
+                    stderr='',
+                )
+
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=5),
+                    wf_config, 'simple', config_dir=repo_root, adapter=CodexAdapter(), runner=runner,
+                )
+            assert 'dirty worktree blocks verification' in str(ctx.value)
+            assert 'AFLOW_STOP' in str(ctx.value)
+
+    def test_stop_marker_in_stderr_fails_workflow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = self._make_wf_config()
+
+            def runner(argv, **kwargs):
+                return subprocess.CompletedProcess(
+                    argv, 0,
+                    stdout='',
+                    stderr='AFLOW_STOP: unrelated changes block this step\n',
+                )
+
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=5),
+                    wf_config, 'simple', config_dir=repo_root, adapter=CodexAdapter(), runner=runner,
+                )
+            assert 'unrelated changes block this step' in str(ctx.value)
+
+    def test_stop_marker_writes_run_json_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = self._make_wf_config()
+
+            def runner(argv, **kwargs):
+                return subprocess.CompletedProcess(
+                    argv, 0,
+                    stdout='AFLOW_STOP: cannot continue\n',
+                    stderr='',
+                )
+
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=5),
+                    wf_config, 'simple', config_dir=repo_root, adapter=CodexAdapter(), runner=runner,
+                )
+            run_dir = ctx.value.run_dir
+            assert run_dir is not None
+            run_json = json.loads((run_dir / 'run.json').read_text(encoding='utf-8'))
+            assert run_json['status'] == 'failed'
+            assert 'cannot continue' in run_json['failure_reason']
+            assert 'AFLOW_STOP' in run_json['failure_reason']
+
+    def test_stop_marker_writes_turn_result_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = self._make_wf_config()
+
+            def runner(argv, **kwargs):
+                return subprocess.CompletedProcess(
+                    argv, 0,
+                    stdout='AFLOW_STOP: fatal blocker\n',
+                    stderr='',
+                )
+
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=5),
+                    wf_config, 'simple', config_dir=repo_root, adapter=CodexAdapter(), runner=runner,
+                )
+            turn_dir = ctx.value.run_dir / 'turns' / 'turn-001'
+            result_json = json.loads((turn_dir / 'result.json').read_text(encoding='utf-8'))
+            assert result_json['status'] == 'harness-failed'
+            assert 'fatal blocker' in result_json['error']
+            assert result_json['stdout'] == 'AFLOW_STOP: fatal blocker\n'
+
+    def test_no_stop_marker_does_not_fail_early(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = self._make_wf_config()
+
+            def runner(argv, **kwargs):
+                _write_plan(plan_path, _COMPLETE_PLAN)
+                return subprocess.CompletedProcess(argv, 0, stdout='all good', stderr='')
+
+            result = run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=5),
+                wf_config, 'simple', config_dir=repo_root, adapter=CodexAdapter(), runner=runner,
+            )
+            assert result.turns_completed == 1
+            assert result.final_snapshot.is_complete
+
+    def test_stop_marker_stdout_takes_priority_over_stderr(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = self._make_wf_config()
+
+            def runner(argv, **kwargs):
+                return subprocess.CompletedProcess(
+                    argv, 0,
+                    stdout='AFLOW_STOP: stdout reason\n',
+                    stderr='AFLOW_STOP: stderr reason\n',
+                )
+
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=5),
+                    wf_config, 'simple', config_dir=repo_root, adapter=CodexAdapter(), runner=runner,
+                )
+            assert 'stdout reason' in str(ctx.value)
+
+    def test_stop_marker_blank_reason_uses_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = self._make_wf_config()
+
+            def runner(argv, **kwargs):
+                return subprocess.CompletedProcess(
+                    argv, 0,
+                    stdout='AFLOW_STOP:\n',
+                    stderr='',
+                )
+
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=5),
+                    wf_config, 'simple', config_dir=repo_root, adapter=CodexAdapter(), runner=runner,
+                )
+            assert 'implementer requested stop without a reason' in str(ctx.value)
+
+
 if __name__ == '__main__':
     unittest.main()

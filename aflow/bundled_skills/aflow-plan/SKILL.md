@@ -121,7 +121,7 @@ Use this checkpoint skeleton:
 
 **Stop and Escalate If:**
 
-- <explicit failure mode>
+- <explicit failure mode — when this condition is irrecoverable, emit `AFLOW_STOP: <reason>` on its own line so the workflow engine fails immediately instead of looping>
 ```
 
 Use this `Git Tracking` skeleton in the final plan:

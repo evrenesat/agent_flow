@@ -603,6 +603,19 @@ def _build_retry_appendix(parse_error_str: str) -> str:
     return f"{_RETRY_APPENDIX_INTRO}{parse_error_str}"
 
 
+_STOP_SENTINEL_PREFIX = "AFLOW_STOP:"
+_STOP_SENTINEL_FALLBACK_REASON = "implementer requested stop without a reason"
+
+
+def _detect_stop_marker(stdout: str, stderr: str) -> str | None:
+    for text in (stdout, stderr):
+        for line in text.splitlines():
+            if line.startswith(_STOP_SENTINEL_PREFIX):
+                reason = line[len(_STOP_SENTINEL_PREFIX):].strip()
+                return reason or _STOP_SENTINEL_FALLBACK_REASON
+    return None
+
+
 def run_workflow(
     config: ControllerConfig,
     workflow_config: WorkflowUserConfig,
@@ -957,6 +970,41 @@ def run_workflow(
                 text=True,
                 check=False,
             )
+
+        stop_reason = _detect_stop_marker(completed.stdout, completed.stderr)
+        if stop_reason is not None:
+            state.status_message = "failed"
+            state.issues_accumulated += 1
+            _finalize_turn_record(
+                status="harness-failed",
+                started_at=turn_started_at,
+                snapshot_before=snapshot_before,
+                snapshot_after=None,
+                invocation=invocation,
+                turn_dir=turn_dir,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+                returncode=completed.returncode,
+                error=f"AFLOW_STOP: {stop_reason}",
+                step_name=current_step_name,
+                selector=step.profile,
+                active_path=active_plan_path,
+                new_path=new_plan_path,
+            )
+            summary = _format_failure(
+                reason=f"workflow stopped by explicit AFLOW_STOP marker: {stop_reason}",
+                run_dir=run_paths.run_dir,
+                snapshot=snapshot_before,
+            )
+            write_run_metadata(
+                run_paths, config, state, status="failed", failure_reason=summary,
+                turns_completed=state.turns_completed,
+                workflow_name=workflow_name, original_plan_path=original_plan_path,
+                current_step_name=current_step_name, active_plan_path=active_plan_path,
+                new_plan_path=new_plan_path,
+            )
+            banner.stop(state)
+            raise WorkflowError(summary, run_dir=run_paths.run_dir)
 
         try:
             parsed_after = load_plan(original_plan_path)
