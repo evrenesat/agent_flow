@@ -330,7 +330,7 @@ The machine-readable `end_reason` values are:
 
 ## Run Logs
 
-Each run writes structured artifacts under `.aflow/runs/<run-id>/`.
+Each workflow invocation writes structured artifacts under exactly one `.aflow/runs/<run-id>/` directory for the life of that run. Turn-start directories are created inside that directory before the harness launches and finalized in-place after it returns. No sibling run directories are created during step-to-step progression.
 
 Saved data includes:
 

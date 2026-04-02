@@ -1,5 +1,17 @@
 # DEVLOG
 
+## 2026-04-02 — Runlog one-run-dir-per-invocation invariant verification
+
+### What changed
+
+- **`tests/test_aflow.py`**: Added `RunlogSingleRunDirTests` with three tests that verify the one-run-dir-per-invocation invariant: (1) a multi-step workflow with multiple turns produces exactly one run directory, (2) turn-start artifacts (user-prompt.txt etc.) exist before the harness completes under the current run's turns/ directory, and (3) no sibling run directory with an empty turns/ appears at any point during the run.
+
+- **`README.md`**: Updated the "Run Logs" section to explicitly state the one-run-dir-per-invocation invariant and that turn directories are created before harness launch and finalized in-place.
+
+### Gotchas
+
+- No code bug was found in the current implementation. `create_run_paths()` is called exactly once in `run_workflow()`, and `write_turn_artifacts_start()` always uses the existing `RunPaths` object. The reported symptom (sibling run dirs with empty turns/ and only run.json) could not be reproduced from the current codebase. The tests were added to document and protect the invariant going forward.
+
 ## 2026-04-02 — AFLOW_STOP sentinel and same-step cap guardrails
 
 ### What changed

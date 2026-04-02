@@ -2139,6 +2139,96 @@ class WorkflowRuntimeTests(unittest.TestCase):
             assert 'current checkpoint unchecked step count: 2' in run_json['failure_reason']
             assert 'current checkpoint unchecked step count: 15' not in run_json['failure_reason']
 
+class RunlogSingleRunDirTests(unittest.TestCase):
+
+    def test_single_run_dir_for_multistep_workflow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = _make_multistep_wf_config()
+            call_count = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                if call_count[0] >= 3:
+                    _write_plan(plan_path, _COMPLETE_PLAN)
+                return subprocess.CompletedProcess(argv, 0, stdout='ok', stderr='')
+
+            result = run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=10),
+                wf_config, 'loop', config_dir=repo_root, adapter=CodexAdapter(), runner=runner,
+            )
+            runs_root = repo_root / '.aflow' / 'runs'
+            run_dirs = [d for d in runs_root.iterdir() if d.is_dir()]
+            assert len(run_dirs) == 1, f"Expected exactly 1 run dir, got {len(run_dirs)}"
+            run_dir = run_dirs[0]
+            assert run_dir == result.run_dir
+            turns_dir = run_dir / 'turns'
+            turn_dirs = sorted(turns_dir.iterdir())
+            assert len(turn_dirs) >= 2
+            assert (run_dir / 'turns' / 'turn-001').is_dir()
+            assert (run_dir / 'turns' / 'turn-002').is_dir()
+
+    def test_turn_start_artifacts_written_under_single_run_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = _make_multistep_wf_config()
+            observed_run_dirs: list[int] = []
+            call_count = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                runs_root = repo_root / '.aflow' / 'runs'
+                if runs_root.exists():
+                    dirs = [d for d in runs_root.iterdir() if d.is_dir()]
+                    observed_run_dirs.append(len(dirs))
+                    current_dir = dirs[0]
+                    turn_dir = current_dir / 'turns' / f'turn-{call_count[0]:03d}'
+                    assert turn_dir.is_dir(), f"turn-start dir should exist before harness completes: {turn_dir}"
+                    assert (turn_dir / 'user-prompt.txt').is_file()
+                if call_count[0] >= 3:
+                    _write_plan(plan_path, _COMPLETE_PLAN)
+                return subprocess.CompletedProcess(argv, 0, stdout='ok', stderr='')
+
+            run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=10),
+                wf_config, 'loop', config_dir=repo_root, adapter=CodexAdapter(), runner=runner,
+            )
+            assert all(n == 1 for n in observed_run_dirs), \
+                f"Run dir count changed during turns: {observed_run_dirs}"
+
+    def test_no_sibling_run_dir_with_empty_turns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = _make_multistep_wf_config()
+            call_count = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                runs_root = repo_root / '.aflow' / 'runs'
+                for run_dir in runs_root.iterdir():
+                    if run_dir.is_dir():
+                        turns_dir = run_dir / 'turns'
+                        turns_content = list(turns_dir.iterdir()) if turns_dir.exists() else []
+                        assert turns_dir.exists(), f"turns/ should exist in {run_dir}"
+                if call_count[0] >= 3:
+                    _write_plan(plan_path, _COMPLETE_PLAN)
+                return subprocess.CompletedProcess(argv, 0, stdout='ok', stderr='')
+
+            run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=10),
+                wf_config, 'loop', config_dir=repo_root, adapter=CodexAdapter(), runner=runner,
+            )
+            runs_root = repo_root / '.aflow' / 'runs'
+            run_dirs = [d for d in runs_root.iterdir() if d.is_dir()]
+            assert len(run_dirs) == 1
+
+
 class WorkflowArtifactTests(unittest.TestCase):
 
     def test_run_json_includes_workflow_metadata(self) -> None:
