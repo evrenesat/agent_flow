@@ -57,19 +57,19 @@ def test_detect_auto_targets_selects_installed_executables(tmp_path: Path, monke
     assert targets[4].destination == Path("~/.agents/skills").expanduser()
 
 
-def test_manual_destination_installs_six_child_directories(tmp_path: Path) -> None:
+def test_manual_destination_installs_seven_child_directories(tmp_path: Path) -> None:
     destination = tmp_path / "skills"
     stdout = io.StringIO()
 
     copied = install_skills(destination=destination, yes=True, stdin=_FakeStdin(True), stdout=stdout)
 
-    assert copied == 6
+    assert copied == 7
     for skill_name in BUNDLED_SKILL_NAMES:
         skill_dir = destination / skill_name
         assert skill_dir.is_dir()
         assert skill_dir.joinpath("SKILL.md").is_file()
     assert "Manual install mode" in stdout.getvalue()
-    assert "Total copy operations: 6" in stdout.getvalue()
+    assert "Total copy operations: 7" in stdout.getvalue()
 
 
 def test_yes_skips_prompt(tmp_path: Path) -> None:
@@ -86,7 +86,7 @@ def test_yes_skips_prompt(tmp_path: Path) -> None:
         stdout=io.StringIO(),
     )
 
-    assert copied == 6
+    assert copied == 7
 
 
 def test_confirmation_decline_performs_no_copies(tmp_path: Path) -> None:
@@ -132,7 +132,7 @@ def test_overwrite_in_place_updates_existing_skill_files_without_pruning_extras(
 
     copied = install_skills(destination=destination, yes=True, stdin=_FakeStdin(True), stdout=io.StringIO())
 
-    assert copied == 6
+    assert copied == 7
     packaged_skill = resources.files("aflow").joinpath("bundled_skills", "aflow-plan", "SKILL.md").read_text(encoding="utf-8")
     assert existing_skill_file.read_text(encoding="utf-8") == packaged_skill
     assert unrelated_file.read_text(encoding="utf-8") == "keep me\n"
@@ -169,7 +169,7 @@ def test_auto_install_codex_copilot_gemini_and_pi_grouped_preview(tmp_path: Path
 
     expanded_dest = str(Path("~/.agents/skills").expanduser())
     assert "codex, copilot, gemini, pi" in preview
-    assert "Total copy operations: 6" in preview
+    assert "Total copy operations: 7" in preview
     assert preview.count(expanded_dest) == 1
 
 
@@ -184,7 +184,7 @@ def test_auto_install_codex_copilot_gemini_and_pi_copies_only_once(tmp_path: Pat
 
     copied = install_skills(yes=True, stdin=_FakeStdin(True), stdout=__import__('io').StringIO())
 
-    assert copied == 6
+    assert copied == 7
     shared_dest = Path("~/.agents/skills").expanduser()
     for skill_name in BUNDLED_SKILL_NAMES:
         assert (shared_dest / skill_name).is_dir()

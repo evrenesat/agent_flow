@@ -16,6 +16,7 @@ BUNDLED_SKILL_NAMES = (
     "aflow-review-squash",
     "aflow-review-checkpoint",
     "aflow-review-final",
+    "aflow-merge",
 )
 
 

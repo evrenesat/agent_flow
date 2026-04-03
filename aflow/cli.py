@@ -48,7 +48,7 @@ INSTALL_SKILLS_HELP = """\
 Auto mode: omit DESTINATION to install the bundled skills into each supported harness skill directory
 for the harness CLIs found on PATH.
 
-Manual mode: provide DESTINATION to install the six bundled skills into that root, one subdirectory
+Manual mode: provide DESTINATION to install the seven bundled skills into that root, one subdirectory
 per skill.
 
 Supported auto targets:

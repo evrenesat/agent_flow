@@ -75,6 +75,27 @@ class AflowSection:
     retry_inconsistent_checkpoint_state: int = 0
     banner_files_limit: int = 10
     max_same_step_turns: int = DEFAULT_MAX_SAME_STEP_TURNS
+    team_lead: str | None = None
+    worktree_prefix: str | None = None
+    branch_prefix: str | None = None
+    worktree_root: str | None = None
+
+
+WORKFLOW_LIFECYCLE_KEYS = frozenset({"setup", "teardown", "main_branch", "merge_prompt"})
+
+VALID_LIFECYCLE_COMBOS: frozenset[tuple[tuple[str, ...], tuple[str, ...]]] = frozenset({
+    ((), ()),
+    (("branch",), ("merge",)),
+    (("worktree", "branch"), ("merge", "rm_worktree")),
+})
+
+
+@dataclass(frozen=True)
+class WorkflowLifecycleDefaults:
+    setup: tuple[str, ...] = ()
+    teardown: tuple[str, ...] = ()
+    main_branch: str | None = None
+    merge_prompt: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -102,6 +123,12 @@ class WorkflowConfig:
     retry_inconsistent_checkpoint_state: int | None = None
     team: str | None = None
     extends: str | None = None
+    # Lifecycle fields: None means "not explicitly set on this workflow" (inherit from base/defaults).
+    # After _materialize_workflows these are always resolved to non-None tuples.
+    setup: tuple[str, ...] | None = None
+    teardown: tuple[str, ...] | None = None
+    main_branch: str | None = None
+    merge_prompt: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -142,6 +169,10 @@ def _parse_aflow_section(raw: Mapping[str, object], *, path: str) -> AflowSectio
         "retry_inconsistent_checkpoint_state",
         "banner_files_limit",
         "max_same_step_turns",
+        "team_lead",
+        "worktree_prefix",
+        "branch_prefix",
+        "worktree_root",
     }
     unknown = sorted(set(raw) - allowed)
     if unknown:
@@ -191,6 +222,16 @@ def _parse_aflow_section(raw: Mapping[str, object], *, path: str) -> AflowSectio
         retry_inconsistent_checkpoint_state=retry_inconsistent_checkpoint_state,
         banner_files_limit=banner_files_limit,
         max_same_step_turns=max_same_step_turns,
+        team_lead=_optional_text(raw.get("team_lead"), path=f"{path}.team_lead"),
+        worktree_prefix=_optional_text(
+            raw.get("worktree_prefix"), path=f"{path}.worktree_prefix"
+        ),
+        branch_prefix=_optional_text(
+            raw.get("branch_prefix"), path=f"{path}.branch_prefix"
+        ),
+        worktree_root=_optional_text(
+            raw.get("worktree_root"), path=f"{path}.worktree_root"
+        ),
     )
 
 
@@ -274,6 +315,14 @@ def _parse_go_transitions(
     return tuple(transitions)
 
 
+def _parse_lifecycle_array(value: object, *, path: str) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise ConfigError(f"expected {path} to be an array")
+    return tuple(
+        _require_text(item, path=f"{path}[{i}]") for i, item in enumerate(value)
+    )
+
+
 def _parse_workflow_steps(
     raw: Mapping[str, object], *, path: str
 ) -> WorkflowConfig:
@@ -324,7 +373,16 @@ def _parse_workflow_steps(
 def _parse_workflow_definition(
     raw: Mapping[str, object], *, path: str
 ) -> WorkflowConfig:
-    allowed = {"steps", "retry_inconsistent_checkpoint_state", "extends", "team"}
+    allowed = {
+        "steps",
+        "retry_inconsistent_checkpoint_state",
+        "extends",
+        "team",
+        "setup",
+        "teardown",
+        "main_branch",
+        "merge_prompt",
+    }
     unknown = sorted(set(raw) - allowed)
     if unknown:
         raise ConfigError(f"unsupported keys in {path}: {', '.join(unknown)}")
@@ -342,6 +400,20 @@ def _parse_workflow_definition(
                 f"{path}.retry_inconsistent_checkpoint_state must be a non-negative integer"
             )
         wf_retry = retry_value
+    wf_setup: tuple[str, ...] | None = None
+    if "setup" in raw:
+        wf_setup = _parse_lifecycle_array(raw["setup"], path=f"{path}.setup")
+    wf_teardown: tuple[str, ...] | None = None
+    if "teardown" in raw:
+        wf_teardown = _parse_lifecycle_array(raw["teardown"], path=f"{path}.teardown")
+    wf_main_branch: str | None = _optional_text(
+        raw.get("main_branch"), path=f"{path}.main_branch"
+    )
+    wf_merge_prompt: tuple[str, ...] | None = None
+    if "merge_prompt" in raw:
+        wf_merge_prompt = _parse_lifecycle_array(
+            raw["merge_prompt"], path=f"{path}.merge_prompt"
+        )
     steps: dict[str, WorkflowStepConfig] = {}
     first_step: str | None = None
     if wf_extends is None:
@@ -361,20 +433,52 @@ def _parse_workflow_definition(
         retry_inconsistent_checkpoint_state=wf_retry,
         team=wf_team,
         extends=wf_extends,
+        setup=wf_setup,
+        teardown=wf_teardown,
+        main_branch=wf_main_branch,
+        merge_prompt=wf_merge_prompt,
+    )
+
+
+def _parse_workflow_lifecycle_defaults(
+    raw: Mapping[str, object], *, path: str
+) -> WorkflowLifecycleDefaults:
+    setup: tuple[str, ...] = ()
+    teardown: tuple[str, ...] = ()
+    main_branch: str | None = None
+    merge_prompt: tuple[str, ...] = ()
+    if "setup" in raw:
+        setup = _parse_lifecycle_array(raw["setup"], path=f"{path}.setup")
+    if "teardown" in raw:
+        teardown = _parse_lifecycle_array(raw["teardown"], path=f"{path}.teardown")
+    if "main_branch" in raw:
+        main_branch = _require_text(raw["main_branch"], path=f"{path}.main_branch")
+    if "merge_prompt" in raw:
+        merge_prompt = _parse_lifecycle_array(
+            raw["merge_prompt"], path=f"{path}.merge_prompt"
+        )
+    return WorkflowLifecycleDefaults(
+        setup=setup,
+        teardown=teardown,
+        main_branch=main_branch,
+        merge_prompt=merge_prompt,
     )
 
 
 def _parse_workflow_tables(
     raw: Mapping[str, object], *, path: str
-) -> dict[str, WorkflowConfig]:
+) -> tuple[WorkflowLifecycleDefaults, dict[str, WorkflowConfig]]:
+    defaults = _parse_workflow_lifecycle_defaults(raw, path=path)
     workflows: dict[str, WorkflowConfig] = {}
     for wf_name, wf_value in raw.items():
+        if wf_name in WORKFLOW_LIFECYCLE_KEYS:
+            continue
         wf_key = _require_text(wf_name, path=f"{path} key")
         wf_table = _require_table(wf_value, path=f"{path}.{wf_key}")
         workflows[wf_key] = _parse_workflow_definition(
             wf_table, path=f"{path}.{wf_key}"
         )
-    return workflows
+    return defaults, workflows
 
 
 def _validate_workflow_transitions(
@@ -395,6 +499,7 @@ def _validate_workflow_transitions(
 def _materialize_workflows(
     raw_workflows: dict[str, WorkflowConfig],
     *,
+    lifecycle_defaults: WorkflowLifecycleDefaults,
     path: str,
 ) -> dict[str, WorkflowConfig]:
     resolved: dict[str, WorkflowConfig] = {}
@@ -416,6 +521,10 @@ def _materialize_workflows(
                 retry_inconsistent_checkpoint_state=raw_wf.retry_inconsistent_checkpoint_state,
                 team=raw_wf.team,
                 extends=None,
+                setup=raw_wf.setup if raw_wf.setup is not None else lifecycle_defaults.setup,
+                teardown=raw_wf.teardown if raw_wf.teardown is not None else lifecycle_defaults.teardown,
+                main_branch=raw_wf.main_branch if raw_wf.main_branch is not None else lifecycle_defaults.main_branch,
+                merge_prompt=raw_wf.merge_prompt if raw_wf.merge_prompt is not None else lifecycle_defaults.merge_prompt,
             )
             _validate_workflow_transitions(concrete, path=f"{path}.{name}")
         else:
@@ -436,6 +545,10 @@ def _materialize_workflows(
                 retry_inconsistent_checkpoint_state=base.retry_inconsistent_checkpoint_state,
                 team=raw_wf.team if raw_wf.team is not None else base.team,
                 extends=None,
+                setup=raw_wf.setup if raw_wf.setup is not None else base.setup,
+                teardown=raw_wf.teardown if raw_wf.teardown is not None else base.teardown,
+                main_branch=raw_wf.main_branch if raw_wf.main_branch is not None else base.main_branch,
+                merge_prompt=raw_wf.merge_prompt if raw_wf.merge_prompt is not None else base.merge_prompt,
             )
             _validate_workflow_transitions(concrete, path=f"{path}.{name}")
         resolving.remove(name)
@@ -492,10 +605,14 @@ def _parse_workflow_user_config(
     workflows: dict[str, WorkflowConfig] = {}
     if "workflow" in raw:
         workflows_table = _require_table(raw["workflow"], path=f"{path}.workflow")
-        raw_workflows = _parse_workflow_tables(
+        lifecycle_defaults, raw_workflows = _parse_workflow_tables(
             workflows_table, path=f"{path}.workflow"
         )
-        workflows = _materialize_workflows(raw_workflows, path=f"{path}.workflow")
+        workflows = _materialize_workflows(
+            raw_workflows,
+            lifecycle_defaults=lifecycle_defaults,
+            path=f"{path}.workflow",
+        )
     prompts: dict[str, str] = {}
     if "prompts" in raw:
         prompts_table = _require_table(raw["prompts"], path=f"{path}.prompts")
@@ -674,5 +791,39 @@ def validate_workflow_config(
                     errors.append(
                         f"workflow.{wf_name}.steps.{step_name}.prompts[{prompt_index}] "
                         f"references unknown prompt '{prompt_key}'"
+                    )
+        wf_setup = wf_config.setup or ()
+        wf_teardown = wf_config.teardown or ()
+        if (wf_setup, wf_teardown) not in VALID_LIFECYCLE_COMBOS:
+            errors.append(
+                f"workflow.{wf_name} has unsupported lifecycle combination "
+                f"setup={list(wf_setup)} teardown={list(wf_teardown)}"
+            )
+        for mp_index, mp_key in enumerate(wf_config.merge_prompt or ()):
+            if mp_key not in config.prompts:
+                errors.append(
+                    f"workflow.{wf_name}.merge_prompt[{mp_index}] "
+                    f"references unknown prompt '{mp_key}'"
+                )
+        if "merge" in wf_teardown:
+            team_lead_role = config.aflow.team_lead
+            if not team_lead_role:
+                errors.append(
+                    f"workflow.{wf_name} uses merge teardown but [aflow].team_lead is not set"
+                )
+            else:
+                effective_team = wf_config.team
+                if effective_team is not None and effective_team in config.teams:
+                    team_roles = config.teams[effective_team]
+                    if team_lead_role not in team_roles and team_lead_role not in config.roles:
+                        errors.append(
+                            f"workflow.{wf_name} uses merge but team_lead role "
+                            f"'{team_lead_role}' cannot be resolved through team "
+                            f"'{effective_team}' or global roles"
+                        )
+                elif team_lead_role not in config.roles:
+                    errors.append(
+                        f"workflow.{wf_name} uses merge but team_lead role "
+                        f"'{team_lead_role}' cannot be resolved through global roles"
                     )
     return errors

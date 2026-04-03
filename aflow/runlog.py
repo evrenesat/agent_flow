@@ -8,7 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from .plan import PlanSnapshot
-from .run_state import ControllerConfig, ControllerState, RetryContext, WorkflowEndReason
+from .run_state import ControllerConfig, ControllerState, ExecutionContext, RetryContext, WorkflowEndReason
 from .harnesses.base import HarnessInvocation
 
 
@@ -154,8 +154,11 @@ def write_run_metadata(
     state: ControllerState | None,
     *,
     status: str,
+    execution_context: ExecutionContext | None = None,
     end_reason: WorkflowEndReason | None = None,
     failure_reason: str | None = None,
+    merge_status: str | None = None,
+    merge_failure_reason: str | None = None,
     last_snapshot: PlanSnapshot | None = None,
     turns_completed: int | None = None,
     workflow_name: str | None = None,
@@ -176,6 +179,14 @@ def write_run_metadata(
         "turns_completed": turns_completed if turns_completed is not None else (state.turns_completed if state else 0),
         "last_snapshot": _snapshot_payload(last_snapshot if last_snapshot is not None else (state.last_snapshot if state else None)),
     }
+    if execution_context is not None:
+        payload["execution_repo_root"] = str(execution_context.execution_repo_root)
+        payload["feature_branch"] = execution_context.feature_branch
+        payload["main_branch"] = execution_context.main_branch
+        payload["lifecycle_setup"] = list(execution_context.setup)
+        payload["lifecycle_teardown"] = list(execution_context.teardown)
+        if execution_context.worktree_path is not None:
+            payload["worktree_path"] = str(execution_context.worktree_path)
     if workflow_name is not None:
         payload["workflow_name"] = workflow_name
     if current_step_name is not None:
@@ -203,6 +214,10 @@ def write_run_metadata(
         payload["end_reason"] = end_reason
     if failure_reason is not None:
         payload["failure_reason"] = failure_reason
+    if merge_status is not None:
+        payload["merge_status"] = merge_status
+    if merge_failure_reason is not None:
+        payload["merge_failure_reason"] = merge_failure_reason
     effective_retry = pending_retry if pending_retry is not None else (state.pending_retry if state is not None else None)
     if effective_retry is not None:
         payload["pending_retry_step_name"] = effective_retry.step_name

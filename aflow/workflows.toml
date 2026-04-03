@@ -1,4 +1,11 @@
 #### WORKFLOWS ####
+
+# Default lifecycle settings inherited by all workflows that do not override them.
+[workflow]
+setup = ["worktree", "branch"]
+teardown = ["merge", "rm_worktree"]
+main_branch = "main"
+
 # Ralph loop, single-step implementation with no review phase.
 [workflow.ralph.steps.implement_plan]
 # The step runs under a role. The selected team decides which selector that role maps to at runtime.
@@ -11,11 +18,13 @@ go = [
   { to = "implement_plan" },
 ]
 
-# Alias workflow, inherits `ralph` and only swaps the team.
+# Alias workflow, inherits `ralph` steps but runs branch-only lifecycle with a per-workflow merge prompt.
 [workflow.ralph_jr]
 extends = "ralph"
 team = "7teen"
-
+setup = ["branch"]
+teardown = ["merge"]
+merge_prompt = ["simple_merge"]
 
 
 # Review, implement, then squash approved follow-up work into one final commit.

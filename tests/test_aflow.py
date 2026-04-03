@@ -26,7 +26,7 @@ from aflow.harnesses.opencode import OpencodeAdapter
 from aflow.harnesses.pi import PiAdapter
 from aflow.harnesses.base import HarnessInvocation
 from aflow.plan import PlanParseError, PlanSnapshot, load_plan, load_plan_tolerant
-from aflow.run_state import ControllerConfig, ControllerState, RetryContext, TurnRecord
+from aflow.run_state import ControllerConfig, ControllerState, ExecutionContext, RetryContext, TurnRecord
 from aflow.runlog import prune_old_runs
 from aflow.status import build_banner
 import pytest
@@ -1565,10 +1565,16 @@ class WorkflowConfigTests(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[1]
         config = load_workflow_config(repo_root / 'aflow' / 'aflow.toml')
         assert config.aflow.max_turns == 15
+        assert config.aflow.team_lead == 'senior_architect'
         assert config.roles['architect'] == 'claude.opus'
         assert config.teams['7teen']['worker'] == 'codex.nano'
         assert config.workflows['ralph'].steps['implement_plan'].role == 'worker'
+        assert config.workflows['ralph'].setup == ('worktree', 'branch')
+        assert config.workflows['ralph'].teardown == ('merge', 'rm_worktree')
         assert config.workflows['ralph_jr'].team == '7teen'
+        assert config.workflows['ralph_jr'].setup == ('branch',)
+        assert config.workflows['ralph_jr'].teardown == ('merge',)
+        assert config.workflows['ralph_jr'].merge_prompt == ('simple_merge',)
         assert 'hard' in config.workflows
         assert 'jr' in config.workflows
         assert validate_workflow_config(config) == []
@@ -1591,9 +1597,37 @@ class WorkflowConfigTests(unittest.TestCase):
         assert '# Harness profiles map a harness name to the model and effort values it should run.' in aflow_text
         assert '# Team-specific role overrides. Missing roles fall back to the global [roles] map.' in aflow_text
         assert '# Named prompt templates that workflow steps reference by key.' in aflow_text
-        assert '# Alias workflow, inherits `ralph` and only swaps the team.' in workflows_text
+        assert '# Alias workflow, inherits `ralph` steps but runs branch-only lifecycle with a per-workflow merge prompt.' in workflows_text
         assert '# The step runs under a role. The selected team decides which selector that role maps to at runtime.' in workflows_text
         assert '# Transition rules are checked top to bottom. Each rule uses a `to` target and an optional `when` condition.' in workflows_text
+
+        # lifecycle config docs parity
+        assert 'team_lead' in readme
+        assert 'worktree_root' in readme
+        assert 'branch_prefix' in readme
+        assert 'setup' in readme
+        assert 'teardown' in readme
+        assert 'merge_prompt' in readme
+        assert 'aflow-merge' in readme
+        assert 'seven bundled skills' in readme
+
+        assert 'team_lead' in architecture
+        assert 'worktree_root' in architecture
+        assert 'ExecutionContext' in architecture
+        assert 'aflow-merge' in architecture
+        assert 'seven' in architecture
+
+        # lifecycle defaults table is documented in workflows.toml
+        assert '[workflow]' in workflows_text
+        assert 'setup' in workflows_text
+        assert 'teardown' in workflows_text
+        assert 'main_branch' in workflows_text
+
+        # merge-only placeholders are documented in README
+        assert '{MAIN_BRANCH}' in readme
+        assert '{FEATURE_BRANCH}' in readme
+        assert '{PRIMARY_REPO_ROOT}' in readme
+        assert '{EXECUTION_REPO_ROOT}' in readme
 
     def test_bootstrap_creates_config_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1742,6 +1776,182 @@ class WorkflowConfigTests(unittest.TestCase):
             with pytest.raises(ConfigError) as ctx:
                 load_workflow_config(config_path)
             assert 'to' in str(ctx.value)
+
+    def test_lifecycle_defaults_inherited_by_concrete_workflow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                '[workflow]\nsetup = ["branch"]\nteardown = ["merge"]\nmain_branch = "main"\n\n'
+                '[workflow.simple.steps.s1]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n'
+                '[aflow]\nteam_lead = "architect"\n\n'
+                '[harness.opencode.profiles.default]\nmodel = "m"\n\n'
+                '[roles]\narchitect = "opencode.default"\n\n'
+                '[prompts]\np = "do it"\n',
+            )
+            config = load_workflow_config(config_path)
+            wf = config.workflows['simple']
+            assert wf.setup == ('branch',)
+            assert wf.teardown == ('merge',)
+            assert wf.main_branch == 'main'
+            assert wf.merge_prompt == ()
+
+    def test_lifecycle_alias_can_override_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                '[workflow]\nsetup = ["worktree", "branch"]\nteardown = ["merge", "rm_worktree"]\nmain_branch = "main"\n\n'
+                '[workflow.base.steps.s1]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n'
+                '[workflow.alias]\nextends = "base"\nsetup = ["branch"]\nteardown = ["merge"]\n\n'
+                '[aflow]\nteam_lead = "architect"\n\n'
+                '[harness.opencode.profiles.default]\nmodel = "m"\n\n'
+                '[roles]\narchitect = "opencode.default"\n\n'
+                '[prompts]\np = "do it"\n',
+            )
+            config = load_workflow_config(config_path)
+            base = config.workflows['base']
+            alias = config.workflows['alias']
+            assert base.setup == ('worktree', 'branch')
+            assert base.teardown == ('merge', 'rm_worktree')
+            assert alias.setup == ('branch',)
+            assert alias.teardown == ('merge',)
+            assert alias.main_branch == 'main'
+
+    def test_lifecycle_alias_cannot_redefine_steps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                '[workflow.base.steps.s1]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n'
+                '[workflow.alias]\nextends = "base"\nsetup = ["branch"]\nteardown = ["merge"]\n\n'
+                '[workflow.alias.steps.s1]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n'
+                '[harness.opencode.profiles.default]\nmodel = "m"\n\n'
+                '[roles]\narchitect = "opencode.default"\n\n'
+                '[prompts]\np = "do it"\n',
+            )
+            with pytest.raises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            assert 'steps' in str(ctx.value)
+
+    def test_lifecycle_invalid_combo_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                '[workflow.simple]\nsetup = ["branch"]\nteardown = ["rm_worktree"]\n\n'
+                '[workflow.simple.steps.s1]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n'
+                '[harness.opencode.profiles.default]\nmodel = "m"\n\n'
+                '[roles]\narchitect = "opencode.default"\n\n'
+                '[prompts]\np = "do it"\n',
+            )
+            with pytest.raises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            assert 'unsupported lifecycle combination' in str(ctx.value)
+
+    def test_lifecycle_wrong_order_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                '[workflow.simple]\nsetup = ["branch", "worktree"]\nteardown = ["merge", "rm_worktree"]\n\n'
+                '[workflow.simple.steps.s1]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n'
+                '[harness.opencode.profiles.default]\nmodel = "m"\n\n'
+                '[roles]\narchitect = "opencode.default"\n\n'
+                '[prompts]\np = "do it"\n',
+            )
+            with pytest.raises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            assert 'unsupported lifecycle combination' in str(ctx.value)
+
+    def test_lifecycle_merge_requires_team_lead(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                '[workflow.simple]\nsetup = ["branch"]\nteardown = ["merge"]\nmain_branch = "main"\n\n'
+                '[workflow.simple.steps.s1]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n'
+                '[harness.opencode.profiles.default]\nmodel = "m"\n\n'
+                '[roles]\narchitect = "opencode.default"\n\n'
+                '[prompts]\np = "do it"\n',
+            )
+            with pytest.raises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            assert 'team_lead' in str(ctx.value)
+
+    def test_lifecycle_team_lead_unresolvable_for_team(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                '[aflow]\nteam_lead = "senior_architect"\n\n'
+                '[workflow.simple]\nsetup = ["branch"]\nteardown = ["merge"]\nmain_branch = "main"\nteam = "7teen"\n\n'
+                '[workflow.simple.steps.s1]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n'
+                '[harness.opencode.profiles.default]\nmodel = "m"\n\n'
+                '[roles]\narchitect = "opencode.default"\n\n'
+                '[teams.7teen]\narchitect = "opencode.default"\n\n'
+                '[prompts]\np = "do it"\n',
+            )
+            with pytest.raises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            assert 'team_lead' in str(ctx.value)
+            assert 'senior_architect' in str(ctx.value)
+
+    def test_lifecycle_team_lead_resolves_via_global_roles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                '[aflow]\nteam_lead = "senior_architect"\n\n'
+                '[workflow.simple]\nsetup = ["branch"]\nteardown = ["merge"]\nmain_branch = "main"\nteam = "7teen"\n\n'
+                '[workflow.simple.steps.s1]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n'
+                '[harness.opencode.profiles.default]\nmodel = "m"\n\n'
+                '[roles]\narchitect = "opencode.default"\nsenior_architect = "opencode.default"\n\n'
+                '[teams.7teen]\narchitect = "opencode.default"\n\n'
+                '[prompts]\np = "do it"\n',
+            )
+            config = load_workflow_config(config_path)
+            assert validate_workflow_config(config) == []
+            assert config.workflows['simple'].setup == ('branch',)
+
+    def test_lifecycle_merge_prompt_unknown_key_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                '[aflow]\nteam_lead = "architect"\n\n'
+                '[workflow.simple]\nsetup = ["branch"]\nteardown = ["merge"]\nmain_branch = "main"\nmerge_prompt = ["nonexistent_prompt"]\n\n'
+                '[workflow.simple.steps.s1]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n'
+                '[harness.opencode.profiles.default]\nmodel = "m"\n\n'
+                '[roles]\narchitect = "opencode.default"\n\n'
+                '[prompts]\np = "do it"\n',
+            )
+            with pytest.raises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            assert 'nonexistent_prompt' in str(ctx.value)
+
+    def test_lifecycle_no_lifecycle_combo_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                '[workflow.simple]\nsetup = []\nteardown = []\n\n'
+                '[workflow.simple.steps.s1]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n'
+                '[harness.opencode.profiles.default]\nmodel = "m"\n\n'
+                '[roles]\narchitect = "opencode.default"\n\n'
+                '[prompts]\np = "do it"\n',
+            )
+            config = load_workflow_config(config_path)
+            wf = config.workflows['simple']
+            assert wf.setup == ()
+            assert wf.teardown == ()
+
+    def test_lifecycle_worktree_branch_combo_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                '[aflow]\nteam_lead = "architect"\n\n'
+                '[workflow.simple]\nsetup = ["worktree", "branch"]\nteardown = ["merge", "rm_worktree"]\nmain_branch = "main"\n\n'
+                '[workflow.simple.steps.s1]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n'
+                '[harness.opencode.profiles.default]\nmodel = "m"\n\n'
+                '[roles]\narchitect = "opencode.default"\n\n'
+                '[prompts]\np = "do it"\n',
+            )
+            config = load_workflow_config(config_path)
+            wf = config.workflows['simple']
+            assert wf.setup == ('worktree', 'branch')
+            assert wf.teardown == ('merge', 'rm_worktree')
+            assert validate_workflow_config(config) == []
 
 class WorkflowRuntimeTests(unittest.TestCase):
 
@@ -3350,7 +3560,7 @@ class SkillDocsTests(unittest.TestCase):
     def test_skill_files_do_not_contain_workflow_placeholders(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         placeholders = ('{ORIGINAL_PLAN_PATH}', '{ACTIVE_PLAN_PATH}', '{NEW_PLAN_PATH}')
-        for skill_name in ('aflow-plan', 'aflow-execute-plan', 'aflow-execute-checkpoint', 'aflow-review-squash', 'aflow-review-checkpoint', 'aflow-review-final'):
+        for skill_name in ('aflow-plan', 'aflow-execute-plan', 'aflow-execute-checkpoint', 'aflow-review-squash', 'aflow-review-checkpoint', 'aflow-review-final', 'aflow-merge'):
             skill_path = repo_root / 'aflow' / 'bundled_skills' / skill_name / 'SKILL.md'
             text = skill_path.read_text(encoding='utf-8')
             for placeholder in placeholders:
@@ -3365,6 +3575,7 @@ class SkillDocsTests(unittest.TestCase):
             'aflow-review-squash',
             'aflow-review-checkpoint',
             'aflow-review-final',
+            'aflow-merge',
         ):
             skill_path = repo_root / 'aflow' / 'bundled_skills' / skill_name / 'SKILL.md'
             assert skill_path.exists()
@@ -5090,6 +5301,748 @@ class StopMarkerTests(unittest.TestCase):
             )
             assert result.turns_completed == 1
             assert result.final_snapshot.is_complete
+
+
+def _make_lifecycle_git_repo(path: Path, branch: str = 'main') -> Path:
+    """Initialize a git repo with an initial commit on the given branch."""
+    subprocess.run(['git', 'init', '-b', branch], cwd=str(path), check=True, capture_output=True)
+    subprocess.run(['git', 'config', 'user.email', 'test@test.com'], cwd=str(path), check=True, capture_output=True)
+    subprocess.run(['git', 'config', 'user.name', 'Test'], cwd=str(path), check=True, capture_output=True)
+    readme = path / 'README.md'
+    readme.write_text('test repo\n', encoding='utf-8')
+    subprocess.run(['git', 'add', 'README.md'], cwd=str(path), check=True, capture_output=True)
+    subprocess.run(['git', 'commit', '-m', 'init'], cwd=str(path), check=True, capture_output=True)
+    return path
+
+
+def _git_commit_file(repo_root: Path, file_path: Path) -> None:
+    """Stage and commit a single file in a git repo."""
+    subprocess.run(['git', 'add', str(file_path)], cwd=str(repo_root), check=True, capture_output=True)
+    subprocess.run(['git', 'commit', '-m', 'add file'], cwd=str(repo_root), check=True, capture_output=True)
+
+
+def _make_branch_only_wf_config(main_branch: str = 'main') -> WorkflowUserConfig:
+    """Build a minimal branch-only lifecycle workflow config."""
+    return WorkflowUserConfig(
+        aflow=AflowSection(team_lead='senior_architect'),
+        roles={
+            'architect': 'codex.default',
+            'senior_architect': 'codex.default',
+        },
+        harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='m')})},
+        workflows={'branch_wf': WorkflowConfig(
+            steps={'impl': WorkflowStepConfig(
+                role='architect',
+                prompts=('p',),
+                go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='impl')),
+            )},
+            first_step='impl',
+            setup=('branch',),
+            teardown=('merge',),
+            main_branch=main_branch,
+        )},
+        prompts={'p': 'Work from {ACTIVE_PLAN_PATH}.'},
+    )
+
+
+def _make_worktree_wf_config(main_branch: str = 'main', worktree_root: str = '/tmp/worktrees') -> WorkflowUserConfig:
+    """Build a minimal worktree lifecycle workflow config."""
+    return WorkflowUserConfig(
+        aflow=AflowSection(team_lead='senior_architect', worktree_root=worktree_root),
+        roles={
+            'architect': 'codex.default',
+            'senior_architect': 'codex.default',
+        },
+        harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='m')})},
+        workflows={'wt_wf': WorkflowConfig(
+            steps={'impl': WorkflowStepConfig(
+                role='architect',
+                prompts=('p',),
+                go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='impl')),
+            )},
+            first_step='impl',
+            setup=('worktree', 'branch'),
+            teardown=('merge', 'rm_worktree'),
+            main_branch=main_branch,
+        )},
+        prompts={'p': 'Work from {ACTIVE_PLAN_PATH}.'},
+    )
+
+
+class WorkflowLifecycleRuntimeTests(unittest.TestCase):
+
+    def test_preflight_fails_when_not_on_main_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            _git_commit_file(repo_root, plan_path)
+            subprocess.run(['git', 'checkout', '-b', 'other'], cwd=str(repo_root), check=True, capture_output=True)
+            wf_config = _make_branch_only_wf_config(main_branch='main')
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=1),
+                    wf_config, 'branch_wf', config_dir=repo_root,
+                )
+            assert 'main' in str(ctx.value)
+            assert 'other' in str(ctx.value)
+
+    def test_preflight_fails_when_main_branch_does_not_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            _git_commit_file(repo_root, plan_path)
+            wf_config = _make_branch_only_wf_config(main_branch='nonexistent')
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=1),
+                    wf_config, 'branch_wf', config_dir=repo_root,
+                )
+            assert 'nonexistent' in str(ctx.value)
+
+    def test_preflight_fails_when_worktree_plan_outside_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_root = root / 'repo'
+            repo_root.mkdir()
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            worktree_root = root / 'worktrees'
+            worktree_root.mkdir()
+            plan_path = root / 'outside_plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = _make_worktree_wf_config(worktree_root=str(worktree_root))
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=1),
+                    wf_config, 'wt_wf', config_dir=repo_root,
+                )
+            assert 'primary repo root' in str(ctx.value)
+            assert str(plan_path) in str(ctx.value)
+
+    def test_preflight_fails_when_working_tree_is_dirty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            _git_commit_file(repo_root, plan_path)
+            (repo_root / 'dirty.txt').write_text('uncommitted\n', encoding='utf-8')
+            wf_config = _make_branch_only_wf_config(main_branch='main')
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=1),
+                    wf_config, 'branch_wf', config_dir=repo_root,
+                )
+            assert 'uncommitted changes' in str(ctx.value)
+
+    def test_branch_only_setup_creates_feature_branch_and_uses_primary_as_exec_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            _git_commit_file(repo_root, plan_path)
+            wf_config = _make_branch_only_wf_config(main_branch='main')
+            workflow_step_cwd: list[str] = []
+            call_count: list[int] = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                cwd = Path(kwargs['cwd'])
+                if call_count[0] == 1:
+                    workflow_step_cwd.append(str(cwd))
+                    _write_plan(plan_path, _COMPLETE_PLAN)
+                    _run_git_in_test(['add', str(plan_path)], cwd=cwd)
+                    _run_git_in_test(['commit', '-m', 'complete'], cwd=cwd)
+                else:
+                    _git_merge_feature_into_main(cwd, 'main')
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                wf_config, 'branch_wf', config_dir=repo_root,
+                adapter=CodexAdapter(), runner=runner,
+            )
+            assert len(workflow_step_cwd) == 1
+            assert workflow_step_cwd[0] == str(repo_root)
+            rc, branches, _ = _run_git_in_test(['branch', '--list', 'aflow-*'], cwd=repo_root)
+            assert rc == 0
+            feature_branches = [b.strip().lstrip('+* ') for b in branches.splitlines() if b.strip()]
+            assert len(feature_branches) == 1
+
+    def test_branch_only_run_json_records_lifecycle_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            _git_commit_file(repo_root, plan_path)
+            wf_config = _make_branch_only_wf_config(main_branch='main')
+            call_count: list[int] = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                cwd = Path(kwargs['cwd'])
+                if call_count[0] == 1:
+                    _write_plan(plan_path, _COMPLETE_PLAN)
+                    _run_git_in_test(['add', str(plan_path)], cwd=cwd)
+                    _run_git_in_test(['commit', '-m', 'complete'], cwd=cwd)
+                else:
+                    _git_merge_feature_into_main(cwd, 'main')
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            result = run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                wf_config, 'branch_wf', config_dir=repo_root,
+                adapter=CodexAdapter(), runner=runner,
+            )
+            run_json = json.loads((result.run_dir / 'run.json').read_text(encoding='utf-8'))
+            assert run_json['execution_repo_root'] == str(repo_root)
+            assert run_json['main_branch'] == 'main'
+            assert 'feature_branch' in run_json
+            assert run_json['feature_branch'].startswith('aflow-')
+            assert run_json['lifecycle_setup'] == ['branch']
+            assert run_json['lifecycle_teardown'] == ['merge']
+            assert 'worktree_path' not in run_json
+
+    def test_worktree_setup_creates_worktree_and_uses_it_as_exec_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_root = root / 'repo'
+            repo_root.mkdir()
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            worktree_root = root / 'worktrees'
+            worktree_root.mkdir()
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            _git_commit_file(repo_root, plan_path)
+            wf_config = _make_worktree_wf_config(worktree_root=str(worktree_root))
+            workflow_step_cwd: list[str] = []
+            call_count: list[int] = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                cwd = Path(kwargs['cwd'])
+                if call_count[0] == 1:
+                    workflow_step_cwd.append(str(cwd))
+                    exec_plan = cwd / plan_path.relative_to(repo_root)
+                    _write_plan(exec_plan, _COMPLETE_PLAN)
+                    _run_git_in_test(['add', str(exec_plan)], cwd=cwd)
+                    _run_git_in_test(['commit', '-m', 'complete'], cwd=cwd)
+                else:
+                    _git_merge_feature_into_main(cwd, 'main')
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                wf_config, 'wt_wf', config_dir=repo_root,
+                adapter=CodexAdapter(), runner=runner,
+            )
+            assert len(workflow_step_cwd) == 1
+            exec_root_path = Path(workflow_step_cwd[0])
+            assert exec_root_path.resolve() != repo_root.resolve()
+            assert exec_root_path.parent.resolve() == worktree_root.resolve()
+            rc, _, _ = _run_git_in_test(['worktree', 'list', '--porcelain'], cwd=repo_root)
+            assert rc == 0
+
+    def test_worktree_run_json_records_lifecycle_context_with_worktree_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_root = root / 'repo'
+            repo_root.mkdir()
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            worktree_root = root / 'worktrees'
+            worktree_root.mkdir()
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            _git_commit_file(repo_root, plan_path)
+            wf_config = _make_worktree_wf_config(worktree_root=str(worktree_root))
+            call_count: list[int] = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                cwd = Path(kwargs['cwd'])
+                if call_count[0] == 1:
+                    exec_plan = cwd / plan_path.relative_to(repo_root)
+                    _write_plan(exec_plan, _COMPLETE_PLAN)
+                    _run_git_in_test(['add', str(exec_plan)], cwd=cwd)
+                    _run_git_in_test(['commit', '-m', 'complete'], cwd=cwd)
+                else:
+                    _git_merge_feature_into_main(cwd, 'main')
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            result = run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                wf_config, 'wt_wf', config_dir=repo_root,
+                adapter=CodexAdapter(), runner=runner,
+            )
+            run_json = json.loads((result.run_dir / 'run.json').read_text(encoding='utf-8'))
+            assert run_json['repo_root'] == str(repo_root)
+            assert 'execution_repo_root' in run_json
+            assert run_json['execution_repo_root'] != str(repo_root)
+            assert run_json['main_branch'] == 'main'
+            assert 'feature_branch' in run_json
+            assert 'worktree_path' in run_json
+            assert run_json['worktree_path'] == run_json['execution_repo_root']
+            assert run_json['lifecycle_setup'] == ['worktree', 'branch']
+            assert run_json['lifecycle_teardown'] == ['merge', 'rm_worktree']
+
+    def test_branch_only_adapter_invocation_uses_primary_repo_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            _git_commit_file(repo_root, plan_path)
+            wf_config = _make_branch_only_wf_config(main_branch='main')
+            captured_repo_roots: list[str] = []
+            call_count: list[int] = [0]
+
+            class TrackingAdapter:
+                name = 'codex'
+                supports_effort = True
+
+                def build_invocation(self, *, repo_root, model, system_prompt, user_prompt, effort=None):
+                    captured_repo_roots.append(str(repo_root))
+                    from aflow.harnesses.codex import CodexAdapter as CA
+                    return CA().build_invocation(
+                        repo_root=repo_root, model=model,
+                        system_prompt=system_prompt, user_prompt=user_prompt, effort=effort,
+                    )
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                cwd = Path(kwargs['cwd'])
+                if call_count[0] == 1:
+                    _write_plan(plan_path, _COMPLETE_PLAN)
+                    _run_git_in_test(['add', str(plan_path)], cwd=cwd)
+                    _run_git_in_test(['commit', '-m', 'complete'], cwd=cwd)
+                else:
+                    _git_merge_feature_into_main(cwd, 'main')
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                wf_config, 'branch_wf', config_dir=repo_root,
+                adapter=TrackingAdapter(), runner=runner,
+            )
+            assert len(captured_repo_roots) >= 1
+            assert captured_repo_roots[0] == str(repo_root)
+
+    def test_worktree_adapter_invocation_uses_worktree_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_root = root / 'repo'
+            repo_root.mkdir()
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            worktree_root = root / 'worktrees'
+            worktree_root.mkdir()
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            _git_commit_file(repo_root, plan_path)
+            wf_config = _make_worktree_wf_config(worktree_root=str(worktree_root))
+            captured_repo_roots: list[str] = []
+            call_count: list[int] = [0]
+
+            class TrackingAdapter:
+                name = 'codex'
+                supports_effort = True
+
+                def build_invocation(self, *, repo_root, model, system_prompt, user_prompt, effort=None):
+                    captured_repo_roots.append(str(repo_root))
+                    from aflow.harnesses.codex import CodexAdapter as CA
+                    return CA().build_invocation(
+                        repo_root=repo_root, model=model,
+                        system_prompt=system_prompt, user_prompt=user_prompt, effort=effort,
+                    )
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                cwd = Path(kwargs['cwd'])
+                if call_count[0] == 1:
+                    exec_plan = cwd / plan_path.relative_to(repo_root)
+                    _write_plan(exec_plan, _COMPLETE_PLAN)
+                    _run_git_in_test(['add', str(exec_plan)], cwd=cwd)
+                    _run_git_in_test(['commit', '-m', 'complete'], cwd=cwd)
+                else:
+                    _git_merge_feature_into_main(cwd, 'main')
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                wf_config, 'wt_wf', config_dir=repo_root,
+                adapter=TrackingAdapter(), runner=runner,
+            )
+            assert len(captured_repo_roots) >= 1
+            assert Path(captured_repo_roots[0]).resolve() != repo_root.resolve()
+            assert Path(captured_repo_roots[0]).parent.resolve() == worktree_root.resolve()
+
+    def test_run_artifacts_stay_under_primary_repo_root_in_worktree_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_root = root / 'repo'
+            repo_root.mkdir()
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            worktree_root = root / 'worktrees'
+            worktree_root.mkdir()
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            _git_commit_file(repo_root, plan_path)
+            wf_config = _make_worktree_wf_config(worktree_root=str(worktree_root))
+            call_count: list[int] = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                cwd = Path(kwargs['cwd'])
+                if call_count[0] == 1:
+                    exec_plan = cwd / plan_path.relative_to(repo_root)
+                    _write_plan(exec_plan, _COMPLETE_PLAN)
+                    _run_git_in_test(['add', str(exec_plan)], cwd=cwd)
+                    _run_git_in_test(['commit', '-m', 'complete'], cwd=cwd)
+                else:
+                    _git_merge_feature_into_main(cwd, 'main')
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            result = run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                wf_config, 'wt_wf', config_dir=repo_root,
+                adapter=CodexAdapter(), runner=runner,
+            )
+            assert result.run_dir.is_relative_to(repo_root)
+            assert not result.run_dir.is_relative_to(worktree_root)
+
+    def test_branch_name_does_not_contain_literal_placeholder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            plan_path = repo_root / 'my-test-plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            _git_commit_file(repo_root, plan_path)
+            wf_config = _make_branch_only_wf_config(main_branch='main')
+            call_count: list[int] = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                cwd = Path(kwargs['cwd'])
+                if call_count[0] == 1:
+                    _write_plan(plan_path, _COMPLETE_PLAN)
+                    _run_git_in_test(['add', str(plan_path)], cwd=cwd)
+                    _run_git_in_test(['commit', '-m', 'complete'], cwd=cwd)
+                else:
+                    _git_merge_feature_into_main(cwd, 'main')
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            result = run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                wf_config, 'branch_wf', config_dir=repo_root,
+                adapter=CodexAdapter(), runner=runner,
+            )
+            run_json = json.loads((result.run_dir / 'run.json').read_text(encoding='utf-8'))
+            feature_branch = run_json['feature_branch']
+            assert '{' not in feature_branch
+            assert '}' not in feature_branch
+            assert feature_branch.startswith('aflow-my-test-plan-')
+
+    def test_worktree_dir_uses_worktree_prefix_not_branch_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_root = root / 'repo'
+            repo_root.mkdir()
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            worktree_root = root / 'worktrees'
+            worktree_root.mkdir()
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            _git_commit_file(repo_root, plan_path)
+            wf_config = WorkflowUserConfig(
+                aflow=AflowSection(
+                    team_lead='senior_architect',
+                    worktree_root=str(worktree_root),
+                    branch_prefix='br',
+                    worktree_prefix='wt',
+                ),
+                roles={
+                    'architect': 'codex.default',
+                    'senior_architect': 'codex.default',
+                },
+                harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='m')})},
+                workflows={'wt_wf': WorkflowConfig(
+                    steps={'impl': WorkflowStepConfig(
+                        role='architect',
+                        prompts=('p',),
+                        go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='impl')),
+                    )},
+                    first_step='impl',
+                    setup=('worktree', 'branch'),
+                    teardown=('merge', 'rm_worktree'),
+                    main_branch='main',
+                )},
+                prompts={'p': 'Work from {ACTIVE_PLAN_PATH}.'},
+            )
+            call_count: list[int] = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                cwd = Path(kwargs['cwd'])
+                if call_count[0] == 1:
+                    exec_plan = cwd / plan_path.relative_to(repo_root)
+                    _write_plan(exec_plan, _COMPLETE_PLAN)
+                    _run_git_in_test(['add', str(exec_plan)], cwd=cwd)
+                    _run_git_in_test(['commit', '-m', 'complete'], cwd=cwd)
+                else:
+                    rc, branches_out, _ = _run_git_in_test(['branch', '--list', 'br-*'], cwd=cwd)
+                    assert rc == 0 and branches_out.strip(), 'no br- feature branch found'
+                    feature = branches_out.strip().lstrip('+* ').strip()
+                    _run_git_in_test(['checkout', 'main'], cwd=cwd)
+                    _run_git_in_test(['merge', '--ff-only', feature], cwd=cwd)
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            result = run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                wf_config, 'wt_wf', config_dir=repo_root,
+                adapter=CodexAdapter(), runner=runner,
+            )
+            run_json = json.loads((result.run_dir / 'run.json').read_text(encoding='utf-8'))
+            feature_branch = run_json['feature_branch']
+            worktree_path = run_json['worktree_path']
+            worktree_dir_name = Path(worktree_path).name
+            assert feature_branch.startswith('br-')
+            assert worktree_dir_name.startswith('wt-')
+            assert not worktree_dir_name.startswith('br-')
+
+
+def _run_git_in_test(args: list[str], *, cwd: Path) -> tuple[int, str, str]:
+    r = subprocess.run(['git'] + args, cwd=str(cwd), capture_output=True, text=True, check=False)
+    return r.returncode, r.stdout.strip(), r.stderr.strip()
+
+
+def _git_merge_feature_into_main(primary_root: Path, main_branch: str) -> None:
+    """Find the aflow feature branch and merge it into main_branch at primary_root."""
+    rc, branches_out, _ = _run_git_in_test(['branch', '--list', 'aflow-*'], cwd=primary_root)
+    assert rc == 0 and branches_out.strip(), 'no aflow feature branch found'
+    # Strip leading markers: '*' (current), '+' (checked out in another worktree), spaces
+    feature_branch = branches_out.strip().lstrip('+* ').strip()
+    rc, _, _ = _run_git_in_test(['checkout', main_branch], cwd=primary_root)
+    assert rc == 0, f'could not checkout {main_branch}'
+    rc, _, err = _run_git_in_test(['merge', '--ff-only', feature_branch], cwd=primary_root)
+    assert rc == 0, f'merge --ff-only failed: {err}'
+
+
+class WorkflowMergeHandoffTests(unittest.TestCase):
+
+    def test_branch_only_merge_handoff_invokes_agent_from_primary_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            _git_commit_file(repo_root, plan_path)
+            wf_config = _make_branch_only_wf_config(main_branch='main')
+            call_count: list[int] = [0]
+            merge_agent_cwd: list[str] = []
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                cwd = kwargs.get('cwd', '')
+                if call_count[0] == 1:
+                    _write_plan(plan_path, _COMPLETE_PLAN)
+                    _run_git_in_test(['add', str(plan_path)], cwd=Path(cwd))
+                    _run_git_in_test(['commit', '-m', 'complete'], cwd=Path(cwd))
+                    return subprocess.CompletedProcess(argv, 0, 'ok', '')
+                else:
+                    merge_agent_cwd.append(cwd)
+                    _git_merge_feature_into_main(Path(cwd), 'main')
+                    return subprocess.CompletedProcess(argv, 0, 'merged', '')
+
+            result = run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                wf_config, 'branch_wf', config_dir=repo_root,
+                adapter=CodexAdapter(), runner=runner,
+            )
+            assert call_count[0] == 2, 'expected 2 runner calls (workflow + merge agent)'
+            assert merge_agent_cwd[0] == str(repo_root)
+            run_json = json.loads((result.run_dir / 'run.json').read_text(encoding='utf-8'))
+            assert run_json['merge_status'] == 'success'
+
+    def test_worktree_merge_handoff_removes_worktree_after_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_root = root / 'repo'
+            repo_root.mkdir()
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            worktree_root = root / 'worktrees'
+            worktree_root.mkdir()
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            _git_commit_file(repo_root, plan_path)
+            wf_config = _make_worktree_wf_config(worktree_root=str(worktree_root))
+            call_count: list[int] = [0]
+            worktree_path_ref: list[Path] = []
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                cwd = Path(kwargs['cwd'])
+                if call_count[0] == 1:
+                    exec_plan = cwd / plan_path.relative_to(repo_root)
+                    _write_plan(exec_plan, _COMPLETE_PLAN)
+                    _run_git_in_test(['add', str(exec_plan)], cwd=cwd)
+                    _run_git_in_test(['commit', '-m', 'complete'], cwd=cwd)
+                    worktree_path_ref.append(cwd)
+                    return subprocess.CompletedProcess(argv, 0, 'ok', '')
+                else:
+                    _git_merge_feature_into_main(cwd, 'main')
+                    return subprocess.CompletedProcess(argv, 0, 'merged', '')
+
+            result = run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                wf_config, 'wt_wf', config_dir=repo_root,
+                adapter=CodexAdapter(), runner=runner,
+            )
+            run_json = json.loads((result.run_dir / 'run.json').read_text(encoding='utf-8'))
+            assert run_json['merge_status'] == 'success'
+            assert worktree_path_ref, 'worktree path was not captured'
+            assert not worktree_path_ref[0].exists(), 'worktree should be removed after successful merge'
+
+    def test_team_lead_resolved_through_team_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            _git_commit_file(repo_root, plan_path)
+            wf_config = WorkflowUserConfig(
+                aflow=AflowSection(team_lead='senior_architect'),
+                roles={
+                    'architect': 'codex.default',
+                    'senior_architect': 'codex.default',
+                },
+                teams={
+                    'elite': {'senior_architect': 'codex.override'},
+                },
+                harnesses={'codex': WorkflowHarnessConfig(profiles={
+                    'default': HarnessProfileConfig(model='m'),
+                    'override': HarnessProfileConfig(model='override-model'),
+                })},
+                workflows={'branch_wf': WorkflowConfig(
+                    steps={'impl': WorkflowStepConfig(
+                        role='architect',
+                        prompts=('p',),
+                        go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='impl')),
+                    )},
+                    first_step='impl',
+                    setup=('branch',),
+                    teardown=('merge',),
+                    main_branch='main',
+                    team='elite',
+                )},
+                prompts={'p': 'Work from {ACTIVE_PLAN_PATH}.'},
+            )
+            call_count: list[int] = [0]
+            merge_invocation_model: list[str] = []
+
+            class TrackingAdapter:
+                name = 'codex'
+                supports_effort = True
+
+                def build_invocation(self, *, repo_root, model, system_prompt, user_prompt, effort=None):
+                    if call_count[0] > 0:
+                        merge_invocation_model.append(model or '')
+                    from aflow.harnesses.codex import CodexAdapter as CA
+                    return CA().build_invocation(
+                        repo_root=repo_root, model=model,
+                        system_prompt=system_prompt, user_prompt=user_prompt, effort=effort,
+                    )
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                cwd = Path(kwargs['cwd'])
+                if call_count[0] == 1:
+                    _write_plan(plan_path, _COMPLETE_PLAN)
+                    _run_git_in_test(['add', str(plan_path)], cwd=cwd)
+                    _run_git_in_test(['commit', '-m', 'complete'], cwd=cwd)
+                    return subprocess.CompletedProcess(argv, 0, 'ok', '')
+                else:
+                    _git_merge_feature_into_main(cwd, 'main')
+                    return subprocess.CompletedProcess(argv, 0, 'merged', '')
+
+            run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                wf_config, 'branch_wf', config_dir=repo_root,
+                adapter=TrackingAdapter(), runner=runner,
+            )
+            assert merge_invocation_model, 'merge agent build_invocation was not called'
+            assert merge_invocation_model[0] == 'override-model'
+
+    def test_merge_verification_failure_preserves_worktree_and_records_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_root = root / 'repo'
+            repo_root.mkdir()
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            worktree_root = root / 'worktrees'
+            worktree_root.mkdir()
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            _git_commit_file(repo_root, plan_path)
+            wf_config = _make_worktree_wf_config(worktree_root=str(worktree_root))
+            call_count: list[int] = [0]
+            worktree_path_ref: list[Path] = []
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                cwd = Path(kwargs['cwd'])
+                if call_count[0] == 1:
+                    exec_plan = cwd / plan_path.relative_to(repo_root)
+                    _write_plan(exec_plan, _COMPLETE_PLAN)
+                    _run_git_in_test(['add', str(exec_plan)], cwd=cwd)
+                    _run_git_in_test(['commit', '-m', 'complete'], cwd=cwd)
+                    worktree_path_ref.append(cwd)
+                    return subprocess.CompletedProcess(argv, 0, 'ok', '')
+                else:
+                    return subprocess.CompletedProcess(argv, 0, 'no-op merge', '')
+
+            with pytest.raises(WorkflowError) as ctx:
+                result = run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                    wf_config, 'wt_wf', config_dir=repo_root,
+                    adapter=CodexAdapter(), runner=runner,
+                )
+            assert 'merge' in str(ctx.value).lower() or 'verification' in str(ctx.value).lower()
+            assert worktree_path_ref, 'worktree path was not captured'
+            assert worktree_path_ref[0].exists(), 'worktree must be preserved on merge failure'
+            run_dirs = sorted((repo_root / '.aflow' / 'runs').iterdir())
+            run_json = json.loads((run_dirs[-1] / 'run.json').read_text(encoding='utf-8'))
+            assert run_json.get('merge_status') == 'failed'
+
+    def test_merge_agent_stop_marker_is_treated_as_merge_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            _git_commit_file(repo_root, plan_path)
+            wf_config = _make_branch_only_wf_config(main_branch='main')
+            call_count: list[int] = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    _write_plan(plan_path, _COMPLETE_PLAN)
+                    _run_git_in_test(['add', str(plan_path)], cwd=Path(kwargs['cwd']))
+                    _run_git_in_test(['commit', '-m', 'complete'], cwd=Path(kwargs['cwd']))
+                    return subprocess.CompletedProcess(argv, 0, 'ok', '')
+                return subprocess.CompletedProcess(argv, 0, 'AFLOW_STOP: conflict resolution is ambiguous', '')
+
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                    wf_config, 'branch_wf', config_dir=repo_root,
+                    adapter=CodexAdapter(), runner=runner,
+                )
+            assert 'AFLOW_STOP' in str(ctx.value) or 'ambiguous' in str(ctx.value)
 
 
 if __name__ == '__main__':

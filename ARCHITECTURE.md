@@ -64,12 +64,17 @@ Startup resolution happens in `main()` before the workflow loop starts:
 
 ### `config.py`
 Loads `~/.config/aflow/aflow.toml` plus sibling `workflows.toml` (bootstrapped from the bundled defaults on first run). Parses and validates:
-- **`[aflow]`** section: `default_workflow`, `keep_runs`, `max_turns`, `retry_inconsistent_checkpoint_state`, `banner_files_limit`, `max_same_step_turns`.
+- **`[aflow]`** section: `default_workflow`, `keep_runs`, `max_turns`, `retry_inconsistent_checkpoint_state`, `banner_files_limit`, `max_same_step_turns`, `team_lead`, `branch_prefix`, `worktree_prefix`, `worktree_root`.
 - **`[harness.<name>.profiles.<profile>]`** tables: `model`, optional `effort` per harness profile.
 - **`[roles]`** and **`[teams.<name>]`** tables: role-to-selector mappings, with team tables allowed to override a subset of the global map.
 - **`[prompts]`** section: named prompt templates.
-- **`[workflow.<name>]`** tables in `workflows.toml`: concrete workflows define `steps`, alias workflows use `extends` and optional `team`.
+- Bare **`[workflow]`** table in `workflows.toml`: lifecycle defaults (`setup`, `teardown`, `main_branch`, `merge_prompt`) inherited by all workflows that don't override them. Not a runnable workflow.
+- **`[workflow.<name>]`** tables in `workflows.toml`: concrete workflows define `steps`, alias workflows use `extends` and optional `team`. Both may override lifecycle defaults with `setup`, `teardown`, `main_branch`, and `merge_prompt`.
 - **`[workflow.<name>.steps.<step>]`** tables: `role` (global role key), `prompts` (list of prompt keys), `go` (transition array with `to` and optional `when` condition).
+
+Lifecycle validation enforces that `(setup, teardown)` is one of three accepted tuples: `([], [])`, `(["branch"], ["merge"])`, or `(["worktree", "branch"], ["merge", "rm_worktree"])`. Any other combination is rejected at load time with the exact workflow path.
+
+When a workflow's effective `teardown` includes `merge`, validation also checks that `[aflow].team_lead` is set and, for config-defined teams, that the role can be resolved through team overrides or global `[roles]`.
 
 Cross-validates that harness profiles, roles, teams, prompts, aliases, and transition targets all reference things that exist.
 
@@ -87,17 +92,19 @@ The core engine. `run_workflow()` executes the turn loop:
 
 1. Back up the original plan to `plans/backups/`.
 2. Parse the plan unless `main()` already provided a pre-loaded `ParsedPlan`.
-3. For each turn (up to `max_turns`):
-   a. Reload the plan from disk (the agent may have modified it).
+3. If the workflow's `setup` is non-empty, run lifecycle preflight checks (branch name collision, worktree path collision, clean working tree, correct startup branch, `main_branch` ref exists locally) and then create the execution environment. Branch-only setup creates a local feature branch from `main_branch` in the primary checkout. Worktree setup creates a linked worktree from `main_branch` under `worktree_root` and creates the feature branch inside that worktree. The primary checkout remains the control root for run artifacts; the worktree is the execution root for normal steps.
+4. For each turn (up to `max_turns`):
+   a. Reload the plan from disk (the agent may have modified it). For worktree flows, plan path placeholders (`{ORIGINAL_PLAN_PATH}`, `{ACTIVE_PLAN_PATH}`, `{NEW_PLAN_PATH}`) are translated from primary-root-relative to worktree-root-relative before being handed to the agent; they are translated back after the turn.
    b. Resolve the step's role through the selected team and global role map to get the concrete harness selector.
-   c. Render prompt templates with path placeholders (`{ORIGINAL_PLAN_PATH}`, `{NEW_PLAN_PATH}`, `{ACTIVE_PLAN_PATH}`).
-   d. Build a `HarnessInvocation` via the adapter.
+   c. Render prompt templates with path placeholders.
+   d. Build a `HarnessInvocation` via the adapter, using `execution_repo_root` as the subprocess cwd.
    e. Run the agent CLI as a subprocess, streaming stdout/stderr.
    f. Before reloading the plan, scan stdout and stderr for a line starting with `AFLOW_STOP:`. If found, fail the run immediately with the extracted reason without entering the plan-reload or transition path.
    g. Reload the plan again to get the post-turn snapshot. If the plan is left in an inconsistent checkpoint state (heading marked complete but unchecked steps remain) and the harness exited cleanly, a retry may be scheduled instead of failing immediately (see `retry_inconsistent_checkpoint_state`).
    h. Evaluate `go` transitions using condition symbols (`DONE`, `NEW_PLAN_EXISTS`, `MAX_TURNS_REACHED`).
    i. Log turn artifacts and update run metadata.
    j. If transition target is `END`, return. For multi-step workflows, check the same-step cap: if the same step has been selected consecutively `max_same_step_turns` times, fail the run before starting the next turn. Otherwise, advance to the next step.
+5. After normal workflow completion, if `teardown` includes `merge`, execute the merge handoff: resolve `[aflow].team_lead` through the effective team, build a merge prompt (built-in `aflow-merge` instruction plus rendered `merge_prompt` entries), and run the `team_lead` agent from the primary checkout. After the agent returns, verify: no unmerged index entries, clean working tree, HEAD on `main_branch`, and feature branch is an ancestor of the target. Only after all checks pass does `rm_worktree` (if configured) remove the linked worktree. Any verification failure leaves the feature branch and worktree intact and fails the run with the specific failed check.
 
 A scheduled retry skips the pre-turn plan reload and reuses the last valid snapshot and saved prompt context. The same `ACTIVE_PLAN_PATH`, `NEW_PLAN_PATH`, and resolved step selector are reused; the retry appendix (containing the exact parse error) is added to the prompt. Startup recovery seeds that same retry machinery by passing a `RetryContext` into `run_workflow()`, which stores the step name, role, resolved selector, and prompt context in `state.pending_retry` before turn 1. Retry turns still count toward `max_turns`.
 
@@ -125,6 +132,7 @@ Data classes for runtime state:
 - `ControllerConfig` -- immutable run parameters (repo root, plan path, max turns, keep runs, extra instructions).
 - `ControllerState` -- mutable per-run state (snapshot, turn count, issues, timing, status, pending retry context, consecutive same-step streak tracking).
 - `RetryContext` -- frozen dataclass holding everything needed to rerun the same step on the next turn without re-parsing the broken plan (step name, role, resolved selector, pre-failure snapshot, saved plan paths, base prompt, parse error string, attempt counter, retry limit).
+- `ExecutionContext` -- frozen dataclass holding lifecycle execution state: `primary_repo_root`, `execution_repo_root` (worktree path for worktree flows, same as primary for branch-only), `main_branch`, `feature_branch`, `worktree_path` (or `None` for branch-only), `setup`, `teardown`.
 - `ControllerConfig` also carries the selected startup step, if any, so the workflow loop can start from a non-default step without re-parsing CLI arguments.
 - `ControllerRunResult` -- final result with end reason.
 - `WorkflowEndReason` -- literal type: `already_complete`, `done`, `max_turns_reached`, `transition_end`.
@@ -150,10 +158,10 @@ Rich-based live banner rendered to stderr during a run. Shows elapsed time, work
 `BannerRenderer` owns a background daemon thread that rebuilds and pushes the panel every `refresh_interval_seconds` (default 1 s) and polls for a new `GitSummary` every `git_poll_interval_seconds` (default 10 s). This keeps the elapsed timer alive between step transitions without requiring external pushes. `set_context(...)` is used to update mutable banner fields instead of directly writing private attributes.
 
 ### `skill_installer.py`
-Discovers the six bundled skills from package resources and copies them into harness-specific skill directories. Supports auto-detection (looks for harness CLIs on PATH) and manual mode (explicit destination path). Handles duplicate destinations when multiple harnesses share a path (e.g., codex, copilot, gemini, and pi all use `~/.agents/skills`).
+Discovers the seven bundled skills from package resources and copies them into harness-specific skill directories. Supports auto-detection (looks for harness CLIs on PATH) and manual mode (explicit destination path). Handles duplicate destinations when multiple harnesses share a path (e.g., codex, copilot, gemini, and pi all use `~/.agents/skills`).
 
 ### `bundled_skills/`
-Six Markdown-based skill definitions installed into harness skill directories:
+Seven Markdown-based skill definitions installed into harness skill directories:
 
 | Skill                       | Purpose                                                        |
 |-----------------------------|----------------------------------------------------------------|
@@ -163,6 +171,7 @@ Six Markdown-based skill definitions installed into harness skill directories:
 | `aflow-review-squash`       | Review completed work; approve+squash or create fix plan       |
 | `aflow-review-checkpoint`   | Review one checkpoint; approve or create fix plan              |
 | `aflow-review-final`        | Final review without squash; approve or create follow-up plan  |
+| `aflow-merge`               | Local-only merge handoff; preserves commits, resolves conflicts, emits `AFLOW_STOP:` for irrecoverable states |
 
 ## Workflow Configuration
 
@@ -172,6 +181,15 @@ Workflows are state machines defined in `workflows.toml`. Each step has:
 - A `go` array of transitions, each with a `to` target (step name or `END`) and an optional `when` condition expression.
 
 Workflow tables can also use `extends` to alias a concrete base workflow and `team` to override the team for that alias. In v1, aliases inherit the base workflow's steps and cannot redefine them.
+
+Bare `[workflow]` in `workflows.toml` is a lifecycle defaults table. It supplies `setup`, `teardown`, `main_branch`, and `merge_prompt` values that all concrete workflows and aliases inherit unless they override them individually. It is not a runnable workflow.
+
+Lifecycle config controls the git environment created before workflow steps begin and torn down after normal completion. The accepted `(setup, teardown)` pairs are:
+- `([], [])` — no lifecycle, engine behaves exactly as before
+- `(["branch"], ["merge"])` — create a local feature branch, run steps there, then invoke merge handoff
+- `(["worktree", "branch"], ["merge", "rm_worktree"])` — create a linked worktree from `main_branch`, run steps in that worktree, invoke merge handoff from the primary checkout, then remove the worktree after verified merge
+
+Merge is model-driven through the `aflow-merge` skill. The engine resolves the `team_lead` role, prepends the built-in `aflow-merge` instruction, appends rendered `merge_prompt` entries, and runs the agent from the primary checkout. After the agent returns, the engine verifies merge success before removing any worktree.
 
 Transitions are evaluated top-to-bottom; the first match wins. An entry without `when` is an unconditional fallback.
 
@@ -209,6 +227,7 @@ aflow/
     aflow-review-squash/     SKILL.md
     aflow-review-checkpoint/ SKILL.md
     aflow-review-final/      SKILL.md
+    aflow-merge/             SKILL.md
 tests/
   test_aflow.py        # workflow engine tests
   test_skill_install.py # skill installer tests
@@ -226,4 +245,5 @@ plans/                 # user plan files and backups
 - **Interactive startup decisions live in the CLI.** Step picking and startup recovery happen before `run_workflow()` so the workflow loop only deals with an already-chosen step and, when needed, a seeded retry context.
 - **Condition-based transitions.** Step transitions use a small expression language over three boolean symbols rather than hardcoded control flow. This keeps workflow definitions declarative.
 - **Structured run logging.** Every turn's prompts, outputs, and snapshots are persisted to `.aflow/runs/` for debugging and auditability. Old runs are pruned automatically.
-- **Skills as Markdown.** The six bundled skills are plain SKILL.md files that get copied into each harness's skill directory. They contain behavioral instructions that the agent reads at runtime, not executable code.
+- **Skills as Markdown.** The seven bundled skills are plain SKILL.md files that get copied into each harness's skill directory. They contain behavioral instructions that the agent reads at runtime, not executable code.
+- **Local-only lifecycle.** Branch and worktree creation, feature branch setup, and merge handoff all operate on local refs only. The engine never fetches, pulls, or pushes. The primary checkout is the control root for run artifacts and merge verification even when normal steps execute inside a linked worktree.

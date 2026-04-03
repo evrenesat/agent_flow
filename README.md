@@ -31,7 +31,7 @@ uv run python -m aflow run path/to/plan.md
 
 ## Install Skills
 
-`aflow install-skills` copies the six bundled skills into harness skill directories. In auto mode, it only targets supported harness CLIs that are already on `PATH`.
+`aflow install-skills` copies the seven bundled skills into harness skill directories. In auto mode, it only targets supported harness CLIs that are already on `PATH`.
 
 Auto mode:
 
@@ -136,6 +136,10 @@ Config is split across two TOML files:
 | `retry_inconsistent_checkpoint_state` | int | `0` | How many times to automatically retry the same workflow step when the harness exits cleanly but leaves the plan in an inconsistent checkpoint state (a checkpoint heading marked complete with unchecked steps still present). `0` disables retries. Each retry consumes one normal turn and appends the exact parse error to the prompt. |
 | `banner_files_limit` | int | `10` | Maximum number of changed files to show in the live banner before it appends `+N more`. |
 | `max_same_step_turns` | int | `5` | Maximum number of consecutive turns the same workflow step can be selected before the run fails. Applies only to multi-step workflows. `0` disables the guardrail. |
+| `team_lead` | string | — | Role name used for the merge handoff agent. Resolved through the effective team first, then global `[roles]`. Required for any workflow that uses `merge` teardown. |
+| `branch_prefix` | string | — | Prefix template for feature branch names. Combined with a sanitized plan stem and timestamp suffix, e.g. `aflow-my-plan-20260404-154501`. |
+| `worktree_prefix` | string | — | Prefix template for linked worktree directory names. Same sanitization rules as `branch_prefix`. |
+| `worktree_root` | string | — | Root directory where linked worktrees are created. Must not be inside the primary repo root. Supports `~` expansion. |
 
 Each workflow can also set `retry_inconsistent_checkpoint_state` directly in its own table to override the global default for that workflow.
 
@@ -148,6 +152,12 @@ default_workflow = "ralph"
 keep_runs = 10
 max_turns = 12
 retry_inconsistent_checkpoint_state = 1
+
+# merge handoff: role name resolved through the effective team, then global [roles]
+team_lead = "senior_architect"
+branch_prefix = "aflow-{PLAN_NAME}"
+worktree_prefix = "aflow-{PLAN_NAME}"
+worktree_root = "~/code/worktrees"
 
 [harness.codex.profiles.high]
 model = "gpt-5.4"
@@ -164,10 +174,18 @@ worker = "codex.nano"
 
 [prompts]
 simple_implementation = "Work from {ACTIVE_PLAN_PATH}. Use 'aflow-execute-plan' skill."
+simple_merge = "Merge into {MAIN_BRANCH}. Feature branch: {FEATURE_BRANCH}."
 ```
 
 ```toml
 # workflows.toml
+
+# Default lifecycle settings inherited by all workflows that do not override them.
+[workflow]
+setup = ["worktree", "branch"]
+teardown = ["merge", "rm_worktree"]
+main_branch = "main"
+
 [workflow.ralph.steps.implement_plan]
 role = "worker"
 prompts = ["simple_implementation"]
@@ -176,9 +194,13 @@ go = [
   { to = "implement_plan" },
 ]
 
+# branch-only alias: inherits ralph steps but uses a simpler lifecycle and a custom merge prompt
 [workflow.ralph_jr]
 extends = "ralph"
 team = "7teen"
+setup = ["branch"]
+teardown = ["merge"]
+merge_prompt = ["simple_merge"]
 ```
 
 Config rules that matter in practice:
@@ -188,6 +210,9 @@ Config rules that matter in practice:
 - Global roles map to fully qualified `harness.profile` selectors.
 - Team tables override a subset of global roles, and any missing role falls back to `[roles]`.
 - `workflows.toml` holds concrete workflows, and `[workflow.<name>]` can use `extends` plus an optional `team` override for aliases.
+- Bare `[workflow]` in `workflows.toml` is the lifecycle defaults table, not a runnable workflow. Concrete workflows and aliases inherit from it and can override `setup`, `teardown`, `main_branch`, and `merge_prompt`.
+- Supported lifecycle combinations are validated as `(setup, teardown)` tuples. The only accepted pairs in v1 are: `([], [])` (no lifecycle), `(["branch"], ["merge"])` (branch-only), `(["worktree", "branch"], ["merge", "rm_worktree"])` (worktree flow).
+- `merge_prompt` is an ordered array of prompt keys appended to the built-in merge instruction. The engine always prepends the instruction to use `aflow-merge`; `merge_prompt` adds workflow-specific context on top.
 - Concrete workflows start at the first declared step in `workflow.<name>.steps`.
 - `prompts` must be a non-empty array of prompt keys.
 - Prompt values can be inline text or `file://` paths in three forms: absolute (`file:///...`), config-relative (`file://path/to/file.txt`), or cwd-relative (`file://./path/to/file.txt`).
@@ -208,6 +233,14 @@ Prompt templates support these placeholders:
 - `{ACTIVE_PLAN_PATH}`
 - `{NEW_PLAN_PATH}`
 
+Merge prompts (those listed under `merge_prompt`) also support these additional placeholders:
+
+- `{MAIN_BRANCH}` - the configured target branch
+- `{FEATURE_BRANCH}` - the created feature branch name
+- `{PRIMARY_REPO_ROOT}` - the primary checkout root (where run artifacts live)
+- `{EXECUTION_REPO_ROOT}` - the execution root (worktree path for worktree flows, same as primary root for branch-only flows)
+- `{FEATURE_WORKTREE_PATH}` - the linked worktree path, empty string for branch-only flows
+
 Those placeholders belong in workflow prompt templates. The bundled skills under `aflow/bundled_skills/` are static guidance files that a harness can inject around those prompts, not places to author unresolved workflow variables.
 
 ## How A Run Works
@@ -217,10 +250,12 @@ Each workflow step launches one fresh harness process.
 At a high level:
 
 1. `aflow` loads the selected workflow and reads the original plan file.
-2. It starts at the workflow's first declared step.
-3. It renders the step prompts, resolves the step role through the selected team and global `[roles]` map, and runs the harness CLI once for that step.
-4. After the harness returns, it re-reads the original plan file and evaluates the step's `go` transitions.
-5. The next matching transition decides whether to continue with another step or stop at `END`.
+2. If the workflow has a non-empty `setup`, `aflow` runs lifecycle preflight checks and creates the execution environment (a local feature branch for branch-only flows, a linked worktree plus feature branch for worktree flows). For worktree flows, normal steps run inside the created worktree while run artifacts stay under the primary checkout.
+3. It starts at the workflow's first declared step.
+4. It renders the step prompts, resolves the step role through the selected team and global `[roles]` map, and runs the harness CLI once for that step.
+5. After the harness returns, it re-reads the original plan file and evaluates the step's `go` transitions.
+6. The next matching transition decides whether to continue with another step or stop at `END`.
+7. After normal workflow completion, if `teardown` includes `merge`, `aflow` invokes a merge handoff: the agent resolved from `[aflow].team_lead` is given the built-in `aflow-merge` instruction plus any configured `merge_prompt` entries. The merge runs locally against the primary checkout. After successful merge verification, `rm_worktree` (if configured) removes the linked worktree.
 
 Plan-path behavior is strict:
 
@@ -353,12 +388,14 @@ Older run directories are pruned automatically. The retention count is controlle
 
 The bundled config includes these ready-to-use workflows:
 
-- `ralph` - single-step implementation loop, no review
-- `ralph_jr` - `ralph` with the `7teen` team
+- `ralph` - single-step implementation loop, no review. Uses the worktree+branch lifecycle by default (inherited from `[workflow]` defaults).
+- `ralph_jr` - `ralph` with the `7teen` team, branch-only lifecycle, and a custom `merge_prompt`.
 - `review_implement_review` - review, implement, then review again with `aflow-review-squash`. On approval the reviewer squashes all post-handoff commits into one final commit. This squash behavior is specific to this workflow, not an engine-wide invariant.
 - `review_implement_cp_review` - checkpoint-scoped review with `aflow-review-checkpoint` and a final no-squash audit with `aflow-review-final`. Checkpoint commit structure is preserved on approval.
 - `hard` - alias for `review_implement_cp_review`
 - `jr` - alias for `review_implement_cp_review` with the `7teen` team
+
+All workflows except `ralph_jr` inherit the worktree+branch lifecycle from the `[workflow]` defaults table. The lifecycle creates a local feature branch (and linked worktree for worktree flows) before the first step, then invokes a local merge handoff after successful completion. The merge handoff is model-driven through the `aflow-merge` skill and runs from the primary checkout. Worktrees are removed only after a verified successful merge.
 
 ## Built-In Workflow Diagrams
 
@@ -408,6 +445,7 @@ This repo also ships optional skills under `aflow/bundled_skills/`. `aflow insta
 - `aflow-review-squash` - final review for completed autonomous runs, including whole-handoff squash or fix-plan creation
 - `aflow-review-checkpoint` - checkpoint-scoped review for the latest checkpoint attempt
 - `aflow-review-final` - no-squash final auditor for checkpoint workflows after the original plan is complete
+- `aflow-merge` - local-only merge handoff for branch-only and worktree workflows. Operates on local refs, preserves commit history by default, resolves conflicts without dropping either side's intent, and emits `AFLOW_STOP:` for irrecoverable ambiguous states.
 
 The workflow config is where the plan-path placeholders belong. The skills themselves stay free of workflow template variables.
 

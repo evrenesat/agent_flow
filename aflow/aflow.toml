@@ -14,6 +14,18 @@ banner_files_limit = 10
 # Set to 0 to disable. Default: 5.
 max_same_step_turns = 5
 
+# Role name used for the merge handoff agent. Resolved through the effective team first,
+# then global [roles]. Required for any workflow that uses merge teardown.
+team_lead = "senior_architect"
+
+# Prefix template for feature branch names. Combined with a sanitized plan stem and timestamp.
+branch_prefix = "aflow"
+# Prefix template for worktree directory names. Same sanitization rules as branch_prefix.
+worktree_prefix = "aflow"
+# Root directory where linked worktrees are created. Must not be inside the primary repo root.
+worktree_root = "~/code/worktrees"
+
+
 #### HARNESS PROFILES ####
 
 # Harness profiles map a harness name to the model and effort values it should run.
@@ -114,3 +126,6 @@ review_squash = "Use 'aflow-review-squash' skill. Take into account both ORIGINA
 final_review = "Use 'aflow-review-final' skill."
 review_cp = "Use 'aflow-review-checkpoint' skill."
 review_plan = "Review the plan at {ORIGINAL_PLAN_PATH} for obvious/indisputable weak spots, ambiguity, and missing constraints and directly apply improvements to the plan file."
+
+
+simple_merge = "foo"

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Callable
 
 from .config import (
+    AflowSection,
     GoTransition,
     VALID_CONDITION_SYMBOLS,
     WorkflowConfig,
@@ -23,7 +24,7 @@ from .config import (
 from .harnesses import get_adapter
 from .harnesses.base import HarnessAdapter, HarnessInvocation
 from .plan import FENCE_RE, ParsedPlan, PlanParseError, PlanSnapshot, load_plan, load_plan_tolerant, plan_has_git_tracking
-from .run_state import ControllerConfig, ControllerRunResult, ControllerState, RetryContext, TurnRecord, WorkflowEndReason, format_harness_model_display
+from .run_state import ControllerConfig, ControllerRunResult, ControllerState, ExecutionContext, RetryContext, TurnRecord, WorkflowEndReason, format_harness_model_display
 from .runlog import create_run_paths, finalize_turn_artifacts, prune_old_runs, write_run_metadata, write_turn_artifacts_start
 from .status import BannerRenderer
 
@@ -777,6 +778,373 @@ def _detect_stop_marker(stdout: str, stderr: str) -> str | None:
     return None
 
 
+_BRANCH_STEM_MAX_LEN = 50
+
+
+def _sanitize_plan_stem(stem: str) -> str:
+    stem = stem.lower()
+    stem = re.sub(r"[^a-z0-9-]", "-", stem)
+    stem = re.sub(r"-+", "-", stem)
+    stem = stem.strip("-")
+    return stem[:_BRANCH_STEM_MAX_LEN] or "plan"
+
+
+def _run_git(args: list[str], *, cwd: Path) -> tuple[int, str, str]:
+    result = subprocess.run(
+        ["git"] + args,
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode, result.stdout.strip(), result.stderr.strip()
+
+
+@dataclass(frozen=True)
+class _LifecyclePlan:
+    main_branch: str
+    feature_branch: str
+    worktree_path: Path | None
+    setup: tuple[str, ...]
+    teardown: tuple[str, ...]
+
+
+def _lifecycle_preflight(
+    primary_root: Path,
+    plan_path: Path,
+    wf: WorkflowConfig,
+    aflow_section: AflowSection,
+) -> _LifecyclePlan | None:
+    setup = wf.setup or ()
+    teardown = wf.teardown or ()
+
+    if not setup:
+        return None
+
+    main_branch = wf.main_branch
+    if not main_branch:
+        raise WorkflowError(
+            "workflow uses lifecycle setup but main_branch is not configured"
+        )
+
+    rc, _, _ = _run_git(["show-ref", "--verify", f"refs/heads/{main_branch}"], cwd=primary_root)
+    if rc != 0:
+        raise WorkflowError(
+            f"lifecycle preflight: branch '{main_branch}' does not exist locally in '{primary_root}'"
+        )
+
+    rc, current_branch, err = _run_git(["symbolic-ref", "--short", "HEAD"], cwd=primary_root)
+    if rc != 0:
+        raise WorkflowError(
+            f"lifecycle preflight: cannot determine current branch in '{primary_root}': {err}"
+        )
+    if current_branch != main_branch:
+        raise WorkflowError(
+            f"lifecycle preflight: current branch is '{current_branch}' "
+            f"but workflow requires starting from '{main_branch}'"
+        )
+
+    rc, status_out, _ = _run_git(
+        ["status", "--porcelain=v1", "--untracked-files=all"], cwd=primary_root
+    )
+    if rc != 0:
+        raise WorkflowError(
+            f"lifecycle preflight: cannot check working tree state in '{primary_root}'"
+        )
+    if status_out.strip():
+        raise WorkflowError(
+            f"lifecycle preflight: primary checkout at '{primary_root}' has uncommitted changes"
+        )
+
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    stem = _sanitize_plan_stem(plan_path.stem)
+    branch_prefix = (aflow_section.branch_prefix or "aflow").rstrip("-")
+    feature_branch = f"{branch_prefix}-{stem}-{ts}"
+
+    rc, _, _ = _run_git(["show-ref", "--verify", f"refs/heads/{feature_branch}"], cwd=primary_root)
+    if rc == 0:
+        raise WorkflowError(
+            f"lifecycle preflight: branch '{feature_branch}' already exists"
+        )
+
+    uses_worktree = "worktree" in setup
+    worktree_path: Path | None = None
+
+    if uses_worktree:
+        try:
+            plan_path.resolve().relative_to(primary_root.resolve())
+        except ValueError:
+            raise WorkflowError(
+                f"lifecycle preflight: plan file '{plan_path}' must be under "
+                f"the primary repo root '{primary_root}' for worktree workflows"
+            )
+
+        worktree_root_str = aflow_section.worktree_root
+        if not worktree_root_str:
+            raise WorkflowError(
+                "lifecycle preflight: worktree workflow requires [aflow].worktree_root to be set"
+            )
+
+        worktree_root = Path(worktree_root_str).expanduser().resolve()
+
+        try:
+            worktree_root.relative_to(primary_root.resolve())
+            raise WorkflowError(
+                f"lifecycle preflight: worktree_root '{worktree_root}' "
+                f"must not be inside the primary repo root '{primary_root}'"
+            )
+        except ValueError:
+            pass
+
+        worktree_dir_prefix = (aflow_section.worktree_prefix or "aflow").rstrip("-")
+        worktree_dir_name = f"{worktree_dir_prefix}-{stem}-{ts}"
+        worktree_path = worktree_root / worktree_dir_name
+
+        if worktree_path.exists():
+            raise WorkflowError(
+                f"lifecycle preflight: worktree path '{worktree_path}' already exists on disk"
+            )
+
+        rc, wt_list, _ = _run_git(["worktree", "list", "--porcelain"], cwd=primary_root)
+        if rc == 0:
+            for line in wt_list.splitlines():
+                if line.startswith("worktree "):
+                    registered = line[len("worktree "):]
+                    if Path(registered).resolve() == worktree_path.resolve():
+                        raise WorkflowError(
+                            f"lifecycle preflight: path '{worktree_path}' is already "
+                            f"registered as a git worktree"
+                        )
+
+    return _LifecyclePlan(
+        main_branch=main_branch,
+        feature_branch=feature_branch,
+        worktree_path=worktree_path,
+        setup=setup,
+        teardown=teardown,
+    )
+
+
+def _setup_branch_only(
+    primary_root: Path,
+    main_branch: str,
+    feature_branch: str,
+) -> None:
+    rc, _, err = _run_git(
+        ["checkout", "-b", feature_branch, main_branch], cwd=primary_root
+    )
+    if rc != 0:
+        raise WorkflowError(
+            f"lifecycle setup: cannot create branch '{feature_branch}' "
+            f"from '{main_branch}': {err}"
+        )
+
+
+def _setup_worktree(
+    primary_root: Path,
+    main_branch: str,
+    feature_branch: str,
+    worktree_path: Path,
+) -> None:
+    worktree_path.parent.mkdir(parents=True, exist_ok=True)
+    rc, _, err = _run_git(
+        ["worktree", "add", "-b", feature_branch, str(worktree_path), main_branch],
+        cwd=primary_root,
+    )
+    if rc != 0:
+        raise WorkflowError(
+            f"lifecycle setup: cannot create worktree at '{worktree_path}' "
+            f"with branch '{feature_branch}' from '{main_branch}': {err}"
+        )
+
+
+def _do_lifecycle_setup(
+    primary_root: Path,
+    plan: _LifecyclePlan,
+) -> ExecutionContext:
+    if "worktree" in plan.setup:
+        assert plan.worktree_path is not None
+        _setup_worktree(primary_root, plan.main_branch, plan.feature_branch, plan.worktree_path)
+        execution_root = plan.worktree_path
+    else:
+        _setup_branch_only(primary_root, plan.main_branch, plan.feature_branch)
+        execution_root = primary_root
+    return ExecutionContext(
+        primary_repo_root=primary_root,
+        execution_repo_root=execution_root,
+        main_branch=plan.main_branch,
+        feature_branch=plan.feature_branch,
+        worktree_path=plan.worktree_path,
+        setup=plan.setup,
+        teardown=plan.teardown,
+    )
+
+
+def _exec_plan_path(path: Path, exec_ctx: ExecutionContext | None) -> Path:
+    if exec_ctx is None or exec_ctx.worktree_path is None:
+        return path
+    try:
+        rel = path.resolve().relative_to(exec_ctx.primary_repo_root.resolve())
+        return exec_ctx.execution_repo_root / rel
+    except ValueError:
+        return path
+
+
+_MERGE_BUILTIN_INSTRUCTION = "Use the `aflow-merge` skill to merge the feature branch into the target branch."
+
+
+def render_merge_prompt(
+    prompt_text: str,
+    *,
+    config_dir: Path,
+    working_dir: Path,
+    exec_ctx: ExecutionContext,
+    original_plan_path: Path,
+    new_plan_path: Path,
+    active_plan_path: Path,
+) -> str:
+    rendered = render_prompt(
+        prompt_text,
+        config_dir=config_dir,
+        working_dir=working_dir,
+        original_plan_path=original_plan_path,
+        new_plan_path=new_plan_path,
+        active_plan_path=active_plan_path,
+    )
+    worktree_path_str = str(exec_ctx.worktree_path) if exec_ctx.worktree_path else ""
+    rendered = rendered.replace("{MAIN_BRANCH}", exec_ctx.main_branch)
+    rendered = rendered.replace("{FEATURE_BRANCH}", exec_ctx.feature_branch)
+    rendered = rendered.replace("{PRIMARY_REPO_ROOT}", str(exec_ctx.primary_repo_root))
+    rendered = rendered.replace("{EXECUTION_REPO_ROOT}", str(exec_ctx.execution_repo_root))
+    rendered = rendered.replace("{FEATURE_WORKTREE_PATH}", worktree_path_str)
+    return rendered
+
+
+def _build_merge_user_prompt(
+    wf: WorkflowConfig,
+    workflow_config: WorkflowUserConfig,
+    *,
+    exec_ctx: ExecutionContext,
+    config_dir: Path,
+    working_dir: Path,
+    original_plan_path: Path,
+    active_plan_path: Path,
+    new_plan_path: Path,
+) -> str:
+    parts = [_MERGE_BUILTIN_INSTRUCTION]
+    for prompt_key in (wf.merge_prompt or ()):
+        if prompt_key not in workflow_config.prompts:
+            raise WorkflowError(f"merge_prompt references unknown prompt '{prompt_key}'")
+        raw = workflow_config.prompts[prompt_key]
+        rendered = render_merge_prompt(
+            raw,
+            config_dir=config_dir,
+            working_dir=working_dir,
+            exec_ctx=exec_ctx,
+            original_plan_path=original_plan_path,
+            active_plan_path=active_plan_path,
+            new_plan_path=new_plan_path,
+        )
+        parts.append(rendered)
+    return "\n\n".join(parts)
+
+
+def _verify_merge_success(
+    primary_root: Path,
+    main_branch: str,
+    feature_branch: str,
+) -> str | None:
+    """Returns None on success, or a description of which check failed."""
+    rc, out, _ = _run_git(["ls-files", "--unmerged"], cwd=primary_root)
+    if rc != 0 or out.strip():
+        return "unmerged index entries remain after merge"
+
+    rc, out, _ = _run_git(["status", "--porcelain"], cwd=primary_root)
+    if rc != 0 or out.strip():
+        return "working tree is not clean after merge"
+
+    rc, head_ref, _ = _run_git(["symbolic-ref", "HEAD"], cwd=primary_root)
+    if rc != 0 or head_ref.strip() != f"refs/heads/{main_branch}":
+        return f"HEAD is not on '{main_branch}' after merge (got '{head_ref.strip()}')"
+
+    rc, _, _ = _run_git(
+        ["merge-base", "--is-ancestor", feature_branch, main_branch],
+        cwd=primary_root,
+    )
+    if rc != 0:
+        return f"feature branch '{feature_branch}' is not an ancestor of '{main_branch}' after merge"
+
+    return None
+
+
+def _rm_worktree_safe(primary_root: Path, worktree_path: Path) -> None:
+    rc, _, err = _run_git(
+        ["worktree", "remove", "--force", str(worktree_path)],
+        cwd=primary_root,
+    )
+    if rc != 0:
+        raise WorkflowError(
+            f"lifecycle teardown: failed to remove worktree '{worktree_path}': {err}"
+        )
+
+
+def _execute_merge_handoff(
+    exec_ctx: ExecutionContext,
+    wf: WorkflowConfig,
+    workflow_config: WorkflowUserConfig,
+    *,
+    team_name: str | None,
+    adapter: HarnessAdapter | None,
+    runner: Callable[..., subprocess.CompletedProcess[str]] | None,
+    config_dir: Path,
+    working_dir: Path,
+    original_plan_path: Path,
+    active_plan_path: Path,
+    new_plan_path: Path,
+    banner: BannerRenderer,
+    state: ControllerState,
+) -> subprocess.CompletedProcess[str]:
+    primary_root = exec_ctx.primary_repo_root
+    team_lead_role = workflow_config.aflow.team_lead
+    if not team_lead_role:
+        raise WorkflowError("merge teardown requires [aflow].team_lead to be configured")
+
+    team_lead_selector = resolve_role_selector(
+        team_lead_role, team_name, workflow_config, step_path="merge teardown"
+    )
+    resolved = resolve_profile(team_lead_selector, workflow_config, step_path="merge teardown")
+
+    user_prompt = _build_merge_user_prompt(
+        wf, workflow_config,
+        exec_ctx=exec_ctx,
+        config_dir=config_dir,
+        working_dir=working_dir,
+        original_plan_path=original_plan_path,
+        active_plan_path=active_plan_path,
+        new_plan_path=new_plan_path,
+    )
+
+    merge_adapter = adapter or get_adapter(resolved.harness_name)
+    invocation = merge_adapter.build_invocation(
+        repo_root=primary_root,
+        model=resolved.model,
+        system_prompt="",
+        user_prompt=user_prompt,
+        effort=resolved.effort,
+    )
+
+    if runner is None:
+        return _run_process(invocation, primary_root, banner, state)
+    return runner(
+        list(invocation.argv),
+        cwd=str(primary_root),
+        env={**os.environ, **invocation.env},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 def run_workflow(
     config: ControllerConfig,
     workflow_config: WorkflowUserConfig,
@@ -796,6 +1164,11 @@ def run_workflow(
     wf = workflow_config.workflows[workflow_name]
     if wf.first_step is None:
         raise WorkflowError(f"workflow '{workflow_name}' has no steps")
+
+    lifecycle_plan = _lifecycle_preflight(
+        config.repo_root, config.plan_path, wf, workflow_config.aflow
+    )
+    exec_ctx: ExecutionContext | None = None
 
     original_plan_path = config.plan_path
     active_plan_path = original_plan_path
@@ -913,6 +1286,26 @@ def run_workflow(
         raise WorkflowError(
             f"workflow '{workflow_name}' references unknown team '{team_name}'"
         )
+
+    if lifecycle_plan is not None:
+        try:
+            exec_ctx = _do_lifecycle_setup(config.repo_root, lifecycle_plan)
+        except WorkflowError as exc:
+            state.status_message = "failed"
+            banner.stop(state)
+            summary = _format_failure(
+                reason=exc.summary,
+                run_dir=run_paths.run_dir,
+                snapshot=original_snapshot,
+            )
+            write_run_metadata(
+                run_paths, config, state, status="failed", failure_reason=summary,
+                workflow_name=workflow_name, original_plan_path=original_plan_path,
+                active_plan_path=active_plan_path,
+            )
+            raise WorkflowError(summary, run_dir=run_paths.run_dir) from exc
+
+    execution_repo_root = exec_ctx.execution_repo_root if exec_ctx else config.repo_root
 
     def _start_turn(
         *,
@@ -1059,7 +1452,7 @@ def run_workflow(
             step_adapter = adapter or get_adapter(resolved.harness_name)
             user_prompt = retry_ctx.base_user_prompt + "\n\n" + _build_retry_appendix(retry_ctx.parse_error_str)
             invocation = step_adapter.build_invocation(
-                repo_root=config.repo_root,
+                repo_root=execution_repo_root,
                 model=resolved.model,
                 system_prompt="",
                 user_prompt=user_prompt,
@@ -1115,9 +1508,9 @@ def run_workflow(
                 workflow_config,
                 config_dir=config_dir,
                 working_dir=working_dir,
-                original_plan_path=original_plan_path,
-                new_plan_path=new_plan_path,
-                active_plan_path=active_plan_path,
+                original_plan_path=_exec_plan_path(original_plan_path, exec_ctx),
+                new_plan_path=_exec_plan_path(new_plan_path, exec_ctx),
+                active_plan_path=_exec_plan_path(active_plan_path, exec_ctx),
             )
 
             if config.extra_instructions:
@@ -1125,7 +1518,7 @@ def run_workflow(
                 user_prompt = "\n\n".join((user_prompt, extra_text))
 
             invocation = step_adapter.build_invocation(
-                repo_root=config.repo_root,
+                repo_root=execution_repo_root,
                 model=resolved.model,
                 system_prompt="",
                 user_prompt=user_prompt,
@@ -1148,12 +1541,12 @@ def run_workflow(
         )
 
         if use_popen:
-            completed = _run_process(invocation, config.repo_root, banner, state)
+            completed = _run_process(invocation, execution_repo_root, banner, state)
         else:
             assert runner is not None
             completed = runner(
                 list(invocation.argv),
-                cwd=str(config.repo_root),
+                cwd=str(execution_repo_root),
                 env={**os.environ, **invocation.env},
                 capture_output=True,
                 text=True,
@@ -1197,16 +1590,24 @@ def run_workflow(
             raise WorkflowError(summary, run_dir=run_paths.run_dir)
 
         try:
-            resolved_original_plan_path = _resolve_post_turn_original_plan_path(
-                config.repo_root,
-                original_plan_path,
+            exec_original = _exec_plan_path(original_plan_path, exec_ctx)
+            resolved_exec_plan_path = _resolve_post_turn_original_plan_path(
+                execution_repo_root,
+                exec_original,
                 completed_returncode=completed.returncode,
             )
-            parsed_after = load_plan(resolved_original_plan_path)
-            if resolved_original_plan_path != original_plan_path:
-                original_plan_path = resolved_original_plan_path
+            parsed_after = load_plan(resolved_exec_plan_path)
+            if resolved_exec_plan_path != exec_original:
+                if exec_ctx is not None and exec_ctx.worktree_path is not None:
+                    try:
+                        rel = resolved_exec_plan_path.relative_to(execution_repo_root)
+                        original_plan_path = config.repo_root / rel
+                    except ValueError:
+                        original_plan_path = resolved_exec_plan_path
+                else:
+                    original_plan_path = resolved_exec_plan_path
                 if active_plan_path == config.plan_path:
-                    active_plan_path = resolved_original_plan_path
+                    active_plan_path = original_plan_path
             post_snapshot = parsed_after.snapshot
         except (PlanParseError, FileNotFoundError) as exc:
             is_retryable = (
@@ -1348,7 +1749,7 @@ def run_workflow(
         state.turns_completed += 1
 
         done = post_snapshot.is_complete
-        new_plan_exists = new_plan_path.is_file()
+        new_plan_exists = _exec_plan_path(new_plan_path, exec_ctx).is_file()
 
         if new_plan_exists:
             active_plan_path = new_plan_path
@@ -1449,6 +1850,7 @@ def run_workflow(
 
         write_run_metadata(
             run_paths, config, state, status="running",
+            execution_context=exec_ctx,
             last_snapshot=post_snapshot,
             turns_completed=state.turns_completed,
             workflow_name=workflow_name, original_plan_path=original_plan_path,
@@ -1463,6 +1865,76 @@ def run_workflow(
                 max_turns_reached=max_turns_reached,
             )
             state.end_reason = end_reason
+
+            merge_status: str | None = None
+            merge_failure_reason: str | None = None
+
+            if exec_ctx is not None and "merge" in exec_ctx.teardown:
+                try:
+                    merge_completed = _execute_merge_handoff(
+                        exec_ctx, wf, workflow_config,
+                        team_name=team_name,
+                        adapter=adapter,
+                        runner=runner,
+                        config_dir=config_dir,
+                        working_dir=working_dir,
+                        original_plan_path=original_plan_path,
+                        active_plan_path=active_plan_path,
+                        new_plan_path=new_plan_path,
+                        banner=banner,
+                        state=state,
+                    )
+                except WorkflowError as exc:
+                    merge_status = "failed"
+                    merge_failure_reason = exc.summary
+                else:
+                    stop_reason = _detect_stop_marker(merge_completed.stdout, merge_completed.stderr)
+                    if stop_reason is not None:
+                        merge_status = "failed"
+                        merge_failure_reason = f"AFLOW_STOP: {stop_reason}"
+                    elif merge_completed.returncode != 0:
+                        merge_status = "failed"
+                        merge_failure_reason = f"merge agent exited with code {merge_completed.returncode}"
+                    else:
+                        check_failure = _verify_merge_success(
+                            config.repo_root,
+                            exec_ctx.main_branch,
+                            exec_ctx.feature_branch,
+                        )
+                        if check_failure is not None:
+                            merge_status = "failed"
+                            merge_failure_reason = f"merge verification failed: {check_failure}"
+                        else:
+                            merge_status = "success"
+                            if "rm_worktree" in exec_ctx.teardown and exec_ctx.worktree_path is not None:
+                                try:
+                                    _rm_worktree_safe(config.repo_root, exec_ctx.worktree_path)
+                                except WorkflowError as exc:
+                                    merge_status = "failed"
+                                    merge_failure_reason = exc.summary
+
+            if merge_status == "failed":
+                state.status_message = "failed"
+                summary = _format_failure(
+                    reason=merge_failure_reason or "merge teardown failed",
+                    run_dir=run_paths.run_dir,
+                    snapshot=post_snapshot,
+                )
+                write_run_metadata(
+                    run_paths, config, state, status="failed",
+                    merge_status=merge_status,
+                    merge_failure_reason=merge_failure_reason,
+                    execution_context=exec_ctx,
+                    last_snapshot=post_snapshot,
+                    turns_completed=state.turns_completed,
+                    workflow_name=workflow_name, original_plan_path=original_plan_path,
+                    current_step_name=current_step_name, active_plan_path=active_plan_path,
+                    new_plan_path=new_plan_path,
+                )
+                prune_old_runs(run_paths.runs_root, config.keep_runs)
+                banner.stop(state)
+                raise WorkflowError(summary, run_dir=run_paths.run_dir)
+
             state.status_message = "completed"
             result = ControllerRunResult(
                 run_dir=run_paths.run_dir,
@@ -1473,6 +1945,8 @@ def run_workflow(
             )
             write_run_metadata(
                 run_paths, config, state, status="completed",
+                merge_status=merge_status,
+                execution_context=exec_ctx,
                 last_snapshot=post_snapshot,
                 turns_completed=state.turns_completed,
                 end_reason=end_reason,

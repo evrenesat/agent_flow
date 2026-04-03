@@ -102,6 +102,17 @@ class ControllerState:
 
 
 @dataclass(frozen=True)
+class ExecutionContext:
+    primary_repo_root: Path
+    execution_repo_root: Path
+    main_branch: str
+    feature_branch: str
+    worktree_path: Path | None
+    setup: tuple[str, ...]
+    teardown: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class ControllerRunResult:
     run_dir: Path
     turns_completed: int
