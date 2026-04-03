@@ -58,6 +58,15 @@ def resolve_profile(
     config: WorkflowUserConfig,
     *, step_path: str,
 ) -> ResolvedProfile:
+    return _resolve_selector(selector, config, step_path=step_path)
+
+
+def _resolve_selector(
+    selector: str,
+    config: WorkflowUserConfig,
+    *,
+    step_path: str,
+) -> ResolvedProfile:
     if "." not in selector:
         raise WorkflowError(
             f"step profile must be fully qualified (harness.profile) "
@@ -86,6 +95,46 @@ def resolve_profile(
         model=profile_config.model,
         effort=profile_config.effort,
     )
+
+
+def resolve_role_selector(
+    role: str,
+    team_name: str | None,
+    config: WorkflowUserConfig,
+    *,
+    step_path: str = "<unknown>",
+) -> str:
+    selector = config.roles.get(role)
+    if selector is None:
+        if "." in role:
+            return role
+        raise WorkflowError(
+            f"workflow step references unknown role '{role}' in {step_path}"
+        )
+    if team_name is None:
+        return selector
+    team_config = config.teams.get(team_name)
+    if team_config is None:
+        raise WorkflowError(
+            f"workflow step references unknown team '{team_name}' in {step_path}"
+        )
+    return team_config.get(role, selector)
+
+
+def _resolve_step_runtime(
+    step: WorkflowStepConfig,
+    config: WorkflowUserConfig,
+    *,
+    team_name: str | None,
+    step_path: str,
+) -> tuple[str, ResolvedProfile]:
+    selector = resolve_role_selector(
+        step.role,
+        team_name,
+        config,
+        step_path=step_path,
+    )
+    return selector, resolve_profile(selector, config, step_path=step_path)
 
 
 def _resolve_prompt_file_path(
@@ -747,12 +796,19 @@ def run_workflow(
     use_popen = runner is None
     new_plan_path: Path | None = None
     retry_limit = _effective_retry_limit(wf, workflow_config.aflow)
+    team_name = config.team if config.team is not None else wf.team
+    if team_name is not None and team_name not in workflow_config.teams:
+        raise WorkflowError(
+            f"workflow '{workflow_name}' references unknown team '{team_name}'"
+        )
 
     def _start_turn(
         *,
         turn_number: int,
         step_name: str,
         step: WorkflowStepConfig,
+        step_role: str,
+        resolved_selector: str,
         resolved: ResolvedProfile,
         active_path: Path,
         new_path: Path,
@@ -766,6 +822,8 @@ def run_workflow(
             TurnRecord(
                 turn_number=turn_number,
                 step_name=step_name,
+                step_role=step_role,
+                resolved_selector=resolved_selector,
                 resolved_harness_name=resolved.harness_name,
                 resolved_model_display=format_harness_model_display(
                     resolved.harness_name,
@@ -791,7 +849,8 @@ def run_workflow(
             started_at=started_at,
             status="starting",
             step_name=step_name,
-            selector=step.profile,
+            step_role=step_role,
+            selector=resolved_selector,
             original_plan_path=original_plan_path,
             active_plan_path=active_path,
             new_plan_path=new_path if new_path.is_file() else None,
@@ -812,6 +871,7 @@ def run_workflow(
         returncode: int,
         error: str | None = None,
         step_name: str | None = None,
+        step_role: str | None = None,
         selector: str | None = None,
         active_path: Path | None = None,
         new_path: Path | None = None,
@@ -837,6 +897,7 @@ def run_workflow(
             started_at=started_at,
             error=error,
             step_name=step_name,
+            step_role=step_role,
             selector=selector,
             original_plan_path=original_plan_path,
             active_plan_path=active_path,
@@ -873,7 +934,12 @@ def run_workflow(
             new_plan_path = retry_ctx.new_plan_path
             step = wf.steps[current_step_name]
             step_path = f"workflow.{workflow_name}.steps.{current_step_name}"
-            resolved = resolve_profile(step.profile, workflow_config, step_path=step_path)
+            selector, resolved = _resolve_step_runtime(
+                step,
+                workflow_config,
+                team_name=team_name,
+                step_path=step_path,
+            )
             step_adapter = adapter or get_adapter(resolved.harness_name)
             user_prompt = retry_ctx.base_user_prompt + "\n\n" + _build_retry_appendix(retry_ctx.parse_error_str)
             invocation = step_adapter.build_invocation(
@@ -919,7 +985,12 @@ def run_workflow(
 
             step = wf.steps[current_step_name]
             step_path = f"workflow.{workflow_name}.steps.{current_step_name}"
-            resolved = resolve_profile(step.profile, workflow_config, step_path=step_path)
+            selector, resolved = _resolve_step_runtime(
+                step,
+                workflow_config,
+                team_name=team_name,
+                step_path=step_path,
+            )
 
             step_adapter = adapter or get_adapter(resolved.harness_name)
 
@@ -951,6 +1022,8 @@ def run_workflow(
             turn_number=turn_number,
             step_name=current_step_name,
             step=step,
+            step_role=step.role,
+            resolved_selector=selector,
             resolved=resolved,
             active_path=active_plan_path,
             new_path=new_plan_path,
@@ -987,7 +1060,8 @@ def run_workflow(
                 returncode=completed.returncode,
                 error=f"AFLOW_STOP: {stop_reason}",
                 step_name=current_step_name,
-                selector=step.profile,
+                step_role=step.role,
+                selector=selector,
                 active_path=active_plan_path,
                 new_path=new_plan_path,
             )
@@ -1023,7 +1097,8 @@ def run_workflow(
                 state.turns_completed += 1
                 new_retry_ctx = RetryContext(
                     step_name=current_step_name,
-                    step_profile=step.profile,
+                    step_role=step.role,
+                    resolved_selector=selector,
                     resolved_harness_name=resolved.harness_name,
                     resolved_model=resolved.model,
                     resolved_effort=resolved.effort,
@@ -1048,7 +1123,8 @@ def run_workflow(
                     returncode=completed.returncode,
                     error=str(exc),
                     step_name=current_step_name,
-                    selector=step.profile,
+                    step_role=step.role,
+                    selector=selector,
                     active_path=active_plan_path,
                     new_path=new_plan_path,
                     conditions={"DONE": done, "NEW_PLAN_EXISTS": False, "MAX_TURNS_REACHED": turn_number >= config.max_turns},
@@ -1083,7 +1159,8 @@ def run_workflow(
                 returncode=completed.returncode,
                 error=str(exc),
                 step_name=current_step_name,
-                selector=step.profile,
+                step_role=step.role,
+                selector=selector,
                 active_path=active_plan_path,
                 new_path=new_plan_path,
                 conditions={"DONE": done, "NEW_PLAN_EXISTS": False, "MAX_TURNS_REACHED": turn_number >= config.max_turns},
@@ -1120,7 +1197,8 @@ def run_workflow(
                 stderr=completed.stderr,
                 returncode=completed.returncode,
                 step_name=current_step_name,
-                selector=step.profile,
+                step_role=step.role,
+                selector=selector,
                 active_path=active_plan_path,
                 new_path=new_plan_path,
                 conditions={"DONE": post_snapshot.is_complete, "NEW_PLAN_EXISTS": False, "MAX_TURNS_REACHED": turn_number >= config.max_turns},
@@ -1183,7 +1261,8 @@ def run_workflow(
                 stderr=completed.stderr,
                 returncode=completed.returncode,
                 step_name=current_step_name,
-                selector=step.profile,
+                step_role=step.role,
+                selector=selector,
                 active_path=active_plan_path,
                 new_path=new_plan_path,
                 conditions=conditions,
@@ -1215,7 +1294,8 @@ def run_workflow(
             stderr=completed.stderr,
             returncode=completed.returncode,
             step_name=current_step_name,
-            selector=step.profile,
+            step_role=step.role,
+            selector=selector,
             active_path=active_plan_path,
             new_path=new_plan_path,
             conditions=conditions,

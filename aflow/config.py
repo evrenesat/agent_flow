@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field, replace as dataclass_replace
+from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
 from collections.abc import Mapping
@@ -61,6 +61,9 @@ def _parse_profile_table(raw: Mapping[str, object], *, path: str) -> HarnessProf
 DEFAULT_KEEP_RUNS = 20
 
 
+DEFAULT_MAX_TURNS = 15
+
+
 DEFAULT_MAX_SAME_STEP_TURNS = 5
 
 
@@ -68,6 +71,7 @@ DEFAULT_MAX_SAME_STEP_TURNS = 5
 class AflowSection:
     default_workflow: str | None = None
     keep_runs: int = DEFAULT_KEEP_RUNS
+    max_turns: int = DEFAULT_MAX_TURNS
     retry_inconsistent_checkpoint_state: int = 0
     banner_files_limit: int = 10
     max_same_step_turns: int = DEFAULT_MAX_SAME_STEP_TURNS
@@ -86,7 +90,7 @@ class GoTransition:
 
 @dataclass(frozen=True)
 class WorkflowStepConfig:
-    profile: str
+    role: str
     prompts: tuple[str, ...] = ()
     go: tuple[GoTransition, ...] = ()
 
@@ -96,12 +100,16 @@ class WorkflowConfig:
     steps: dict[str, WorkflowStepConfig] = field(default_factory=dict)
     first_step: str | None = None
     retry_inconsistent_checkpoint_state: int | None = None
+    team: str | None = None
+    extends: str | None = None
 
 
 @dataclass(frozen=True)
 class WorkflowUserConfig:
     aflow: AflowSection = field(default_factory=AflowSection)
     harnesses: dict[str, WorkflowHarnessConfig] = field(default_factory=dict)
+    roles: dict[str, str] = field(default_factory=dict)
+    teams: dict[str, dict[str, str]] = field(default_factory=dict)
     workflows: dict[str, WorkflowConfig] = field(default_factory=dict)
     prompts: dict[str, str] = field(default_factory=dict)
 
@@ -130,6 +138,7 @@ def _parse_aflow_section(raw: Mapping[str, object], *, path: str) -> AflowSectio
     allowed = {
         "default_workflow",
         "keep_runs",
+        "max_turns",
         "retry_inconsistent_checkpoint_state",
         "banner_files_limit",
         "max_same_step_turns",
@@ -143,6 +152,12 @@ def _parse_aflow_section(raw: Mapping[str, object], *, path: str) -> AflowSectio
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
             raise ConfigError(f"{path}.keep_runs must be a positive integer")
         keep_runs = value
+    max_turns = DEFAULT_MAX_TURNS
+    if "max_turns" in raw:
+        value = raw["max_turns"]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ConfigError(f"{path}.max_turns must be a positive integer")
+        max_turns = value
     retry_inconsistent_checkpoint_state = 0
     if "retry_inconsistent_checkpoint_state" in raw:
         value = raw["retry_inconsistent_checkpoint_state"]
@@ -172,10 +187,27 @@ def _parse_aflow_section(raw: Mapping[str, object], *, path: str) -> AflowSectio
             raw.get("default_workflow"), path=f"{path}.default_workflow"
         ),
         keep_runs=keep_runs,
+        max_turns=max_turns,
         retry_inconsistent_checkpoint_state=retry_inconsistent_checkpoint_state,
         banner_files_limit=banner_files_limit,
         max_same_step_turns=max_same_step_turns,
     )
+
+
+def _parse_selector_value(
+    value: object,
+    *,
+    path: str,
+) -> str:
+    selector = _require_text(value, path=path)
+    if "." not in selector:
+        raise ConfigError(
+            f"expected {path} to be a fully qualified harness.profile selector"
+        )
+    harness_name, _, profile_name = selector.partition(".")
+    if not harness_name or not profile_name:
+        raise ConfigError(f"invalid selector '{selector}' in {path}")
+    return selector
 
 
 def _parse_workflow_harness(
@@ -200,6 +232,18 @@ def _parse_workflow_harness(
                 profile_table, path=f"{path}.profiles.{profile_key}"
             )
     return WorkflowHarnessConfig(profiles=profiles)
+
+
+def _parse_role_map(
+    raw: Mapping[str, object], *, path: str
+) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for key, value in raw.items():
+        role_name = _require_text(key, path=f"{path} key")
+        mapping[role_name] = _parse_selector_value(
+            value, path=f"{path}.{role_name}"
+        )
+    return mapping
 
 
 def _parse_go_transitions(
@@ -240,28 +284,17 @@ def _parse_workflow_steps(
         if first_step is None:
             first_step = step_key
         step_table = _require_table(step_value, path=f"{path}.{step_key}")
-        allowed = {"profile", "prompts", "go"}
+        allowed = {"role", "prompts", "go"}
         unknown = sorted(set(step_table) - allowed)
         if unknown:
             raise ConfigError(
                 f"unsupported keys in {path}.{step_key}: {', '.join(unknown)}"
             )
-        if "profile" not in step_table:
-            raise ConfigError(f"missing 'profile' in {path}.{step_key}")
-        profile_value = _require_text(
-            step_table["profile"], path=f"{path}.{step_key}.profile"
+        if "role" not in step_table:
+            raise ConfigError(f"missing 'role' in {path}.{step_key}")
+        role_value = _require_text(
+            step_table["role"], path=f"{path}.{step_key}.role"
         )
-        if "." not in profile_value:
-            raise ConfigError(
-                f"step profile must be fully qualified (harness.profile) "
-                f"in {path}.{step_key}.profile, got '{profile_value}'"
-            )
-        harness_name, _, profile_name = profile_value.partition(".")
-        if not harness_name or not profile_name:
-            raise ConfigError(
-                f"invalid profile selector '{profile_value}' "
-                f"in {path}.{step_key}.profile"
-            )
         if "prompts" not in step_table:
             raise ConfigError(f"missing 'prompts' in {path}.{step_key}")
         prompts_value = step_table["prompts"]
@@ -281,18 +314,143 @@ def _parse_workflow_steps(
         if not go_transitions:
             raise ConfigError(f"{path}.{step_key}.go must not be empty")
         steps[step_key] = WorkflowStepConfig(
-            profile=profile_value,
+            role=role_value,
             prompts=prompts,
             go=go_transitions,
         )
     return WorkflowConfig(steps=steps, first_step=first_step)
 
 
+def _parse_workflow_definition(
+    raw: Mapping[str, object], *, path: str
+) -> WorkflowConfig:
+    allowed = {"steps", "retry_inconsistent_checkpoint_state", "extends", "team"}
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise ConfigError(f"unsupported keys in {path}: {', '.join(unknown)}")
+    wf_team = _optional_text(raw.get("team"), path=f"{path}.team")
+    wf_extends = _optional_text(raw.get("extends"), path=f"{path}.extends")
+    wf_retry: int | None = None
+    if "retry_inconsistent_checkpoint_state" in raw:
+        if wf_extends is not None:
+            raise ConfigError(
+                f"{path}.retry_inconsistent_checkpoint_state is not allowed on alias workflows"
+            )
+        retry_value = raw["retry_inconsistent_checkpoint_state"]
+        if not isinstance(retry_value, int) or isinstance(retry_value, bool) or retry_value < 0:
+            raise ConfigError(
+                f"{path}.retry_inconsistent_checkpoint_state must be a non-negative integer"
+            )
+        wf_retry = retry_value
+    steps: dict[str, WorkflowStepConfig] = {}
+    first_step: str | None = None
+    if wf_extends is None:
+        if "steps" not in raw:
+            raise ConfigError(f"missing 'steps' in {path}")
+        steps_table = _require_table(raw["steps"], path=f"{path}.steps")
+        wf_config = _parse_workflow_steps(steps_table, path=f"{path}.steps")
+        _validate_workflow_transitions(wf_config, path=path)
+        steps = wf_config.steps
+        first_step = wf_config.first_step
+    else:
+        if "steps" in raw:
+            raise ConfigError(f"{path} may not redefine 'steps' when using 'extends'")
+    return WorkflowConfig(
+        steps=steps,
+        first_step=first_step,
+        retry_inconsistent_checkpoint_state=wf_retry,
+        team=wf_team,
+        extends=wf_extends,
+    )
+
+
+def _parse_workflow_tables(
+    raw: Mapping[str, object], *, path: str
+) -> dict[str, WorkflowConfig]:
+    workflows: dict[str, WorkflowConfig] = {}
+    for wf_name, wf_value in raw.items():
+        wf_key = _require_text(wf_name, path=f"{path} key")
+        wf_table = _require_table(wf_value, path=f"{path}.{wf_key}")
+        workflows[wf_key] = _parse_workflow_definition(
+            wf_table, path=f"{path}.{wf_key}"
+        )
+    return workflows
+
+
+def _validate_workflow_transitions(
+    wf_config: WorkflowConfig,
+    *,
+    path: str,
+) -> None:
+    known_steps = set(wf_config.steps)
+    for step_name, step_config in wf_config.steps.items():
+        for index, transition in enumerate(step_config.go):
+            if transition.to != "END" and transition.to not in known_steps:
+                raise ConfigError(
+                    f"transition target '{transition.to}' in "
+                    f"{path}.steps.{step_name}.go[{index}] does not reference a known step"
+                )
+
+
+def _materialize_workflows(
+    raw_workflows: dict[str, WorkflowConfig],
+    *,
+    path: str,
+) -> dict[str, WorkflowConfig]:
+    resolved: dict[str, WorkflowConfig] = {}
+    resolving: set[str] = set()
+
+    def resolve(name: str) -> WorkflowConfig:
+        if name in resolved:
+            return resolved[name]
+        if name in resolving:
+            raise ConfigError(f"workflow alias cycle detected at {path}.{name}")
+        if name not in raw_workflows:
+            raise ConfigError(f"workflow alias references unknown workflow '{name}'")
+        resolving.add(name)
+        raw_wf = raw_workflows[name]
+        if raw_wf.extends is None:
+            concrete = WorkflowConfig(
+                steps=dict(raw_wf.steps),
+                first_step=raw_wf.first_step,
+                retry_inconsistent_checkpoint_state=raw_wf.retry_inconsistent_checkpoint_state,
+                team=raw_wf.team,
+                extends=None,
+            )
+            _validate_workflow_transitions(concrete, path=f"{path}.{name}")
+        else:
+            base_name = raw_wf.extends
+            if base_name not in raw_workflows:
+                raise ConfigError(
+                    f"workflow '{name}' extends unknown workflow '{base_name}'"
+                )
+            base_raw = raw_workflows[base_name]
+            if base_raw.extends is not None:
+                raise ConfigError(
+                    f"workflow '{name}' cannot extend alias workflow '{base_name}'"
+                )
+            base = resolve(base_name)
+            concrete = WorkflowConfig(
+                steps=dict(base.steps),
+                first_step=base.first_step,
+                retry_inconsistent_checkpoint_state=base.retry_inconsistent_checkpoint_state,
+                team=raw_wf.team if raw_wf.team is not None else base.team,
+                extends=None,
+            )
+            _validate_workflow_transitions(concrete, path=f"{path}.{name}")
+        resolving.remove(name)
+        resolved[name] = concrete
+        return concrete
+
+    for workflow_name in raw_workflows:
+        resolve(workflow_name)
+    return resolved
+
+
 def _parse_workflow_user_config(
-    raw: Mapping[str, object], *, path: Path
+    raw: Mapping[str, object], *, path: Path, allowed_top_level_keys: set[str]
 ) -> WorkflowUserConfig:
-    allowed_top = {"aflow", "harness", "workflow", "prompts"}
-    unknown = sorted(set(raw) - allowed_top)
+    unknown = sorted(set(raw) - allowed_top_level_keys)
     if unknown:
         raise ConfigError(
             f"unsupported top-level keys in {path}: {', '.join(unknown)}"
@@ -318,52 +476,26 @@ def _parse_workflow_user_config(
             harnesses[harness_key] = _parse_workflow_harness(
                 harness_table, path=f"{path}.harness.{harness_key}"
             )
+    roles: dict[str, str] = {}
+    if "roles" in raw:
+        roles_table = _require_table(raw["roles"], path=f"{path}.roles")
+        roles = _parse_role_map(roles_table, path=f"{path}.roles")
+    teams: dict[str, dict[str, str]] = {}
+    if "teams" in raw:
+        teams_table = _require_table(raw["teams"], path=f"{path}.teams")
+        for team_name, team_value in teams_table.items():
+            team_key = _require_text(team_name, path=f"{path}.teams key")
+            team_table = _require_table(team_value, path=f"{path}.teams.{team_key}")
+            teams[team_key] = _parse_role_map(
+                team_table, path=f"{path}.teams.{team_key}"
+            )
     workflows: dict[str, WorkflowConfig] = {}
     if "workflow" in raw:
         workflows_table = _require_table(raw["workflow"], path=f"{path}.workflow")
-        for wf_name, wf_value in workflows_table.items():
-            wf_key = _require_text(wf_name, path=f"{path}.workflow key")
-            wf_table = _require_table(
-                wf_value, path=f"{path}.workflow.{wf_key}"
-            )
-            wf_allowed = {"steps", "retry_inconsistent_checkpoint_state"}
-            wf_unknown = sorted(set(wf_table) - wf_allowed)
-            if wf_unknown:
-                raise ConfigError(
-                    f"unsupported keys in {path}.workflow.{wf_key}: "
-                    f"{', '.join(wf_unknown)}"
-                )
-            if "steps" not in wf_table:
-                raise ConfigError(f"missing 'steps' in {path}.workflow.{wf_key}")
-            wf_retry: int | None = None
-            if "retry_inconsistent_checkpoint_state" in wf_table:
-                retry_value = wf_table["retry_inconsistent_checkpoint_state"]
-                if not isinstance(retry_value, int) or isinstance(retry_value, bool) or retry_value < 0:
-                    raise ConfigError(
-                        f"{path}.workflow.{wf_key}.retry_inconsistent_checkpoint_state "
-                        f"must be a non-negative integer"
-                    )
-                wf_retry = retry_value
-            steps_table = _require_table(
-                wf_table["steps"], path=f"{path}.workflow.{wf_key}.steps"
-            )
-            wf_config_base = _parse_workflow_steps(
-                steps_table, path=f"{path}.workflow.{wf_key}.steps"
-            )
-            wf_config = dataclass_replace(wf_config_base, retry_inconsistent_checkpoint_state=wf_retry)
-            known_steps = set(wf_config.steps)
-            for step_name, step_config in wf_config.steps.items():
-                for j, transition in enumerate(step_config.go):
-                    if (
-                        transition.to != "END"
-                        and transition.to not in known_steps
-                    ):
-                        raise ConfigError(
-                            f"transition target '{transition.to}' in "
-                            f"{path}.workflow.{wf_key}.steps.{step_name}.go[{j}] "
-                            f"does not reference a known step"
-                        )
-            workflows[wf_key] = wf_config
+        raw_workflows = _parse_workflow_tables(
+            workflows_table, path=f"{path}.workflow"
+        )
+        workflows = _materialize_workflows(raw_workflows, path=f"{path}.workflow")
     prompts: dict[str, str] = {}
     if "prompts" in raw:
         prompts_table = _require_table(raw["prompts"], path=f"{path}.prompts")
@@ -377,6 +509,8 @@ def _parse_workflow_user_config(
     return WorkflowUserConfig(
         aflow=aflow,
         harnesses=harnesses,
+        roles=roles,
+        teams=teams,
         workflows=workflows,
         prompts=prompts,
     )
@@ -395,7 +529,42 @@ def load_workflow_config(
         raise ConfigError(f"invalid TOML in {path}: {exc}") from exc
     except OSError as exc:
         raise ConfigError(f"unable to read config file {path}: {exc}") from exc
-    return _parse_workflow_user_config(raw, path=path)
+    sibling_path = path.with_name("workflows.toml")
+    aflow_allowed_top_level_keys = {"aflow", "harness", "roles", "teams", "prompts"}
+    if sibling_path.exists():
+        config = _parse_workflow_user_config(
+            raw, path=path, allowed_top_level_keys=aflow_allowed_top_level_keys
+        )
+        try:
+            with sibling_path.open("rb") as handle:
+                sibling_raw = tomllib.load(handle)
+        except tomllib.TOMLDecodeError as exc:
+            raise ConfigError(
+                f"invalid TOML in {sibling_path}: {exc}"
+            ) from exc
+        except OSError as exc:
+            raise ConfigError(
+                f"unable to read config file {sibling_path}: {exc}"
+            ) from exc
+        sibling_config = _parse_workflow_user_config(
+            sibling_raw, path=sibling_path, allowed_top_level_keys={"workflow"}
+        )
+        merged = WorkflowUserConfig(
+            aflow=config.aflow,
+            harnesses=config.harnesses,
+            roles=config.roles,
+            teams=config.teams,
+            workflows={**config.workflows, **sibling_config.workflows},
+            prompts={**config.prompts, **sibling_config.prompts},
+        )
+    else:
+        merged = _parse_workflow_user_config(
+            raw, path=path, allowed_top_level_keys=aflow_allowed_top_level_keys
+        )
+    errors = validate_workflow_config(merged)
+    if errors:
+        raise ConfigError("; ".join(errors))
+    return merged
 
 
 def bootstrap_config(config_path: Path | None = None) -> Path:
@@ -405,7 +574,13 @@ def bootstrap_config(config_path: Path | None = None) -> Path:
         config_text = resources.files("aflow").joinpath("aflow.toml").read_text(
             encoding="utf-8"
         )
+        workflow_text = resources.files("aflow").joinpath(
+            "workflows.toml"
+        ).read_text(encoding="utf-8")
         path.write_text(config_text, encoding="utf-8")
+        path.with_name("workflows.toml").write_text(
+            workflow_text, encoding="utf-8"
+        )
     return path
 
 
@@ -430,23 +605,57 @@ def validate_workflow_config(
                 f"aflow.default_workflow references unknown workflow "
                 f"'{config.aflow.default_workflow}'"
             )
-    for wf_name, wf_config in config.workflows.items():
-        for step_name, step_config in wf_config.steps.items():
-            parts = step_config.profile.split(".", 1)
-            if len(parts) != 2:
+    for role_name, selector in config.roles.items():
+        if "." not in selector:
+            errors.append(
+                f"roles.{role_name} must be a fully qualified harness.profile selector"
+            )
+            continue
+        harness_name, _, profile_name = selector.partition(".")
+        if harness_name not in config.harnesses:
+            errors.append(
+                f"roles.{role_name} references unknown harness '{harness_name}'"
+            )
+        elif profile_name not in config.harnesses[harness_name].profiles:
+            errors.append(
+                f"roles.{role_name} references unknown profile '{profile_name}' "
+                f"for harness '{harness_name}'"
+            )
+    for team_name, role_map in config.teams.items():
+        for role_key, selector in role_map.items():
+            if role_key not in config.roles:
+                errors.append(
+                    f"teams.{team_name}.{role_key} references unknown role '{role_key}'"
+                )
+            if "." not in selector:
+                errors.append(
+                    f"teams.{team_name}.{role_key} must be a fully qualified harness.profile selector"
+                )
                 continue
-            harness_name, profile_name = parts
+            harness_name, _, profile_name = selector.partition(".")
             if harness_name not in config.harnesses:
                 errors.append(
-                    f"workflow.{wf_name}.steps.{step_name}.profile references "
-                    f"unknown harness '{harness_name}'"
+                    f"teams.{team_name}.{role_key} references unknown harness '{harness_name}'"
                 )
             elif profile_name not in config.harnesses[harness_name].profiles:
                 errors.append(
-                    f"workflow.{wf_name}.steps.{step_name}.profile references "
-                    f"unknown profile '{profile_name}' "
+                    f"teams.{team_name}.{role_key} references unknown profile '{profile_name}' "
                     f"for harness '{harness_name}'"
                 )
+    for wf_name, wf_config in config.workflows.items():
+        if wf_config.extends is not None:
+            errors.append(
+                f"workflow.{wf_name}.extends should not be present after materialization"
+            )
+        known_roles = set(config.roles)
+        for step_name, step_config in wf_config.steps.items():
+            role_name = step_config.role
+            if role_name not in known_roles:
+                errors.append(
+                    f"workflow.{wf_name}.steps.{step_name}.role references unknown role "
+                    f"'{role_name}'"
+                )
+                continue
         for step_name, step_config in wf_config.steps.items():
             for prompt_index, prompt_key in enumerate(step_config.prompts):
                 if prompt_key not in config.prompts:

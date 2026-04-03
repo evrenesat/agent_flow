@@ -84,6 +84,7 @@ def _turn_result_payload(
     stderr: str | None = None,
     returncode: int | None = None,
     step_name: str | None = None,
+    step_role: str | None = None,
     selector: str | None = None,
     original_plan_path: Path | None = None,
     active_plan_path: Path | None = None,
@@ -116,6 +117,8 @@ def _turn_result_payload(
         payload["finished_at"] = finished_at.isoformat()
     if step_name is not None:
         payload["step_name"] = step_name
+    if step_role is not None:
+        payload["step_role"] = step_role
     if selector is not None:
         payload["selector"] = selector
     if original_plan_path is not None:
@@ -218,6 +221,7 @@ def write_turn_artifacts_start(
     started_at: datetime | None = None,
     status: str,
     step_name: str | None = None,
+    step_role: str | None = None,
     selector: str | None = None,
     original_plan_path: Path | None = None,
     active_plan_path: Path | None = None,
@@ -238,6 +242,7 @@ def write_turn_artifacts_start(
         status=status,
         started_at=started_at or datetime.now(timezone.utc),
         step_name=step_name,
+        step_role=step_role,
         selector=selector,
         original_plan_path=original_plan_path,
         active_plan_path=active_plan_path,
@@ -261,6 +266,7 @@ def finalize_turn_artifacts(
     started_at: datetime,
     error: str | None = None,
     step_name: str | None = None,
+    step_role: str | None = None,
     selector: str | None = None,
     original_plan_path: Path | None = None,
     active_plan_path: Path | None = None,
@@ -289,6 +295,7 @@ def finalize_turn_artifacts(
         stderr=stderr,
         returncode=returncode,
         step_name=step_name,
+        step_role=step_role,
         selector=selector,
         original_plan_path=original_plan_path,
         active_plan_path=active_plan_path,

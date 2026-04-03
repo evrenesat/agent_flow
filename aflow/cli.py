@@ -22,12 +22,10 @@ from .workflow import (
     _effective_retry_limit,
     generate_new_plan_path,
     render_step_prompts,
+    resolve_role_selector,
     resolve_profile,
     run_workflow,
 )
-
-
-DEFAULT_MAX_TURNS = 15
 
 RUN_HELP = """\
 Positional arguments:
@@ -53,7 +51,7 @@ per skill.
 
 Supported auto targets:
   claude -> ~/.claude/skills
-  codex -> ~/.codex/skills
+  codex -> ~/.agents/skills
   gemini -> ~/.agents/skills
   kiro -> ~/.kiro/skills
   opencode -> ~/.config/opencode/skills
@@ -133,9 +131,16 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--max-turns", "-mt",
         type=_positive_int,
-        default=DEFAULT_MAX_TURNS,
+        default=None,
         metavar="N",
-        help=f"Maximum number of turns (default: {DEFAULT_MAX_TURNS}).",
+        help="Maximum number of turns for this run. Defaults to [aflow].max_turns.",
+    )
+    run_parser.add_argument(
+        "--team",
+        type=str,
+        default=None,
+        metavar="TEAM_NAME",
+        help="Override the workflow team for this run.",
     )
     run_parser.add_argument(
         "--start-step",
@@ -327,6 +332,18 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     workflow = workflow_config.workflows[workflow_name]
+    effective_team = args.team if args.team is not None else workflow.team
+    if effective_team is not None and effective_team not in workflow_config.teams:
+        known_teams = ", ".join(sorted(workflow_config.teams)) or "none"
+        print(
+            f"error: workflow '{workflow_name}' references unknown team '{effective_team}'. "
+            f"Known teams: {known_teams}",
+            file=sys.stderr,
+        )
+        return 1
+    effective_max_turns = (
+        args.max_turns if args.max_turns is not None else workflow_config.aflow.max_turns
+    )
     if args.start_step is not None and args.start_step not in workflow.steps:
         print(
             f"error: step '{args.start_step}' not found in workflow '{workflow_name}'. "
@@ -398,7 +415,13 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             step = workflow.steps[selected_start_step]
             step_path = f"workflow.{workflow_name}.steps.{selected_start_step}"
-            resolved = resolve_profile(step.profile, workflow_config, step_path=step_path)
+            selector = resolve_role_selector(
+                step.role,
+                effective_team,
+                workflow_config,
+                step_path=step_path,
+            )
+            resolved = resolve_profile(selector, workflow_config, step_path=step_path)
             checkpoint_index = parsed_plan.snapshot.current_checkpoint_index or 1
             new_plan_path = generate_new_plan_path(plan_path, checkpoint_index=checkpoint_index)
             base_user_prompt = render_step_prompts(
@@ -412,7 +435,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             startup_retry = RetryContext(
                 step_name=selected_start_step,
-                step_profile=step.profile,
+                step_role=step.role,
+                resolved_selector=selector,
                 resolved_harness_name=resolved.harness_name,
                 resolved_model=resolved.model,
                 resolved_effort=resolved.effort,
@@ -448,8 +472,9 @@ def main(argv: list[str] | None = None) -> int:
     config = ControllerConfig(
         repo_root=repo_root,
         plan_path=plan_path,
-        max_turns=args.max_turns,
+        max_turns=effective_max_turns,
         keep_runs=workflow_config.aflow.keep_runs,
+        team=effective_team,
         extra_instructions=extra_instructions,
         start_step=selected_start_step,
     )

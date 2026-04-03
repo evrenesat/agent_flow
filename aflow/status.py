@@ -130,6 +130,12 @@ def _render_turn_history(state: ControllerState) -> Group | Text | None:
         body.add_column(style="bold cyan", no_wrap=True)
         body.add_column()
         body.add_row("Step", record.step_name)
+        if record.step_role is not None or record.resolved_selector is not None:
+            role_value = record.step_role or "-"
+            if record.resolved_selector is not None:
+                body.add_row("Role/Selector", f"{role_value} -> {record.resolved_selector}")
+            else:
+                body.add_row("Role", role_value)
         body.add_row("Harness/Model", record.resolved_model_display)
         body.add_row("Duration", _duration_display(record.started_at, record.finished_at))
         body.add_row("Outcome", record.outcome)
@@ -179,7 +185,7 @@ def _render_workflow_graph(
         body = Text()
         body.append(step_name, style=title_style)
         body.append("\n")
-        body.append(step.profile, style="dim")
+        body.append(step.role, style="dim")
         graph_items.append(
             Panel(
                 body,

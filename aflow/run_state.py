@@ -32,6 +32,7 @@ class ControllerConfig:
     plan_path: Path
     max_turns: int = 15
     keep_runs: int = 20
+    team: str | None = None
     extra_instructions: tuple[str, ...] = ()
     start_step: str | None = None
 
@@ -39,7 +40,8 @@ class ControllerConfig:
 @dataclass(frozen=True)
 class RetryContext:
     step_name: str
-    step_profile: str
+    step_role: str
+    resolved_selector: str
     resolved_harness_name: str
     resolved_model: str | None
     resolved_effort: str | None
@@ -58,6 +60,8 @@ class TurnRecord:
     step_name: str
     resolved_harness_name: str
     resolved_model_display: str
+    step_role: str | None = None
+    resolved_selector: str | None = None
     outcome: str = "running"
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     finished_at: datetime | None = None

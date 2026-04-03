@@ -47,7 +47,7 @@ aflow install-skills --yes
 The auto-install destination map is:
 
 - `claude` -> `~/.claude/skills`
-- `codex` -> `~/.codex/skills`
+- `codex` -> `~/.agents/skills`
 - `gemini` -> `~/.agents/skills`
 - `kiro` -> `~/.kiro/skills`
 - `opencode` -> `~/.config/opencode/skills`
@@ -59,11 +59,14 @@ The auto-install destination map is:
 aflow run path/to/plan.md
 aflow run --start-step implement_plan path/to/plan.md
 aflow run review_implement_review path/to/plan.md
+aflow run --team 7teen path/to/plan.md
 aflow run -mt 10 path/to/plan.md
 aflow run path/to/plan.md -- keep edits small and update docs if behavior changes
 ```
 
 If the workflow name is omitted, `aflow` uses `aflow.default_workflow` from config.
+`--team` selects a team for the run, and it overrides any team set in the workflow config.
+`--max-turns` / `-mt` overrides `[aflow].max_turns` for that run.
 
 `--start-step` names a workflow step, not a plan checkpoint.
 
@@ -114,24 +117,22 @@ Current parser rules:
 
 `aflow` reads `~/.config/aflow/aflow.toml`.
 
-If that file does not exist, `aflow` copies the packaged `aflow/aflow.toml` into place and exits. That file is the default config source, so edit it there if you want different models, profiles, or workflows before the first real run.
+If that file does not exist, `aflow` copies the packaged `aflow/aflow.toml` and sibling `aflow/workflows.toml` into place and exits. Those are the default config sources, so edit them there if you want different models, roles, teams, or workflows before the first real run.
 
 Example:
 
 ```bash
 aflow run path/to/plan.md
 # Config bootstrapped at ~/.config/aflow/aflow.toml
-# Review the copied profiles and adjust them if needed, then run again
+# Review the copied config files and adjust them if needed, then run again
 ```
 
 ## Config
 
-Config is standard TOML. The current schema has four top-level sections:
+Config is split across two TOML files:
 
-- `aflow`
-- `harness`
-- `workflow`
-- `prompts`
+- `aflow.toml` for global settings, harness profiles, role mappings, team overrides, and prompt templates
+- `workflows.toml` for workflow definitions and workflow aliases
 
 ### `[aflow]` options
 
@@ -139,6 +140,7 @@ Config is standard TOML. The current schema has four top-level sections:
 |-----|------|---------|-------------|
 | `default_workflow` | string | — | Workflow to run when none is specified on the CLI. |
 | `keep_runs` | int | `20` | Number of run log directories to retain under `.aflow/runs/`. Older directories are pruned automatically after each run. |
+| `max_turns` | int | `15` | Hard cap on turns for a run. `--max-turns` / `-mt` overrides it for that invocation only. |
 | `retry_inconsistent_checkpoint_state` | int | `0` | How many times to automatically retry the same workflow step when the harness exits cleanly but leaves the plan in an inconsistent checkpoint state (a checkpoint heading marked complete with unchecked steps still present). `0` disables retries. Each retry consumes one normal turn and appends the exact parse error to the prompt. |
 | `banner_files_limit` | int | `10` | Maximum number of changed files to show in the live banner before it appends `+N more`. |
 | `max_same_step_turns` | int | `5` | Maximum number of consecutive turns the same workflow step can be selected before the run fails. Applies only to multi-step workflows. `0` disables the guardrail. |
@@ -148,52 +150,53 @@ Each workflow can also set `retry_inconsistent_checkpoint_state` directly in its
 Example:
 
 ```toml
+# aflow.toml
 [aflow]
-default_workflow = "review_implement_review"
+default_workflow = "ralph"
 keep_runs = 10
-retry_inconsistent_checkpoint_state = 1   # allow one retry globally
+max_turns = 12
+retry_inconsistent_checkpoint_state = 1
 
-[workflow.strict_review]
-retry_inconsistent_checkpoint_state = 0   # disable retries for this workflow
-```
-
-### Full example
-
-```toml
-[aflow]
-default_workflow = "review_implement_review"
-
-[harness.opencode.profiles.implement]
-model = "zai-coding-plan/glm-4.7"
-
-[harness.codex.profiles.review]
+[harness.codex.profiles.high]
 model = "gpt-5.4"
 effort = "high"
 
-[workflow.review_implement_review.steps.review_plan]
-profile = "codex.review"
-prompts = ["review_plan"]
-go = [{ to = "implement_plan" }]
+[roles]
+architect = "codex.high"
+worker = "codex.high"
+reviewer = "codex.high"
+senior_architect = "codex.high"
 
-[workflow.review_implement_review.steps.implement_plan]
-profile = "opencode.implement"
-prompts = ["simple_implementation"]
-go = [
-  { to = "review_plan", when = "NEW_PLAN_EXISTS" },
-  { to = "END" },
-]
+[teams.7teen]
+worker = "codex.nano"
 
 [prompts]
-review_plan = "Review the plan at {ORIGINAL_PLAN_PATH}. If tighter follow-up work is needed, write it to {NEW_PLAN_PATH}."
 simple_implementation = "Work from {ACTIVE_PLAN_PATH}. Use 'aflow-execute-plan' skill."
+```
+
+```toml
+# workflows.toml
+[workflow.ralph.steps.implement_plan]
+role = "worker"
+prompts = ["simple_implementation"]
+go = [
+  { to = "END", when = "DONE || MAX_TURNS_REACHED" },
+  { to = "implement_plan" },
+]
+
+[workflow.ralph_jr]
+extends = "ralph"
+team = "7teen"
 ```
 
 Config rules that matter in practice:
 
-- A step `profile` must be fully qualified as `harness.profile`.
-- Profile tables support `model` and optional `effort`.
-- There is no harness-level `model` or `effort` setting outside profiles.
-- A workflow starts at the first declared step in `workflow.<name>.steps`.
+- A step `role` names a key from `[roles]`.
+- `harness.<name>.profiles.<profile>` tables set `model` and optional `effort`.
+- Global roles map to fully qualified `harness.profile` selectors.
+- Team tables override a subset of global roles, and any missing role falls back to `[roles]`.
+- `workflows.toml` holds concrete workflows, and `[workflow.<name>]` can use `extends` plus an optional `team` override for aliases.
+- Concrete workflows start at the first declared step in `workflow.<name>.steps`.
 - `prompts` must be a non-empty array of prompt keys.
 - Prompt values can be inline text or `file://` paths in three forms: absolute (`file:///...`), config-relative (`file://path/to/file.txt`), or cwd-relative (`file://./path/to/file.txt`).
 - `go` transitions are checked in declaration order. First match wins.
@@ -223,7 +226,7 @@ At a high level:
 
 1. `aflow` loads the selected workflow and reads the original plan file.
 2. It starts at the workflow's first declared step.
-3. It renders the step prompts, resolves the selected harness profile, and runs the harness CLI once for that step.
+3. It renders the step prompts, resolves the step role through the selected team and global `[roles]` map, and runs the harness CLI once for that step.
 4. After the harness returns, it re-reads the original plan file and evaluates the step's `go` transitions.
 5. The next matching transition decides whether to continue with another step or stop at `END`.
 
@@ -242,7 +245,7 @@ Extra CLI instructions after the plan path are appended to the rendered step pro
 
 ## Loop Limits
 
-`max_turns` is the primary hard cap on turn count. The workflow runner executes turns with a fixed `1..max_turns` loop, so a workflow cannot exceed that number of turns even if its `go` transitions keep routing back to earlier steps.
+`max_turns` from `[aflow]` is the primary hard cap on turn count. The workflow runner executes turns with a fixed `1..max_turns` loop, so a workflow cannot exceed that number of turns even if its `go` transitions keep routing back to earlier steps.
 
 That hard cap does not end the run by itself in the success path. On the last allowed turn:
 
@@ -352,11 +355,14 @@ Older run directories are pruned automatically. The retention count is controlle
 
 ## Shipped Workflows
 
-The bundled `aflow.toml` includes three ready-to-use workflows:
+The bundled config includes these ready-to-use workflows:
 
 - `ralph` - single-step implementation loop, no review
+- `ralph_jr` - `ralph` with the `7teen` team
 - `review_implement_review` - review, implement, then review again with `aflow-review-squash`. On approval the reviewer squashes all post-handoff commits into one final commit. This squash behavior is specific to this workflow, not an engine-wide invariant.
 - `review_implement_cp_review` - checkpoint-scoped review with `aflow-review-checkpoint` and a final no-squash audit with `aflow-review-final`. Checkpoint commit structure is preserved on approval.
+- `hard` - alias for `review_implement_cp_review`
+- `jr` - alias for `review_implement_cp_review` with the `7teen` team
 
 ## Built-In Workflow Diagrams
 

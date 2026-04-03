@@ -1,8 +1,13 @@
 [aflow]
+# Default workflow used when the CLI does not name one.
 default_workflow = "ralph"
+# Keep this many run directories under `.aflow/runs/` before pruning the oldest.
 keep_runs = 20
+# Hard turn cap for a run. `--max-turns` can override this for a single invocation.
 max_turns = 15
+# Retry a clean harness exit that leaves the plan in inconsistent checkpoint state this many times.
 retry_inconsistent_checkpoint_state = 1
+# Show at most this many changed files in the live banner before collapsing the list.
 banner_files_limit = 10
 # max_same_step_turns limits how many consecutive turns the same workflow step
 # can be selected before the run fails. Applies only to multi-step workflows.
@@ -11,56 +16,71 @@ max_same_step_turns = 5
 
 #### HARNESS PROFILES ####
 
+# Harness profiles map a harness name to the model and effort values it should run.
 [harness.opencode.profiles.turbo]
+# The harness model identifier for this profile.
 model = "zai-coding-plan/glm-5-turbo"
 
 [harness.opencode.profiles.glm47]
+# The harness model identifier for this profile.
 model = "zai-coding-plan/glm-4.7"
 
 [harness.claude.profiles.opus]
+# The harness model identifier for this profile.
 model = "opus"
+# Optional effort setting passed through to harnesses that support it.
 effort = "medium"
 
 [harness.claude.profiles.sonnet]
+# The harness model identifier for this profile.
 model = "sonnet"
 
 [harness.claude.profiles.haiku]
- model = "haiku"
+# The harness model identifier for this profile.
+model = "haiku"
 
 [harness.codex.profiles.high]
+# The harness model identifier for this profile.
 model = "gpt-5.4"
+# Optional effort setting passed through to harnesses that support it.
 effort = "high"
 
 [harness.codex.profiles.mini]
+# The harness model identifier for this profile.
 model = "gpt-5.4-mini"
+# Optional effort setting passed through to harnesses that support it.
 effort = "high"
 
 [harness.codex.profiles.nano]
+# The harness model identifier for this profile.
 model = "gpt-5.4-nano"
 
 
 #### Roles & Teams ####
 
+# Global role-to-selector mappings. Team overrides can replace a subset of these.
 [roles]
-architech = 'claude.opus'
-senior_architech = 'codex.high'
+architect = 'claude.opus'
+senior_architect = 'codex.high'
 worker = 'claude.haiku'
 reviewer = 'claude.sonnet'
 
+# Team-specific role overrides. Missing roles fall back to the global [roles] map.
 [teams.codex1]
-architech = 'codex.high'
-senior_architech = 'codex.high'
+architect = 'codex.high'
+senior_architect = 'codex.high'
 reviewer = 'codex.high'
 worker = 'codex.mini'
 
 [teams.7teen]
-architech = 'codex.mini'
+architect = 'codex.mini'
 reviewer = 'codex.mini'
 worker = 'codex.nano'
 
 
 #### PROMPTS ####
 
+# Named prompt templates that workflow steps reference by key.
 [prompts]
 
 input_vars = """

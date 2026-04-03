@@ -13,7 +13,7 @@ import unittest
 from importlib import resources
 from unittest.mock import patch
 from aflow.config import AflowSection, ConfigError, GoTransition, HarnessProfileConfig, WorkflowConfig, WorkflowHarnessConfig, WorkflowStepConfig, WorkflowUserConfig, bootstrap_config, find_placeholders, load_workflow_config, validate_workflow_config
-from aflow.workflow import WorkflowError, _backup_original_plan, evaluate_condition, generate_new_plan_path, pick_transition, render_prompt, render_step_prompts, resolve_profile, run_workflow
+from aflow.workflow import WorkflowError, _backup_original_plan, evaluate_condition, generate_new_plan_path, pick_transition, render_prompt, render_step_prompts, resolve_profile, resolve_role_selector, run_workflow
 from aflow.cli import _confirm_startup_recovery, _parse_run_args, _pick_workflow_step, build_parser, main
 from aflow.harnesses.claude import ClaudeAdapter
 from aflow.harnesses.codex import CodexAdapter
@@ -34,8 +34,27 @@ def _write_plan(path: Path, text: str) -> None:
 def _write_config(home_dir: Path, text: str) -> Path:
     config_path = home_dir / '.config' / 'aflow' / 'aflow.toml'
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(text, encoding='utf-8')
+    aflow_lines: list[str] = []
+    workflow_lines: list[str] = []
+    current = aflow_lines
+    for line in text.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if stripped.startswith('[') and not stripped.startswith('[['):
+            header = stripped[1:stripped.find(']')]
+            current = workflow_lines if header.startswith('workflow') else aflow_lines
+        current.append(line)
+    config_path.write_text(''.join(aflow_lines), encoding='utf-8')
+    config_path.with_name('workflows.toml').write_text(''.join(workflow_lines), encoding='utf-8')
     return config_path
+
+def _write_split_config(home_dir: Path, aflow_text: str, workflows_text: str) -> tuple[Path, Path]:
+    config_dir = home_dir / '.config' / 'aflow'
+    config_dir.mkdir(parents=True, exist_ok=True)
+    aflow_path = config_dir / 'aflow.toml'
+    workflows_path = config_dir / 'workflows.toml'
+    aflow_path.write_text(aflow_text, encoding='utf-8')
+    workflows_path.write_text(workflows_text, encoding='utf-8')
+    return aflow_path, workflows_path
 
 class WorkflowCliTests(unittest.TestCase):
 
@@ -81,6 +100,14 @@ class WorkflowCliTests(unittest.TestCase):
         args = build_parser().parse_args(['run', '--max-turns', '10', 'plan.md'])
         assert args.max_turns == 10
 
+    def test_run_parser_max_turns_defaults_to_none(self) -> None:
+        args = build_parser().parse_args(['run', 'plan.md'])
+        assert args.max_turns is None
+
+    def test_run_parser_team_flag(self) -> None:
+        args = build_parser().parse_args(['run', '--team', '7teen', 'plan.md'])
+        assert args.team == '7teen'
+
     def test_parser_no_legacy_flags(self) -> None:
         parser = build_parser()
         subparsers_action = next(a for a in parser._actions if hasattr(a, 'choices') and isinstance(a.choices, dict))
@@ -122,7 +149,7 @@ class WorkflowCliTests(unittest.TestCase):
     def test_cli_rejects_missing_default_workflow(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             home_dir = Path(tmpdir)
-            _write_config(home_dir, '[aflow]\n\n[workflow.simple.steps.implement_plan]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n')
+            _write_config(home_dir, '[aflow]\n\n[workflow.simple.steps.implement_plan]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n')
             original_home = os.environ.get('HOME')
             try:
                 os.environ['HOME'] = str(home_dir)
@@ -138,7 +165,7 @@ class WorkflowCliTests(unittest.TestCase):
         import aflow.cli as cli_module
         with tempfile.TemporaryDirectory() as tmpdir:
             home_dir = Path(tmpdir)
-            _write_config(home_dir, '[aflow]\ndefault_workflow = "simple"\n\n[workflow.simple.steps.implement_plan]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[workflow.other.steps.review]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n')
+            _write_config(home_dir, '[aflow]\ndefault_workflow = "simple"\n\n[workflow.simple.steps.implement_plan]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[workflow.other.steps.review]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n')
             plan_path = Path(tmpdir) / 'plan.md'
             _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n')
             original_home = os.environ.get('HOME')
@@ -174,7 +201,7 @@ class WorkflowCliTests(unittest.TestCase):
     def test_cli_rejects_unknown_workflow(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             home_dir = Path(tmpdir)
-            _write_config(home_dir, '[aflow]\ndefault_workflow = "simple"\n\n[workflow.simple.steps.implement_plan]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n')
+            _write_config(home_dir, '[aflow]\ndefault_workflow = "simple"\n\n[workflow.simple.steps.implement_plan]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n')
             original_home = os.environ.get('HOME')
             try:
                 os.environ['HOME'] = str(home_dir)
@@ -210,7 +237,7 @@ class WorkflowCliTests(unittest.TestCase):
     def test_cli_start_step_must_be_valid_workflow_step(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             home_dir = Path(tmpdir)
-            _write_config(home_dir, '[aflow]\ndefault_workflow = "multi_step"\n\n[workflow.multi_step.steps.review_plan]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "implement_plan" }]\n\n[workflow.multi_step.steps.implement_plan]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n')
+            _write_config(home_dir, '[aflow]\ndefault_workflow = "multi_step"\n\n[workflow.multi_step.steps.review_plan]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "implement_plan" }]\n\n[workflow.multi_step.steps.implement_plan]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n')
             plan_path = Path(tmpdir) / 'plan.md'
             _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: Done\n- [x] step one\n')
             original_home = os.environ.get('HOME')
@@ -230,18 +257,18 @@ class WorkflowStartupFlowTests(unittest.TestCase):
         if multi_step:
             workflow_block = (
                 f'[workflow.{workflow_name}.steps.review_plan]\n'
-                'profile = "codex.default"\n'
+                'role = "architect"\n'
                 'prompts = ["review_prompt"]\n'
                 'go = [{ to = "implement_plan" }]\n\n'
                 f'[workflow.{workflow_name}.steps.implement_plan]\n'
-                'profile = "codex.default"\n'
+                'role = "architect"\n'
                 'prompts = ["impl_prompt"]\n'
                 'go = [{ to = "END", when = "DONE || MAX_TURNS_REACHED" }, { to = "review_plan" }]\n'
             )
         else:
             workflow_block = (
                 f'[workflow.{workflow_name}.steps.implement_plan]\n'
-                'profile = "codex.default"\n'
+                'role = "architect"\n'
                 'prompts = ["impl_prompt"]\n'
                 'go = [{ to = "END", when = "DONE || MAX_TURNS_REACHED" }, { to = "implement_plan" }]\n'
             )
@@ -250,6 +277,8 @@ class WorkflowStartupFlowTests(unittest.TestCase):
             (
                 f'[aflow]\n'
                 f'default_workflow = "{workflow_name}"\n\n'
+                '[roles]\n'
+                'architect = "codex.default"\n\n'
                 '[harness.codex.profiles.default]\n'
                 'model = "gpt-5.4"\n\n'
                 f'{workflow_block}'
@@ -261,8 +290,8 @@ class WorkflowStartupFlowTests(unittest.TestCase):
 
     def test_pick_workflow_step_reprompts_on_invalid_input(self) -> None:
         steps = {
-            'review_plan': WorkflowStepConfig(profile='codex.default', prompts=('review_prompt',), go=(GoTransition(to='implement_plan'),)),
-            'implement_plan': WorkflowStepConfig(profile='codex.default', prompts=('impl_prompt',), go=(GoTransition(to='END'),)),
+            'review_plan': WorkflowStepConfig(role='architect', prompts=('review_prompt',), go=(GoTransition(to='implement_plan'),)),
+            'implement_plan': WorkflowStepConfig(role='architect', prompts=('impl_prompt',), go=(GoTransition(to='END'),)),
         }
         with patch('builtins.input', side_effect=['abc', '2']) as mock_input:
             chosen = _pick_workflow_step(steps)
@@ -1017,6 +1046,8 @@ class LazyBannerTests(unittest.TestCase):
             TurnRecord(
                 turn_number=1,
                 step_name='review',
+                step_role='architect',
+                resolved_selector='codex.default',
                 resolved_harness_name='codex',
                 resolved_model_display='codex / gpt-5.4',
                 outcome='completed',
@@ -1027,6 +1058,8 @@ class LazyBannerTests(unittest.TestCase):
             TurnRecord(
                 turn_number=2,
                 step_name='implement',
+                step_role='senior_architect',
+                resolved_selector='opencode.default',
                 resolved_harness_name='opencode',
                 resolved_model_display='opencode / glm-5-turbo',
                 outcome='running',
@@ -1037,8 +1070,8 @@ class LazyBannerTests(unittest.TestCase):
             workflow_name='loop',
             current_step_name='implement',
             workflow_steps={
-                'review': WorkflowStepConfig(profile='codex.default', prompts=('p',), go=(GoTransition(to='implement'),)),
-                'implement': WorkflowStepConfig(profile='opencode.default', prompts=('p',), go=(GoTransition(to='END'),)),
+                'review': WorkflowStepConfig(role='architect', prompts=('p',), go=(GoTransition(to='implement'),)),
+                'implement': WorkflowStepConfig(role='architect', prompts=('p',), go=(GoTransition(to='END'),)),
             },
             config_harness='opencode',
             config_model='glm-5-turbo',
@@ -1053,6 +1086,7 @@ class LazyBannerTests(unittest.TestCase):
         text = console.export_text()
         assert 'review' in text
         assert 'implement' in text
+        assert 'architect -> codex.default' in text
         assert 'go→' in text
         assert 'Turn 001' in text
         assert 'Turn 002' in text
@@ -1076,20 +1110,17 @@ class AflowSectionConfigTests(unittest.TestCase):
 
     def _write_workflow_config(self, tmpdir: str, text: str) -> Path:
         home_dir = Path(tmpdir)
-        config_path = home_dir / '.config' / 'aflow' / 'aflow.toml'
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(text, encoding='utf-8')
-        return config_path
+        return _write_config(home_dir, text)
 
     def test_keep_runs_defaults_to_twenty(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = self._write_workflow_config(tmpdir, '[aflow]\ndefault_workflow = "simple"\n\n[workflow.simple.steps.s]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n')
+            config_path = self._write_workflow_config(tmpdir, '[aflow]\ndefault_workflow = "simple"\n\n[workflow.simple.steps.s]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n')
             config = load_workflow_config(config_path)
             assert config.aflow.keep_runs == 20
 
     def test_keep_runs_reads_from_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = self._write_workflow_config(tmpdir, '[aflow]\ndefault_workflow = "simple"\nkeep_runs = 5\n\n[workflow.simple.steps.s]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n')
+            config_path = self._write_workflow_config(tmpdir, '[aflow]\ndefault_workflow = "simple"\nkeep_runs = 5\n\n[workflow.simple.steps.s]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n')
             config = load_workflow_config(config_path)
             assert config.aflow.keep_runs == 5
 
@@ -1113,13 +1144,13 @@ class AflowSectionConfigTests(unittest.TestCase):
 
     def test_banner_files_limit_defaults_to_ten(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = self._write_workflow_config(tmpdir, '[aflow]\ndefault_workflow = "simple"\n\n[workflow.simple.steps.s]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n')
+            config_path = self._write_workflow_config(tmpdir, '[aflow]\ndefault_workflow = "simple"\n\n[workflow.simple.steps.s]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n')
             config = load_workflow_config(config_path)
             assert config.aflow.banner_files_limit == 10
 
     def test_banner_files_limit_reads_from_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = self._write_workflow_config(tmpdir, '[aflow]\nbanner_files_limit = 7\n\n[workflow.simple.steps.s]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n')
+            config_path = self._write_workflow_config(tmpdir, '[aflow]\nbanner_files_limit = 7\n\n[workflow.simple.steps.s]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n')
             config = load_workflow_config(config_path)
             assert config.aflow.banner_files_limit == 7
 
@@ -1146,23 +1177,25 @@ class WorkflowConfigTests(unittest.TestCase):
 
     def _write_workflow_config(self, tmpdir: str, text: str) -> Path:
         home_dir = Path(tmpdir)
-        config_path = home_dir / '.config' / 'aflow' / 'aflow.toml'
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(text, encoding='utf-8')
-        return config_path
+        return _write_config(home_dir, text)
 
     def test_parse_canonical_workflow_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = self._write_workflow_config(tmpdir, '[aflow]\ndefault_workflow = "simple"\n\n[harness.opencode.profiles.default]\nmodel = "glm-5-turbo"\n\n[harness.codex.profiles.high]\nmodel = "gpt-5.4"\neffort = "high"\n\n[workflow.simple.steps.implement_plan]\nprofile = "opencode.default"\nprompts = ["implementation_prompt"]\ngo = [\n  { to = "END", when = "DONE || MAX_TURNS_REACHED" },\n  { to = "implement_plan" },\n]\n\n[prompts]\nimplementation_prompt = "Work from {ACTIVE_PLAN_PATH}."\n')
+            home_dir = Path(tmpdir)
+            config_path = home_dir / '.config' / 'aflow' / 'aflow.toml'
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text('[aflow]\ndefault_workflow = "simple"\n\n[harness.opencode.profiles.default]\nmodel = "glm-5-turbo"\n\n[harness.codex.profiles.high]\nmodel = "gpt-5.4"\neffort = "high"\n\n[roles]\nworker = "opencode.default"\nreviewer = "codex.high"\n\n[prompts]\nimplementation_prompt = "Work from {ACTIVE_PLAN_PATH}."\n', encoding='utf-8')
+            (config_path.parent / 'workflows.toml').write_text('[workflow.simple.steps.implement_plan]\nrole = "worker"\nprompts = ["implementation_prompt"]\ngo = [\n  { to = "END", when = "DONE || MAX_TURNS_REACHED" },\n  { to = "implement_plan" },\n]\n', encoding='utf-8')
             config = load_workflow_config(config_path)
             assert config.aflow.default_workflow == 'simple'
+            assert config.roles['worker'] == 'opencode.default'
             assert 'opencode' in config.harnesses
             assert config.harnesses['opencode'].profiles['default'].model == 'glm-5-turbo'
             assert config.harnesses['codex'].profiles['high'].effort == 'high'
             assert 'simple' in config.workflows
             assert config.workflows['simple'].first_step == 'implement_plan'
             step = config.workflows['simple'].steps['implement_plan']
-            assert step.profile == 'opencode.default'
+            assert step.role == 'worker'
             assert step.prompts == ('implementation_prompt',)
             assert len(step.go) == 2
             assert step.go[0].to == 'END'
@@ -1173,12 +1206,16 @@ class WorkflowConfigTests(unittest.TestCase):
 
     def test_parse_multi_step_workflow(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = self._write_workflow_config(tmpdir, '[aflow]\ndefault_workflow = "review_loop"\n\n[harness.claude.profiles.opus]\nmodel = "claude-opus-4"\n\n[harness.opencode.profiles.turbo]\nmodel = "glm-5-turbo"\n\n[harness.codex.profiles.high]\nmodel = "gpt-5.4"\neffort = "high"\n\n[workflow.review_loop.steps.review_plan]\nprofile = "claude.opus"\nprompts = ["review_prompt"]\ngo = [{ to = "implement_plan" }]\n\n[workflow.review_loop.steps.implement_plan]\nprofile = "opencode.turbo"\nprompts = ["implementation_prompt"]\ngo = [{ to = "review_implementation" }]\n\n[workflow.review_loop.steps.review_implementation]\nprofile = "codex.high"\nprompts = ["review_prompt", "fix_plan_prompt"]\ngo = [\n  { to = "END", when = "DONE || MAX_TURNS_REACHED" },\n  { to = "implement_plan" },\n]\n\n[prompts]\nreview_prompt = "Review the plan."\nimplementation_prompt = "Implement from {ACTIVE_PLAN_PATH}."\nfix_plan_prompt = "Write new plan to {NEW_PLAN_PATH}."\n')
+            home_dir = Path(tmpdir)
+            config_path = home_dir / '.config' / 'aflow' / 'aflow.toml'
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text('[aflow]\ndefault_workflow = "review_loop"\n\n[harness.claude.profiles.opus]\nmodel = "claude-opus-4"\n\n[harness.opencode.profiles.turbo]\nmodel = "glm-5-turbo"\n\n[harness.codex.profiles.high]\nmodel = "gpt-5.4"\neffort = "high"\n\n[roles]\narchitect = "claude.opus"\nworker = "opencode.turbo"\nreviewer = "codex.high"\n\n[teams.reviewers]\nreviewer = "claude.opus"\n\n[prompts]\nreview_prompt = "Review the plan."\nimplementation_prompt = "Implement from {ACTIVE_PLAN_PATH}."\nfix_plan_prompt = "Write new plan to {NEW_PLAN_PATH}."\n', encoding='utf-8')
+            (config_path.parent / 'workflows.toml').write_text('[workflow.review_loop.steps.review_plan]\nrole = "architect"\nprompts = ["review_prompt"]\ngo = [{ to = "implement_plan" }]\n\n[workflow.review_loop.steps.implement_plan]\nrole = "worker"\nprompts = ["implementation_prompt"]\ngo = [{ to = "review_implementation" }]\n\n[workflow.review_loop.steps.review_implementation]\nrole = "reviewer"\nprompts = ["review_prompt", "fix_plan_prompt"]\ngo = [\n  { to = "END", when = "DONE || MAX_TURNS_REACHED" },\n  { to = "implement_plan" },\n]\n', encoding='utf-8')
             config = load_workflow_config(config_path)
             wf = config.workflows['review_loop']
             assert wf.first_step == 'review_plan'
             assert len(wf.steps) == 3
-            assert wf.steps['review_plan'].profile == 'claude.opus'
+            assert wf.steps['review_plan'].role == 'architect'
             assert wf.steps['review_implementation'].prompts == ('review_prompt', 'fix_plan_prompt')
 
     def test_parse_rejects_legacy_default_harness(self) -> None:
@@ -1197,10 +1234,11 @@ class WorkflowConfigTests(unittest.TestCase):
 
     def test_parse_rejects_bare_harness_step_selector(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.implement_plan]\nprofile = "opencode"\nprompts = ["p1"]\ngo = [{ to = "END" }]\n\n[prompts]\np1 = "do it"\n')
+            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.implement_plan]\nrole = "opencode.default"\nprompts = ["p1"]\ngo = [{ to = "END" }]\n\n[prompts]\np1 = "do it"\n')
             with pytest.raises(ConfigError) as ctx:
                 load_workflow_config(config_path)
-            assert 'fully qualified' in str(ctx.value)
+            assert 'workflow.simple.steps.implement_plan.role' in str(ctx.value)
+            assert 'unknown role' in str(ctx.value)
 
     def test_parse_rejects_harness_level_model_and_effort(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1211,28 +1249,28 @@ class WorkflowConfigTests(unittest.TestCase):
 
     def test_parse_rejects_invalid_condition_not_done(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.implement_plan]\nprofile = "opencode.default"\nprompts = ["p1"]\ngo = [{ to = "END", when = "NOT_DONE" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np1 = "do it"\n')
+            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.implement_plan]\nrole = "architect"\nprompts = ["p1"]\ngo = [{ to = "END", when = "NOT_DONE" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np1 = "do it"\n')
             with pytest.raises(ConfigError) as ctx:
                 load_workflow_config(config_path)
             assert 'NOT_DONE' in str(ctx.value)
 
     def test_parse_rejects_invalid_condition_max_iterations_not_reached(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.implement_plan]\nprofile = "opencode.default"\nprompts = ["p1"]\ngo = [{ to = "END", when = "MAX_ITERATIONS_NOT_REACHED" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np1 = "do it"\n')
+            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.implement_plan]\nrole = "architect"\nprompts = ["p1"]\ngo = [{ to = "END", when = "MAX_ITERATIONS_NOT_REACHED" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np1 = "do it"\n')
             with pytest.raises(ConfigError) as ctx:
                 load_workflow_config(config_path)
             assert 'MAX_ITERATIONS_NOT_REACHED' in str(ctx.value)
 
     def test_parse_rejects_invalid_transition_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.implement_plan]\nprofile = "opencode.default"\nprompts = ["p1"]\ngo = [{ to = "nonexistent_step" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np1 = "do it"\n')
+            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.implement_plan]\nrole = "architect"\nprompts = ["p1"]\ngo = [{ to = "nonexistent_step" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np1 = "do it"\n')
             with pytest.raises(ConfigError) as ctx:
                 load_workflow_config(config_path)
             assert 'nonexistent_step' in str(ctx.value)
 
     def test_parse_rejects_empty_prompts_list(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.s1]\nprofile = "opencode.default"\nprompts = []\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\n')
+            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.s1]\nrole = "architect"\nprompts = []\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\n')
             with pytest.raises(ConfigError) as ctx:
                 load_workflow_config(config_path)
             assert 'prompts' in str(ctx.value)
@@ -1240,14 +1278,14 @@ class WorkflowConfigTests(unittest.TestCase):
 
     def test_parse_rejects_missing_go(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.s1]\nprofile = "opencode.default"\nprompts = ["p"]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n')
+            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.s1]\nrole = "architect"\nprompts = ["p"]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n')
             with pytest.raises(ConfigError) as ctx:
                 load_workflow_config(config_path)
             assert 'go' in str(ctx.value)
 
     def test_parse_rejects_empty_go_list(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.s1]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = []\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n')
+            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.s1]\nrole = "architect"\nprompts = ["p"]\ngo = []\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n')
             with pytest.raises(ConfigError) as ctx:
                 load_workflow_config(config_path)
             assert 'go' in str(ctx.value)
@@ -1255,7 +1293,7 @@ class WorkflowConfigTests(unittest.TestCase):
 
     def test_parse_accepts_unconditional_transition(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.implement_plan]\nprofile = "opencode.default"\nprompts = ["p1"]\ngo = [{ to = "implement_plan" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np1 = "do it"\n')
+            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.implement_plan]\nrole = "architect"\nprompts = ["p1"]\ngo = [{ to = "implement_plan" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np1 = "do it"\n')
             config = load_workflow_config(config_path)
             step = config.workflows['simple'].steps['implement_plan']
             assert len(step.go) == 1
@@ -1264,21 +1302,21 @@ class WorkflowConfigTests(unittest.TestCase):
 
     def test_parse_accepts_complex_condition_expressions(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.s1]\nprofile = "opencode.default"\nprompts = ["p1"]\ngo = [\n  { to = "END", when = "(DONE || MAX_TURNS_REACHED) && NEW_PLAN_EXISTS" },\n  { to = "s1" },\n]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np1 = "do it"\n')
+            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.s1]\nrole = "architect"\nprompts = ["p1"]\ngo = [\n  { to = "END", when = "(DONE || MAX_TURNS_REACHED) && NEW_PLAN_EXISTS" },\n  { to = "s1" },\n]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np1 = "do it"\n')
             config = load_workflow_config(config_path)
             step = config.workflows['simple'].steps['s1']
             assert step.go[0].when == '(DONE || MAX_TURNS_REACHED) && NEW_PLAN_EXISTS'
 
     def test_prompts_preserve_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.s1]\nprofile = "opencode.default"\nprompts = ["alpha", "beta", "gamma"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\ngamma = "third"\nalpha = "first"\nbeta = "second"\n')
+            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.s1]\nrole = "architect"\nprompts = ["alpha", "beta", "gamma"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\ngamma = "third"\nalpha = "first"\nbeta = "second"\n')
             config = load_workflow_config(config_path)
             step = config.workflows['simple'].steps['s1']
             assert step.prompts == ('alpha', 'beta', 'gamma')
 
     def test_go_transitions_preserve_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.s1]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [\n  { to = "END", when = "DONE" },\n  { to = "END", when = "MAX_TURNS_REACHED" },\n  { to = "s2" },\n]\n\n[workflow.simple.steps.s2]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n')
+            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.s1]\nrole = "architect"\nprompts = ["p"]\ngo = [\n  { to = "END", when = "DONE" },\n  { to = "END", when = "MAX_TURNS_REACHED" },\n  { to = "s2" },\n]\n\n[workflow.simple.steps.s2]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n')
             config = load_workflow_config(config_path)
             step = config.workflows['simple'].steps['s1']
             assert len(step.go) == 3
@@ -1291,14 +1329,14 @@ class WorkflowConfigTests(unittest.TestCase):
 
     def test_placeholder_detection(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = self._write_workflow_config(tmpdir, '[aflow]\ndefault_workflow = "simple"\n\n[harness.opencode.profiles.default]\nmodel = "FILL_IN_MODEL"\n\n[harness.codex.profiles.high]\nmodel = "gpt-5.4"\neffort = "high"\n\n[workflow.simple.steps.s1]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[prompts]\np = "do it"\n')
+            config_path = self._write_workflow_config(tmpdir, '[aflow]\ndefault_workflow = "simple"\n\n[harness.opencode.profiles.default]\nmodel = "FILL_IN_MODEL"\n\n[harness.codex.profiles.high]\nmodel = "gpt-5.4"\neffort = "high"\n\n[roles]\narchitect = "opencode.default"\n\n[workflow.simple.steps.s1]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[prompts]\np = "do it"\n')
             config = load_workflow_config(config_path)
             placeholders = find_placeholders(config)
             assert placeholders == ['harness.opencode.profiles.default.model']
 
     def test_placeholder_settings_report_exact_keys(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = self._write_workflow_config(tmpdir, '[aflow]\ndefault_workflow = "simple"\n\n[harness.opencode.profiles.default]\nmodel = "FILL_IN_MODEL"\n\n[harness.codex.profiles.high]\nmodel = "FILL_IN_MODEL"\neffort = "high"\n\n[harness.claude.profiles.opus]\nmodel = "FILL_IN_MODEL"\neffort = "medium"\n\n[workflow.simple.steps.s1]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[prompts]\np = "do it"\n')
+            config_path = self._write_workflow_config(tmpdir, '[aflow]\ndefault_workflow = "simple"\n\n[harness.opencode.profiles.default]\nmodel = "FILL_IN_MODEL"\n\n[harness.codex.profiles.high]\nmodel = "FILL_IN_MODEL"\neffort = "high"\n\n[harness.claude.profiles.opus]\nmodel = "FILL_IN_MODEL"\neffort = "medium"\n\n[roles]\narchitect = "opencode.default"\n\n[workflow.simple.steps.s1]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[prompts]\np = "do it"\n')
             config = load_workflow_config(config_path)
             placeholders = find_placeholders(config)
             assert len(placeholders) == 3
@@ -1310,7 +1348,36 @@ class WorkflowConfigTests(unittest.TestCase):
     def test_bundled_config_validates_without_errors(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         config = load_workflow_config(repo_root / 'aflow' / 'aflow.toml')
+        assert config.aflow.max_turns == 15
+        assert config.roles['architect'] == 'claude.opus'
+        assert config.teams['7teen']['worker'] == 'codex.nano'
+        assert config.workflows['ralph'].steps['implement_plan'].role == 'worker'
+        assert config.workflows['ralph_jr'].team == '7teen'
+        assert 'hard' in config.workflows
+        assert 'jr' in config.workflows
         assert validate_workflow_config(config) == []
+
+    def test_bundled_docs_and_configs_reflect_split_schema(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        readme = (repo_root / 'README.md').read_text(encoding='utf-8')
+        architecture = (repo_root / 'ARCHITECTURE.md').read_text(encoding='utf-8')
+        aflow_text = (repo_root / 'aflow' / 'aflow.toml').read_text(encoding='utf-8')
+        workflows_text = (repo_root / 'aflow' / 'workflows.toml').read_text(encoding='utf-8')
+
+        assert 'aflow/workflows.toml' in readme
+        assert '--team' in readme
+        assert 'max_turns' in readme
+        assert 'extends = "ralph"' in readme
+        assert 'Config is split across two TOML files' in readme
+        assert 'resolve_role_selector' in architecture
+        assert 'workflows.toml' in architecture
+        assert '# Default workflow used when the CLI does not name one.' in aflow_text
+        assert '# Harness profiles map a harness name to the model and effort values it should run.' in aflow_text
+        assert '# Team-specific role overrides. Missing roles fall back to the global [roles] map.' in aflow_text
+        assert '# Named prompt templates that workflow steps reference by key.' in aflow_text
+        assert '# Alias workflow, inherits `ralph` and only swaps the team.' in workflows_text
+        assert '# The step runs under a role. The selected team decides which selector that role maps to at runtime.' in workflows_text
+        assert '# Transition rules are checked top to bottom. Each rule uses a `to` target and an optional `when` condition.' in workflows_text
 
     def test_bootstrap_creates_config_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1318,8 +1385,10 @@ class WorkflowConfigTests(unittest.TestCase):
             result = bootstrap_config(config_path)
             assert result.exists()
             assert result == config_path
-            packaged_text = resources.files('aflow').joinpath('aflow.toml').read_text(encoding='utf-8')
-            assert result.read_text(encoding='utf-8') == packaged_text
+            packaged_aflow = resources.files('aflow').joinpath('aflow.toml').read_text(encoding='utf-8')
+            packaged_workflows = resources.files('aflow').joinpath('workflows.toml').read_text(encoding='utf-8')
+            assert result.read_text(encoding='utf-8') == packaged_aflow
+            assert (config_path.parent / 'workflows.toml').read_text(encoding='utf-8') == packaged_workflows
 
     def test_bootstrap_does_not_overwrite_existing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1331,7 +1400,7 @@ class WorkflowConfigTests(unittest.TestCase):
 
     def test_parse_rejects_unsupported_workflow_level_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = self._write_workflow_config(tmpdir, '[workflow.simple]\nstart = "review"\n\n[workflow.simple.steps.review]\nprofile = "opencode.default"\nprompts = ["p"]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "x"\n')
+            config_path = self._write_workflow_config(tmpdir, '[workflow.simple]\nstart = "review"\n\n[workflow.simple.steps.review]\nrole = "architect"\nprompts = ["p"]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "x"\n')
             with pytest.raises(ConfigError) as ctx:
                 load_workflow_config(config_path)
             assert 'workflow.simple' in str(ctx.value)
@@ -1339,14 +1408,14 @@ class WorkflowConfigTests(unittest.TestCase):
 
     def test_parse_rejects_invalid_condition_operator_eq(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.s1]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END", when = "DONE == NEW_PLAN_EXISTS" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "x"\n')
+            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.s1]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END", when = "DONE == NEW_PLAN_EXISTS" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "x"\n')
             with pytest.raises(ConfigError) as ctx:
                 load_workflow_config(config_path)
             assert '==' in str(ctx.value)
 
     def test_parse_rejects_invalid_condition_operator_plus(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.s1]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END", when = "DONE + NEW_PLAN_EXISTS" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "x"\n')
+            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.s1]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END", when = "DONE + NEW_PLAN_EXISTS" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "x"\n')
             with pytest.raises(ConfigError) as ctx:
                 load_workflow_config(config_path)
             assert '+' in str(ctx.value)
@@ -1358,26 +1427,28 @@ class WorkflowConfigTests(unittest.TestCase):
         assert any(('nonexistent' in e for e in errors))
 
     def test_validate_workflow_config_unknown_harness_reports_exact_path(self) -> None:
-        wf = WorkflowConfig(steps={'s1': WorkflowStepConfig(profile='unknown_harness.p1', prompts=('p1',))})
+        wf = WorkflowConfig(steps={'s1': WorkflowStepConfig(role='unknown_harness.p1', prompts=('p1',))})
         config = WorkflowUserConfig(workflows={'w': wf}, prompts={'p1': 'text'})
         errors = validate_workflow_config(config)
-        assert any(('workflow.w.steps.s1.profile' in e for e in errors))
+        assert any(('workflow.w.steps.s1.role' in e for e in errors))
+        assert any(('unknown role' in e for e in errors))
 
     def test_validate_workflow_config_unknown_profile_reports_exact_path(self) -> None:
-        wf = WorkflowConfig(steps={'s1': WorkflowStepConfig(profile='opencode.missing', prompts=('p1',))})
+        wf = WorkflowConfig(steps={'s1': WorkflowStepConfig(role='opencode.missing', prompts=('p1',))})
         config = WorkflowUserConfig(harnesses={'opencode': WorkflowHarnessConfig(profiles={})}, workflows={'w': wf}, prompts={'p1': 'text'})
         errors = validate_workflow_config(config)
-        assert any(('workflow.w.steps.s1.profile' in e for e in errors))
+        assert any(('workflow.w.steps.s1.role' in e for e in errors))
+        assert any(('unknown role' in e for e in errors))
 
     def test_validate_workflow_config_unknown_prompt_reports_exact_path(self) -> None:
-        wf = WorkflowConfig(steps={'s1': WorkflowStepConfig(profile='opencode.default', prompts=('missing_prompt',))})
+        wf = WorkflowConfig(steps={'s1': WorkflowStepConfig(role='architect', prompts=('missing_prompt',))})
         config = WorkflowUserConfig(harnesses={'opencode': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='m')})}, workflows={'w': wf})
         errors = validate_workflow_config(config)
         assert any(('workflow.w.steps.s1.prompts[0]' in e for e in errors))
 
     def test_parse_accepts_complex_condition_with_negation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.s1]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [\n  { to = "END", when = "!(DONE || MAX_TURNS_REACHED) && NEW_PLAN_EXISTS" },\n  { to = "s1" },\n]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n')
+            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.s1]\nrole = "architect"\nprompts = ["p"]\ngo = [\n  { to = "END", when = "!(DONE || MAX_TURNS_REACHED) && NEW_PLAN_EXISTS" },\n  { to = "s1" },\n]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n')
             config = load_workflow_config(config_path)
             step = config.workflows['simple'].steps['s1']
             assert step.go[0].when == '!(DONE || MAX_TURNS_REACHED) && NEW_PLAN_EXISTS'
@@ -1388,8 +1459,14 @@ class WorkflowConfigTests(unittest.TestCase):
         assert any(('nonexistent' in e for e in errors))
 
     def test_validate_workflow_config_passes_for_valid_config(self) -> None:
-        wf = WorkflowConfig(steps={'s1': WorkflowStepConfig(profile='opencode.default', prompts=('p1',))})
-        config = WorkflowUserConfig(aflow=AflowSection(default_workflow='w'), harnesses={'opencode': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='m')})}, workflows={'w': wf}, prompts={'p1': 'text'})
+        wf = WorkflowConfig(steps={'s1': WorkflowStepConfig(role='architect', prompts=('p1',))})
+        config = WorkflowUserConfig(
+            aflow=AflowSection(default_workflow='w'),
+            roles={'architect': 'opencode.default'},
+            harnesses={'opencode': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='m')})},
+            workflows={'w': wf},
+            prompts={'p1': 'text'},
+        )
         errors = validate_workflow_config(config)
         assert errors == []
 
@@ -1409,14 +1486,14 @@ class WorkflowConfigTests(unittest.TestCase):
 
     def test_parse_rejects_unsupported_condition_in_when(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.s1]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END", when = "DONE && STALEMATE" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n')
+            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.s1]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END", when = "DONE && STALEMATE" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n')
             with pytest.raises(ConfigError) as ctx:
                 load_workflow_config(config_path)
             assert 'STALEMATE' in str(ctx.value)
 
     def test_first_step_is_first_declared(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.review]\nprofile = "claude.opus"\nprompts = ["p1"]\ngo = [{ to = "implement" }]\n\n[workflow.simple.steps.implement]\nprofile = "opencode.default"\nprompts = ["p2"]\ngo = [{ to = "END" }]\n\n[harness.claude.profiles.opus]\nmodel = "m"\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np1 = "review"\np2 = "implement"\n')
+            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.review]\nrole = "reviewer"\nprompts = ["p1"]\ngo = [{ to = "implement" }]\n\n[workflow.simple.steps.implement]\nrole = "architect"\nprompts = ["p2"]\ngo = [{ to = "END" }]\n\n[harness.claude.profiles.opus]\nmodel = "m"\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\nreviewer = "claude.opus"\narchitect = "opencode.default"\n\n[prompts]\np1 = "review"\np2 = "implement"\n')
             config = load_workflow_config(config_path)
             wf = config.workflows['simple']
             assert wf.first_step == 'review'
@@ -1433,18 +1510,18 @@ class WorkflowConfigTests(unittest.TestCase):
             config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.s1]\nprompts = ["p"]\n\n[prompts]\np = "do it"\n')
             with pytest.raises(ConfigError) as ctx:
                 load_workflow_config(config_path)
-            assert 'profile' in str(ctx.value)
+            assert 'role' in str(ctx.value)
 
     def test_step_missing_prompts_raises_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.s1]\nprofile = "opencode.default"\n\n[harness.opencode.profiles.default]\nmodel = "m"\n')
+            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.s1]\nrole = "architect"\n\n[harness.opencode.profiles.default]\nmodel = "m"\n')
             with pytest.raises(ConfigError) as ctx:
                 load_workflow_config(config_path)
             assert 'prompts' in str(ctx.value)
 
     def test_go_missing_to_raises_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.s1]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ when = "DONE" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n')
+            config_path = self._write_workflow_config(tmpdir, '[workflow.simple.steps.s1]\nrole = "architect"\nprompts = ["p"]\ngo = [{ when = "DONE" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n')
             with pytest.raises(ConfigError) as ctx:
                 load_workflow_config(config_path)
             assert 'to' in str(ctx.value)
@@ -1489,14 +1566,14 @@ class WorkflowRuntimeTests(unittest.TestCase):
             assert str(working_dir / 'nonexistent.txt') in str(ctx.value)
 
     def test_render_step_prompts_unknown_key_raises(self) -> None:
-        step = WorkflowStepConfig(profile='opencode.default', prompts=('missing_key',))
+        step = WorkflowStepConfig(role='architect', prompts=('missing_key',))
         config = WorkflowUserConfig(prompts={})
         with pytest.raises(WorkflowError) as ctx:
             render_step_prompts(step, config, config_dir=Path('/cfg'), working_dir=Path('/cwd'), original_plan_path=Path('/p.md'), new_plan_path=Path('/n.md'), active_plan_path=Path('/a.md'))
         assert 'missing_key' in str(ctx.value)
 
     def test_render_step_prompts_joins_multiple_prompts(self) -> None:
-        step = WorkflowStepConfig(profile='opencode.default', prompts=('p1', 'p2'))
+        step = WorkflowStepConfig(role='architect', prompts=('p1', 'p2'))
         config = WorkflowUserConfig(prompts={'p1': 'First {ORIGINAL_PLAN_PATH}', 'p2': 'Second {ACTIVE_PLAN_PATH}'})
         result = render_step_prompts(step, config, config_dir=Path('/cfg'), working_dir=Path('/cwd'), original_plan_path=Path('/orig.md'), new_plan_path=Path('/new.md'), active_plan_path=Path('/active.md'))
         assert result == 'First /orig.md\n\nSecond /active.md'
@@ -1675,13 +1752,34 @@ class WorkflowRuntimeTests(unittest.TestCase):
             resolve_profile('opencode', config, step_path='workflow.w.steps.s')
         assert 'fully qualified' in str(ctx.value)
 
+    def test_resolve_role_selector_uses_team_override_then_global_fallback(self) -> None:
+        config = WorkflowUserConfig(
+            roles={
+                'architect': 'codex.default',
+                'senior_architect': 'opencode.default',
+            },
+            teams={
+                '7teen': {
+                    'architect': 'gemini.fast',
+                },
+            },
+        )
+        assert resolve_role_selector('architect', '7teen', config, step_path='workflow.w.steps.review') == 'gemini.fast'
+        assert resolve_role_selector('senior_architect', '7teen', config, step_path='workflow.w.steps.review') == 'opencode.default'
+
+    def test_resolve_role_selector_unknown_team_raises(self) -> None:
+        config = WorkflowUserConfig(roles={'architect': 'codex.default'})
+        with pytest.raises(WorkflowError) as ctx:
+            resolve_role_selector('architect', 'missing', config, step_path='workflow.w.steps.review')
+        assert 'unknown team' in str(ctx.value)
+
     def test_workflow_ends_only_via_end_transition(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = Path(tmpdir)
             config_dir = repo_root
             plan_path = repo_root / 'plan.md'
             _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
-            wf_config = WorkflowUserConfig(harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(profile='codex.default', prompts=('implementation_prompt',), go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='implement_plan')))}, first_step='implement_plan')}, prompts={'implementation_prompt': 'Work from {ACTIVE_PLAN_PATH}.'})
+            wf_config = WorkflowUserConfig(roles={'architect': 'codex.default'}, harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(role='architect', prompts=('implementation_prompt',), go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='implement_plan')))}, first_step='implement_plan')}, prompts={'implementation_prompt': 'Work from {ACTIVE_PLAN_PATH}.'})
             call_count = 0
 
             def runner(argv, **kwargs):
@@ -1701,7 +1799,7 @@ class WorkflowRuntimeTests(unittest.TestCase):
             config_dir = repo_root
             plan_path = repo_root / 'plan.md'
             _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n- [ ] step two\n')
-            wf_config = WorkflowUserConfig(harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(profile='codex.default', prompts=('implementation_prompt',), go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='implement_plan')))}, first_step='implement_plan')}, prompts={'implementation_prompt': 'Work from {ACTIVE_PLAN_PATH}.'})
+            wf_config = WorkflowUserConfig(roles={'architect': 'codex.default'}, harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(role='architect', prompts=('implementation_prompt',), go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='implement_plan')))}, first_step='implement_plan')}, prompts={'implementation_prompt': 'Work from {ACTIVE_PLAN_PATH}.'})
             call_count = 0
 
             def runner(argv, **kwargs):
@@ -1727,7 +1825,7 @@ class WorkflowRuntimeTests(unittest.TestCase):
 
             def runner(argv, **kwargs):
                 return subprocess.CompletedProcess(argv, 0, stdout='ok', stderr='')
-            wf_config = WorkflowUserConfig(harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'loop': WorkflowConfig(steps={'review': WorkflowStepConfig(profile='codex.default', prompts=('review_prompt',), go=(GoTransition(to='implement'),)), 'implement': WorkflowStepConfig(profile='codex.default', prompts=('impl_prompt',), go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='review')))}, first_step='review')}, prompts={'review_prompt': 'Review. New plan: {NEW_PLAN_PATH}. Active: {ACTIVE_PLAN_PATH}.', 'impl_prompt': 'Implement. New plan: {NEW_PLAN_PATH}. Active: {ACTIVE_PLAN_PATH}.'})
+            wf_config = WorkflowUserConfig(roles={'architect': 'codex.default'}, harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'loop': WorkflowConfig(steps={'review': WorkflowStepConfig(role='architect', prompts=('review_prompt',), go=(GoTransition(to='implement'),)), 'implement': WorkflowStepConfig(role='architect', prompts=('impl_prompt',), go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='review')))}, first_step='review')}, prompts={'review_prompt': 'Review. New plan: {NEW_PLAN_PATH}. Active: {ACTIVE_PLAN_PATH}.', 'impl_prompt': 'Implement. New plan: {NEW_PLAN_PATH}. Active: {ACTIVE_PLAN_PATH}.'})
             turn_number = [0]
 
             def capturing_runner(argv, **kwargs):
@@ -1754,7 +1852,7 @@ class WorkflowRuntimeTests(unittest.TestCase):
                     captured = match.group(1).rstrip('.')
                     captured_active_paths.append(captured)
                 return subprocess.CompletedProcess(argv, 0, stdout='ok', stderr='')
-            wf_config = WorkflowUserConfig(harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'loop': WorkflowConfig(steps={'review': WorkflowStepConfig(profile='codex.default', prompts=('review_prompt',), go=(GoTransition(to='implement'),)), 'implement': WorkflowStepConfig(profile='codex.default', prompts=('impl_prompt',), go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='review')))}, first_step='review')}, prompts={'review_prompt': 'Active: {ACTIVE_PLAN_PATH}. New: {NEW_PLAN_PATH}.', 'impl_prompt': 'Active: {ACTIVE_PLAN_PATH}. New: {NEW_PLAN_PATH}.'})
+            wf_config = WorkflowUserConfig(roles={'architect': 'codex.default'}, harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'loop': WorkflowConfig(steps={'review': WorkflowStepConfig(role='architect', prompts=('review_prompt',), go=(GoTransition(to='implement'),)), 'implement': WorkflowStepConfig(role='architect', prompts=('impl_prompt',), go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='review')))}, first_step='review')}, prompts={'review_prompt': 'Active: {ACTIVE_PLAN_PATH}. New: {NEW_PLAN_PATH}.', 'impl_prompt': 'Active: {ACTIVE_PLAN_PATH}. New: {NEW_PLAN_PATH}.'})
             controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=4)
             run_workflow(controller_config, wf_config, 'loop', config_dir=config_dir, adapter=CodexAdapter(), runner=capturing_runner)
             for p in captured_active_paths:
@@ -1781,7 +1879,7 @@ class WorkflowRuntimeTests(unittest.TestCase):
                     new_path.write_text('# Generated plan', encoding='utf-8')
                     _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n')
                 return subprocess.CompletedProcess(argv, 0, stdout='ok', stderr='')
-            wf_config = WorkflowUserConfig(harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'loop': WorkflowConfig(steps={'review': WorkflowStepConfig(profile='codex.default', prompts=('review_prompt',), go=(GoTransition(to='implement'),)), 'implement': WorkflowStepConfig(profile='codex.default', prompts=('impl_prompt',), go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='review')))}, first_step='review')}, prompts={'review_prompt': 'Active: {ACTIVE_PLAN_PATH}. New: {NEW_PLAN_PATH}.', 'impl_prompt': 'Active: {ACTIVE_PLAN_PATH}.'})
+            wf_config = WorkflowUserConfig(roles={'architect': 'codex.default'}, harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'loop': WorkflowConfig(steps={'review': WorkflowStepConfig(role='architect', prompts=('review_prompt',), go=(GoTransition(to='implement'),)), 'implement': WorkflowStepConfig(role='architect', prompts=('impl_prompt',), go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='review')))}, first_step='review')}, prompts={'review_prompt': 'Active: {ACTIVE_PLAN_PATH}. New: {NEW_PLAN_PATH}.', 'impl_prompt': 'Active: {ACTIVE_PLAN_PATH}.'})
             controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=5)
             run_workflow(controller_config, wf_config, 'loop', config_dir=config_dir, adapter=CodexAdapter(), runner=capturing_runner)
             assert len(captured_active_paths) == 2
@@ -1801,7 +1899,7 @@ class WorkflowRuntimeTests(unittest.TestCase):
                 call_order.append(argv[0])
                 _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n')
                 return subprocess.CompletedProcess(argv, 0, stdout='ok', stderr='')
-            wf_config = WorkflowUserConfig(harnesses={'claude': WorkflowHarnessConfig(profiles={'opus': HarnessProfileConfig(model='claude-opus-4')}), 'opencode': WorkflowHarnessConfig(profiles={'turbo': HarnessProfileConfig(model='glm-5-turbo')})}, workflows={'review_loop': WorkflowConfig(steps={'review_plan': WorkflowStepConfig(profile='claude.opus', prompts=('review_prompt',), go=(GoTransition(to='implement_plan'),)), 'implement_plan': WorkflowStepConfig(profile='opencode.turbo', prompts=('impl_prompt',), go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='review_plan')))}, first_step='review_plan')}, prompts={'review_prompt': 'Review the plan.', 'impl_prompt': 'Implement from {ACTIVE_PLAN_PATH}.'})
+            wf_config = WorkflowUserConfig(roles={'reviewer': 'claude.opus', 'worker': 'opencode.turbo'}, harnesses={'claude': WorkflowHarnessConfig(profiles={'opus': HarnessProfileConfig(model='claude-opus-4')}), 'opencode': WorkflowHarnessConfig(profiles={'turbo': HarnessProfileConfig(model='glm-5-turbo')})}, workflows={'review_loop': WorkflowConfig(steps={'review_plan': WorkflowStepConfig(role='reviewer', prompts=('review_prompt',), go=(GoTransition(to='implement_plan'),)), 'implement_plan': WorkflowStepConfig(role='worker', prompts=('impl_prompt',), go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='review_plan')))}, first_step='review_plan')}, prompts={'review_prompt': 'Review the plan.', 'impl_prompt': 'Implement from {ACTIVE_PLAN_PATH}.'})
             controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=5)
             result = run_workflow(controller_config, wf_config, 'review_loop', config_dir=config_dir, runner=capturing_runner)
             assert result.turns_completed == 2
@@ -1817,7 +1915,7 @@ class WorkflowRuntimeTests(unittest.TestCase):
 
             def runner(argv, **kwargs):
                 return subprocess.CompletedProcess(argv, 0, stdout='noop', stderr='')
-            wf_config = WorkflowUserConfig(harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(profile='codex.default', prompts=('p',), go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='implement_plan')))}, first_step='implement_plan')}, prompts={'p': 'Work.'})
+            wf_config = WorkflowUserConfig(roles={'architect': 'codex.default'}, harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(role='architect', prompts=('p',), go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='implement_plan')))}, first_step='implement_plan')}, prompts={'p': 'Work.'})
             controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3)
             result = run_workflow(controller_config, wf_config, 'simple', config_dir=config_dir, adapter=CodexAdapter(), runner=runner)
             assert result.turns_completed == 3
@@ -1832,7 +1930,7 @@ class WorkflowRuntimeTests(unittest.TestCase):
 
             def runner(argv, **kwargs):
                 return subprocess.CompletedProcess(argv, 0, stdout='ok', stderr='')
-            wf_config = WorkflowUserConfig(harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(profile='codex.default', prompts=('p',), go=(GoTransition(to='END', when='DONE'),))}, first_step='implement_plan')}, prompts={'p': 'Work.'})
+            wf_config = WorkflowUserConfig(roles={'architect': 'codex.default'}, harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(role='architect', prompts=('p',), go=(GoTransition(to='END', when='DONE'),))}, first_step='implement_plan')}, prompts={'p': 'Work.'})
             controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3)
             with pytest.raises(WorkflowError) as ctx:
                 run_workflow(controller_config, wf_config, 'simple', config_dir=config_dir, adapter=CodexAdapter(), runner=runner)
@@ -1853,7 +1951,7 @@ class WorkflowRuntimeTests(unittest.TestCase):
                 if call_count[0] == 1:
                     _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [x] step one\n- [ ] step two\n')
                 return subprocess.CompletedProcess(argv, 0, stdout='ok', stderr='')
-            wf_config = WorkflowUserConfig(harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'loop': WorkflowConfig(steps={'review': WorkflowStepConfig(profile='codex.default', prompts=('p',), go=(GoTransition(to='implement'),)), 'implement': WorkflowStepConfig(profile='codex.default', prompts=('p',), go=(GoTransition(to='END', when='DONE'),))}, first_step='review')}, prompts={'p': 'Work.'})
+            wf_config = WorkflowUserConfig(roles={'architect': 'codex.default'}, harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'loop': WorkflowConfig(steps={'review': WorkflowStepConfig(role='architect', prompts=('p',), go=(GoTransition(to='implement'),)), 'implement': WorkflowStepConfig(role='architect', prompts=('p',), go=(GoTransition(to='END', when='DONE'),))}, first_step='review')}, prompts={'p': 'Work.'})
             controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=5)
             with pytest.raises(WorkflowError) as ctx:
                 run_workflow(controller_config, wf_config, 'loop', config_dir=config_dir, adapter=CodexAdapter(), runner=runner)
@@ -1882,7 +1980,7 @@ class WorkflowRuntimeTests(unittest.TestCase):
                 turn_counter[0] += 1
                 ended_at_turn[0] = turn_counter[0]
                 return subprocess.CompletedProcess(argv, 0, stdout='ok', stderr='')
-            wf_config = WorkflowUserConfig(harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(profile='codex.default', prompts=('p',), go=(GoTransition(to='END', when='DONE'), GoTransition(to='implement_plan')))}, first_step='implement_plan')}, prompts={'p': 'Work.'})
+            wf_config = WorkflowUserConfig(roles={'architect': 'codex.default'}, harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(role='architect', prompts=('p',), go=(GoTransition(to='END', when='DONE'), GoTransition(to='implement_plan')))}, first_step='implement_plan')}, prompts={'p': 'Work.'})
             controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=5)
             with pytest.raises(WorkflowError):
                 run_workflow(controller_config, wf_config, 'simple', config_dir=config_dir, adapter=CodexAdapter(), runner=runner)
@@ -1913,7 +2011,7 @@ class WorkflowRuntimeTests(unittest.TestCase):
                 def build_invocation(self, *, repo_root, model, system_prompt, user_prompt, effort=None):
                     captured_user_prompts.append(user_prompt)
                     return HarnessInvocation(label='codex', argv=('codex', 'run', user_prompt), env={}, prompt_mode='prefix-system-into-user-prompt', system_prompt=system_prompt, user_prompt=user_prompt, effective_prompt=f'{system_prompt}\n\n{user_prompt}' if system_prompt else user_prompt)
-            wf_config = WorkflowUserConfig(harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(profile='codex.default', prompts=('p',), go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='implement_plan')))}, first_step='implement_plan')}, prompts={'p': 'Work from {ACTIVE_PLAN_PATH}.'})
+            wf_config = WorkflowUserConfig(roles={'architect': 'codex.default'}, harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(role='architect', prompts=('p',), go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='implement_plan')))}, first_step='implement_plan')}, prompts={'p': 'Work from {ACTIVE_PLAN_PATH}.'})
             controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=1, extra_instructions=('be careful', 'use tests'))
             run_workflow(controller_config, wf_config, 'simple', config_dir=config_dir, adapter=CapturingAdapter(), runner=lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, '', ''))
             assert len(captured_user_prompts) == 1
@@ -1929,7 +2027,7 @@ class WorkflowRuntimeTests(unittest.TestCase):
 
             def runner(argv, **kwargs):
                 return subprocess.CompletedProcess(argv, 1, stdout='bad', stderr='err')
-            wf_config = WorkflowUserConfig(harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(profile='codex.default', prompts=('p',), go=(GoTransition(to='END', when='DONE'), GoTransition(to='implement_plan')))}, first_step='implement_plan')}, prompts={'p': 'Work.'})
+            wf_config = WorkflowUserConfig(roles={'architect': 'codex.default'}, harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(role='architect', prompts=('p',), go=(GoTransition(to='END', when='DONE'), GoTransition(to='implement_plan')))}, first_step='implement_plan')}, prompts={'p': 'Work.'})
             controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3)
             with pytest.raises(WorkflowError) as ctx:
                 run_workflow(controller_config, wf_config, 'simple', config_dir=config_dir, adapter=CodexAdapter(), runner=runner)
@@ -1946,7 +2044,7 @@ class WorkflowRuntimeTests(unittest.TestCase):
             def runner(argv, **kwargs):
                 call_count[0] += 1
                 return subprocess.CompletedProcess(argv, 0, 'ok', '')
-            wf_config = WorkflowUserConfig(harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(profile='codex.default', prompts=('p',), go=(GoTransition(to='END'),))}, first_step='implement_plan')}, prompts={'p': 'Work.'})
+            wf_config = WorkflowUserConfig(roles={'architect': 'codex.default'}, harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(role='architect', prompts=('p',), go=(GoTransition(to='END'),))}, first_step='implement_plan')}, prompts={'p': 'Work.'})
             controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3)
             result = run_workflow(controller_config, wf_config, 'simple', config_dir=config_dir, adapter=CodexAdapter(), runner=runner)
             assert result.turns_completed == 0
@@ -1964,7 +2062,7 @@ class WorkflowRuntimeTests(unittest.TestCase):
 
             def runner(argv, **kwargs):
                 return subprocess.CompletedProcess(argv, 0, 'ok', '')
-            wf_config = WorkflowUserConfig(harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(profile='codex.default', prompts=('p',), go=(GoTransition(to='END'),))}, first_step='implement_plan')}, prompts={'p': 'Work.'})
+            wf_config = WorkflowUserConfig(roles={'architect': 'codex.default'}, harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(role='architect', prompts=('p',), go=(GoTransition(to='END'),))}, first_step='implement_plan')}, prompts={'p': 'Work.'})
             controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3)
             result = run_workflow(controller_config, wf_config, 'simple', config_dir=config_dir, adapter=CodexAdapter(), runner=runner)
             assert result.turns_completed == 1
@@ -1990,7 +2088,7 @@ class WorkflowRuntimeTests(unittest.TestCase):
                 new_plan_path.write_text('# Generated\n', encoding='utf-8')
                 return subprocess.CompletedProcess(argv, 0, 'ok', '')
 
-            wf_config = WorkflowUserConfig(harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(profile='codex.default', prompts=('p',), go=(GoTransition(to='END', when='NEW_PLAN_EXISTS'),))}, first_step='implement_plan')}, prompts={'p': 'Work.'})
+            wf_config = WorkflowUserConfig(roles={'architect': 'codex.default'}, harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(role='architect', prompts=('p',), go=(GoTransition(to='END', when='NEW_PLAN_EXISTS'),))}, first_step='implement_plan')}, prompts={'p': 'Work.'})
             controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3)
             result = run_workflow(controller_config, wf_config, 'simple', config_dir=config_dir, adapter=CodexAdapter(), runner=runner)
             assert result.turns_completed == 1
@@ -2054,10 +2152,11 @@ class WorkflowRuntimeTests(unittest.TestCase):
             )
             _write_plan(plan_path, initial_plan)
             wf_config = WorkflowUserConfig(
+                roles={'architect': 'codex.default'},
                 harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})},
                 workflows={'simple': WorkflowConfig(
                     steps={'implement_plan': WorkflowStepConfig(
-                        profile='codex.default',
+                        role='architect',
                         prompts=('p',),
                         go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='implement_plan')),
                     )},
@@ -2110,10 +2209,11 @@ class WorkflowRuntimeTests(unittest.TestCase):
             )
             _write_plan(plan_path, initial_plan)
             wf_config = WorkflowUserConfig(
+                roles={'architect': 'codex.default'},
                 harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})},
                 workflows={'simple': WorkflowConfig(
                     steps={'implement_plan': WorkflowStepConfig(
-                        profile='codex.default',
+                        role='architect',
                         prompts=('p',),
                         go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='implement_plan')),
                     )},
@@ -2237,7 +2337,7 @@ class WorkflowArtifactTests(unittest.TestCase):
             config_dir = repo_root
             plan_path = repo_root / 'plan.md'
             _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n')
-            wf_config = WorkflowUserConfig(harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(profile='codex.default', prompts=('p',), go=(GoTransition(to='END'),))}, first_step='implement_plan')}, prompts={'p': 'Work.'})
+            wf_config = WorkflowUserConfig(roles={'architect': 'codex.default'}, harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(role='architect', prompts=('p',), go=(GoTransition(to='END'),))}, first_step='implement_plan')}, prompts={'p': 'Work.'})
             result = run_workflow(ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3), wf_config, 'simple', config_dir=config_dir)
             run_dir = result.run_dir
             run_json = json.loads((run_dir / 'run.json').read_text(encoding='utf-8'))
@@ -2259,11 +2359,17 @@ class WorkflowArtifactTests(unittest.TestCase):
             def runner(argv, **kwargs):
                 _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n')
                 return subprocess.CompletedProcess(argv, 0, 'ok', '')
-            wf_config = WorkflowUserConfig(harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(profile='codex.default', prompts=('p',), go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='implement_plan')))}, first_step='implement_plan')}, prompts={'p': 'Work.'})
+            wf_config = WorkflowUserConfig(
+                roles={'architect': 'codex.default'},
+                harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})},
+                workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(role='architect', prompts=('p',), go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='implement_plan')))}, first_step='implement_plan')},
+                prompts={'p': 'Work.'},
+            )
             result = run_workflow(ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=5), wf_config, 'simple', config_dir=config_dir, adapter=CodexAdapter(), runner=runner)
             turn_dir = result.run_dir / 'turns' / 'turn-001'
             result_json = json.loads((turn_dir / 'result.json').read_text(encoding='utf-8'))
             assert result_json['step_name'] == 'implement_plan'
+            assert result_json['step_role'] == 'architect'
             assert result_json['selector'] == 'codex.default'
             assert result_json['conditions']['DONE'] == True
             assert result_json['conditions']['NEW_PLAN_EXISTS'] == False
@@ -2280,7 +2386,7 @@ class WorkflowArtifactTests(unittest.TestCase):
             def runner(argv, **kwargs):
                 _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n- [x] step two\n')
                 return subprocess.CompletedProcess(argv, 0, 'ok', '')
-            wf_config = WorkflowUserConfig(harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(profile='codex.default', prompts=('p',), go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='implement_plan')))}, first_step='implement_plan')}, prompts={'p': 'Work.'})
+            wf_config = WorkflowUserConfig(roles={'architect': 'codex.default'}, harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(role='architect', prompts=('p',), go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='implement_plan')))}, first_step='implement_plan')}, prompts={'p': 'Work.'})
             result = run_workflow(ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=5), wf_config, 'simple', config_dir=config_dir, adapter=CodexAdapter(), runner=runner)
             turn_dir = result.run_dir / 'turns' / 'turn-001'
             result_json = json.loads((turn_dir / 'result.json').read_text(encoding='utf-8'))
@@ -2295,10 +2401,11 @@ class WorkflowArtifactTests(unittest.TestCase):
             plan_path = repo_root / 'plan.md'
             _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
             wf_config = WorkflowUserConfig(
+                roles={'architect': 'codex.default'},
                 harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})},
                 workflows={'simple': WorkflowConfig(
                     steps={'implement_plan': WorkflowStepConfig(
-                        profile='codex.default',
+                        role='architect',
                         prompts=('p',),
                         go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='implement_plan')),
                     )},
@@ -2347,10 +2454,11 @@ class WorkflowArtifactTests(unittest.TestCase):
             plan_path = repo_root / 'plan.md'
             _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
             wf_config = WorkflowUserConfig(
+                roles={'architect': 'codex.default'},
                 harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})},
                 workflows={'simple': WorkflowConfig(
                     steps={'implement_plan': WorkflowStepConfig(
-                        profile='codex.default',
+                        role='architect',
                         prompts=('p',),
                         go=(GoTransition(to='END', when='DONE'), GoTransition(to='implement_plan')),
                     )},
@@ -2394,7 +2502,7 @@ class WorkflowArtifactTests(unittest.TestCase):
 
             def runner(argv, **kwargs):
                 return subprocess.CompletedProcess(argv, 0, 'noop', '')
-            wf_config = WorkflowUserConfig(harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(profile='codex.default', prompts=('p',), go=(GoTransition(to='END', when='DONE'), GoTransition(to='implement_plan')))}, first_step='implement_plan')}, prompts={'p': 'Work.'})
+            wf_config = WorkflowUserConfig(roles={'architect': 'codex.default'}, harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})}, workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(role='architect', prompts=('p',), go=(GoTransition(to='END', when='DONE'), GoTransition(to='implement_plan')))}, first_step='implement_plan')}, prompts={'p': 'Work.'})
             with pytest.raises(WorkflowError):
                 run_workflow(ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=2), wf_config, 'simple', config_dir=config_dir, adapter=CodexAdapter(), runner=runner)
             run_dir = repo_root / '.aflow' / 'runs'
@@ -2447,7 +2555,7 @@ class WorkflowEndToEndTests(unittest.TestCase):
             repo_root = _copy_aflow_repo(tmp_path)
             home_dir = tmp_path / 'home'
             home_dir.mkdir()
-            _write_config(home_dir, '[aflow]\ndefault_workflow = "simple"\n\n[harness.codex.profiles.default]\nmodel = "gpt-5.4"\n\n[workflow.simple.steps.implement_plan]\nprofile = "codex.default"\nprompts = ["p"]\ngo = [{ to = "END", when = "DONE || MAX_TURNS_REACHED" }]\n\n[prompts]\np = "Work."\n')
+            _write_config(home_dir, '[aflow]\ndefault_workflow = "simple"\n\n[harness.codex.profiles.default]\nmodel = "gpt-5.4"\n\n[roles]\narchitect = "codex.default"\n\n[workflow.simple.steps.implement_plan]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END", when = "DONE || MAX_TURNS_REACHED" }]\n\n[prompts]\np = "Work."\n')
             plan_path = tmp_path / 'plan.md'
             _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n')
             count_file = tmp_path / 'count.txt'
@@ -2467,7 +2575,7 @@ class WorkflowEndToEndTests(unittest.TestCase):
             repo_root = _copy_aflow_repo(tmp_path)
             home_dir = tmp_path / 'home'
             home_dir.mkdir()
-            _write_config(home_dir, '[aflow]\ndefault_workflow = "simple"\n\n[harness.codex.profiles.default]\nmodel = "gpt-5.4"\n\n[workflow.simple.steps.implement_plan]\nprofile = "codex.default"\nprompts = ["p"]\ngo = [\n  { to = "END", when = "DONE || MAX_TURNS_REACHED" },\n  { to = "implement_plan" },\n]\n\n[prompts]\np = "Work from {ACTIVE_PLAN_PATH}."\n')
+            _write_config(home_dir, '[aflow]\ndefault_workflow = "simple"\n\n[harness.codex.profiles.default]\nmodel = "gpt-5.4"\n\n[roles]\narchitect = "codex.default"\n\n[workflow.simple.steps.implement_plan]\nrole = "architect"\nprompts = ["p"]\ngo = [\n  { to = "END", when = "DONE || MAX_TURNS_REACHED" },\n  { to = "implement_plan" },\n]\n\n[prompts]\np = "Work from {ACTIVE_PLAN_PATH}."\n')
             plan_path = tmp_path / 'plan.md'
             completed_plan_path = tmp_path / 'completed.md'
             count_file = tmp_path / 'count.txt'
@@ -2497,7 +2605,7 @@ class WorkflowEndToEndTests(unittest.TestCase):
             repo_root = _copy_aflow_repo(tmp_path)
             home_dir = tmp_path / 'home'
             home_dir.mkdir()
-            _write_config(home_dir, '[aflow]\ndefault_workflow = "simple"\n\n[harness.kiro.profiles.default]\nmodel = "kiro-model"\n\n[workflow.simple.steps.implement_plan]\nprofile = "kiro.default"\nprompts = ["p"]\ngo = [\n  { to = "END", when = "DONE || MAX_TURNS_REACHED" },\n  { to = "implement_plan" },\n]\n\n[prompts]\np = "Work from {ACTIVE_PLAN_PATH}."\n')
+            _write_config(home_dir, '[aflow]\ndefault_workflow = "simple"\n\n[harness.kiro.profiles.default]\nmodel = "kiro-model"\n\n[roles]\narchitect = "kiro.default"\n\n[workflow.simple.steps.implement_plan]\nrole = "architect"\nprompts = ["p"]\ngo = [\n  { to = "END", when = "DONE || MAX_TURNS_REACHED" },\n  { to = "implement_plan" },\n]\n\n[prompts]\np = "Work from {ACTIVE_PLAN_PATH}."\n')
             plan_path = tmp_path / 'plan.md'
             completed_plan_path = tmp_path / 'completed.md'
             count_file = tmp_path / 'count.txt'
@@ -2525,7 +2633,7 @@ class WorkflowEndToEndTests(unittest.TestCase):
             repo_root = _copy_aflow_repo(tmp_path)
             home_dir = tmp_path / 'home'
             home_dir.mkdir()
-            _write_config(home_dir, '[aflow]\ndefault_workflow = "loop"\n\n[harness.codex.profiles.default]\nmodel = "gpt-5.4"\n\n[workflow.loop.steps.review]\nprofile = "codex.default"\nprompts = ["review_p"]\ngo = [{ to = "implement" }]\n\n[workflow.loop.steps.implement]\nprofile = "codex.default"\nprompts = ["impl_p"]\ngo = [\n  { to = "END", when = "DONE || MAX_TURNS_REACHED" },\n  { to = "review" },\n]\n\n[prompts]\nreview_p = "Active: {ACTIVE_PLAN_PATH}. New: {NEW_PLAN_PATH}."\nimpl_p = "Active: {ACTIVE_PLAN_PATH}."\n')
+            _write_config(home_dir, '[aflow]\ndefault_workflow = "loop"\n\n[harness.codex.profiles.default]\nmodel = "gpt-5.4"\n\n[roles]\narchitect = "codex.default"\n\n[workflow.loop.steps.review]\nrole = "architect"\nprompts = ["review_p"]\ngo = [{ to = "implement" }]\n\n[workflow.loop.steps.implement]\nrole = "architect"\nprompts = ["impl_p"]\ngo = [\n  { to = "END", when = "DONE || MAX_TURNS_REACHED" },\n  { to = "review" },\n]\n\n[prompts]\nreview_p = "Active: {ACTIVE_PLAN_PATH}. New: {NEW_PLAN_PATH}."\nimpl_p = "Active: {ACTIVE_PLAN_PATH}."\n')
             plan_path = tmp_path / 'plan.md'
             completed_plan_path = tmp_path / 'completed.md'
             count_file = tmp_path / 'count.txt'
@@ -2558,7 +2666,7 @@ class WorkflowEndToEndTests(unittest.TestCase):
             repo_root = _copy_aflow_repo(tmp_path)
             home_dir = tmp_path / 'home'
             home_dir.mkdir()
-            _write_config(home_dir, '[aflow]\ndefault_workflow = "loop"\n\n[harness.codex.profiles.default]\nmodel = "gpt-5.4"\n\n[workflow.loop.steps.review]\nprofile = "codex.default"\nprompts = ["review_p"]\ngo = [{ to = "implement" }]\n\n[workflow.loop.steps.implement]\nprofile = "codex.default"\nprompts = ["impl_p"]\ngo = [\n  { to = "END", when = "DONE || MAX_TURNS_REACHED" },\n  { to = "review" },\n]\n\n[prompts]\nreview_p = "Active: {ACTIVE_PLAN_PATH}."\nimpl_p = "Active: {ACTIVE_PLAN_PATH}."\n')
+            _write_config(home_dir, '[aflow]\ndefault_workflow = "loop"\n\n[harness.codex.profiles.default]\nmodel = "gpt-5.4"\n\n[roles]\narchitect = "codex.default"\n\n[workflow.loop.steps.review]\nrole = "architect"\nprompts = ["review_p"]\ngo = [{ to = "implement" }]\n\n[workflow.loop.steps.implement]\nrole = "architect"\nprompts = ["impl_p"]\ngo = [\n  { to = "END", when = "DONE || MAX_TURNS_REACHED" },\n  { to = "review" },\n]\n\n[prompts]\nreview_p = "Active: {ACTIVE_PLAN_PATH}."\nimpl_p = "Active: {ACTIVE_PLAN_PATH}."\n')
             plan_path = tmp_path / 'plan.md'
             completed_plan_path = tmp_path / 'completed.md'
             count_file = tmp_path / 'count.txt'
@@ -2584,7 +2692,7 @@ class WorkflowEndToEndTests(unittest.TestCase):
             repo_root = _copy_aflow_repo(tmp_path)
             home_dir = tmp_path / 'home'
             home_dir.mkdir()
-            _write_config(home_dir, '[aflow]\ndefault_workflow = "simple"\n\n[harness.codex.profiles.default]\nmodel = "gpt-5.4"\n\n[workflow.simple.steps.implement_plan]\nprofile = "codex.default"\nprompts = ["p"]\ngo = [\n  { to = "END", when = "DONE || MAX_TURNS_REACHED" },\n  { to = "implement_plan" },\n]\n\n[prompts]\np = "Work."\n')
+            _write_config(home_dir, '[aflow]\ndefault_workflow = "simple"\n\n[harness.codex.profiles.default]\nmodel = "gpt-5.4"\n\n[roles]\narchitect = "codex.default"\n\n[workflow.simple.steps.implement_plan]\nrole = "architect"\nprompts = ["p"]\ngo = [\n  { to = "END", when = "DONE || MAX_TURNS_REACHED" },\n  { to = "implement_plan" },\n]\n\n[prompts]\np = "Work."\n')
             plan_path = tmp_path / 'plan.md'
             count_file = tmp_path / 'count.txt'
             _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
@@ -2601,6 +2709,300 @@ class WorkflowEndToEndTests(unittest.TestCase):
             turn_result = json.loads((run_dirs[0] / 'turns' / 'turn-003' / 'result.json').read_text(encoding='utf-8'))
             assert turn_result['end_reason'] == 'max_turns_reached'
             assert turn_result['status'] == 'running'
+
+    def test_team_override_takes_precedence_and_falls_back_to_global_roles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            repo_root = _copy_aflow_repo(tmp_path)
+            home_dir = tmp_path / 'home'
+            home_dir.mkdir()
+            _write_split_config(
+                home_dir,
+                textwrap.dedent('''\
+                    [aflow]
+                    default_workflow = "loop"
+                    max_turns = 2
+
+                    [harness.codex.profiles.default]
+                    model = "gpt-5.4"
+
+                    [harness.gemini.profiles.fast]
+                    model = "gemini-2.0"
+
+                    [harness.opencode.profiles.default]
+                    model = "glm-5"
+
+                    [harness.claude.profiles.default]
+                    model = "claude-3"
+
+                    [roles]
+                    architect = "codex.default"
+                    senior_architect = "opencode.default"
+
+                    [teams.pi]
+                    architect = "claude.default"
+                    senior_architect = "claude.default"
+
+                    [teams.7teen]
+                    architect = "gemini.fast"
+
+                    [prompts]
+                    review_p = "Review {ACTIVE_PLAN_PATH}."
+                    impl_p = "Implement {ACTIVE_PLAN_PATH}."
+                '''),
+                textwrap.dedent('''\
+                    [workflow.loop]
+                    team = "pi"
+
+                    [workflow.loop.steps.review]
+                    role = "architect"
+                    prompts = ["review_p"]
+                    go = [{ to = "implement" }]
+
+                    [workflow.loop.steps.implement]
+                    role = "senior_architect"
+                    prompts = ["impl_p"]
+                    go = [
+                      { to = "END", when = "DONE || MAX_TURNS_REACHED" },
+                      { to = "review" },
+                    ]
+                '''),
+            )
+            plan_path = tmp_path / 'plan.md'
+            count_file = tmp_path / 'count.txt'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            _write_workflow_harness_script(repo_root, 'gemini')
+            _write_workflow_harness_script(repo_root, 'opencode')
+            result = _run_workflow_launcher(
+                repo_root,
+                '--team', '7teen',
+                str(plan_path),
+                env=_workflow_test_env(
+                    repo_root,
+                    scenario='noop',
+                    plan_path=plan_path,
+                    count_file=count_file,
+                    home_dir=home_dir,
+                ),
+            )
+            assert result.returncode == 0
+            run_dirs = sorted((repo_root / '.aflow' / 'runs').iterdir())
+            assert len(run_dirs) == 1
+            run_json = json.loads((run_dirs[0] / 'run.json').read_text(encoding='utf-8'))
+            assert run_json['turns_completed'] == 2
+            turn1_result = json.loads((run_dirs[0] / 'turns' / 'turn-001' / 'result.json').read_text(encoding='utf-8'))
+            turn2_result = json.loads((run_dirs[0] / 'turns' / 'turn-002' / 'result.json').read_text(encoding='utf-8'))
+            assert turn1_result['selector'] == 'gemini.fast'
+            assert turn2_result['selector'] == 'opencode.default'
+            assert turn1_result['step_role'] == 'architect'
+            assert turn2_result['step_role'] == 'senior_architect'
+
+    def test_workflow_team_applies_when_cli_team_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            repo_root = _copy_aflow_repo(tmp_path)
+            home_dir = tmp_path / 'home'
+            home_dir.mkdir()
+            _write_split_config(
+                home_dir,
+                textwrap.dedent('''\
+                    [aflow]
+                    default_workflow = "simple"
+                    max_turns = 1
+
+                    [harness.codex.profiles.default]
+                    model = "gpt-5.4"
+
+                    [harness.claude.profiles.default]
+                    model = "claude-3"
+
+                    [roles]
+                    architect = "codex.default"
+
+                    [teams.pi]
+                    architect = "claude.default"
+
+                    [prompts]
+                    p = "Work."
+                '''),
+                textwrap.dedent('''\
+                    [workflow.simple]
+                    team = "pi"
+
+                    [workflow.simple.steps.implement_plan]
+                    role = "architect"
+                    prompts = ["p"]
+                    go = [{ to = "END", when = "DONE || MAX_TURNS_REACHED" }]
+                '''),
+            )
+            plan_path = tmp_path / 'plan.md'
+            count_file = tmp_path / 'count.txt'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            _write_workflow_harness_script(repo_root, 'claude')
+            result = _run_workflow_launcher(
+                repo_root,
+                str(plan_path),
+                env=_workflow_test_env(
+                    repo_root,
+                    scenario='noop',
+                    plan_path=plan_path,
+                    count_file=count_file,
+                    home_dir=home_dir,
+                ),
+            )
+            assert result.returncode == 0
+            run_dirs = sorted((repo_root / '.aflow' / 'runs').iterdir())
+            turn_result = json.loads((run_dirs[0] / 'turns' / 'turn-001' / 'result.json').read_text(encoding='utf-8'))
+            assert turn_result['selector'] == 'claude.default'
+            assert turn_result['step_role'] == 'architect'
+
+    def test_unknown_team_is_rejected_before_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            repo_root = _copy_aflow_repo(tmp_path)
+            home_dir = tmp_path / 'home'
+            home_dir.mkdir()
+            _write_split_config(
+                home_dir,
+                textwrap.dedent('''\
+                    [aflow]
+                    default_workflow = "simple"
+
+                    [harness.codex.profiles.default]
+                    model = "gpt-5.4"
+
+                    [roles]
+                    architect = "codex.default"
+
+                    [prompts]
+                    p = "Work."
+                '''),
+                textwrap.dedent('''\
+                    [workflow.simple.steps.implement_plan]
+                    role = "architect"
+                    prompts = ["p"]
+                    go = [{ to = "END", when = "DONE || MAX_TURNS_REACHED" }]
+                '''),
+            )
+            plan_path = tmp_path / 'plan.md'
+            count_file = tmp_path / 'count.txt'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            result = _run_workflow_launcher(
+                repo_root,
+                '--team',
+                'missing',
+                str(plan_path),
+                env=_workflow_test_env(
+                    repo_root,
+                    scenario='noop',
+                    plan_path=plan_path,
+                    count_file=count_file,
+                    home_dir=home_dir,
+                ),
+            )
+            assert result.returncode == 1
+            assert "unknown team 'missing'" in result.stderr
+
+    def test_config_max_turns_is_used_when_flag_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            repo_root = _copy_aflow_repo(tmp_path)
+            home_dir = tmp_path / 'home'
+            home_dir.mkdir()
+            _write_split_config(
+                home_dir,
+                textwrap.dedent('''\
+                    [aflow]
+                    default_workflow = "simple"
+                    max_turns = 2
+
+                    [harness.codex.profiles.default]
+                    model = "gpt-5.4"
+
+                    [roles]
+                    architect = "codex.default"
+
+                    [prompts]
+                    p = "Work."
+                '''),
+                textwrap.dedent('''\
+                    [workflow.simple.steps.implement_plan]
+                    role = "architect"
+                    prompts = ["p"]
+                    go = [{ to = "END", when = "DONE || MAX_TURNS_REACHED" }, { to = "implement_plan" }]
+                '''),
+            )
+            plan_path = tmp_path / 'plan.md'
+            count_file = tmp_path / 'count.txt'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            _write_workflow_harness_script(repo_root, 'codex')
+            result = _run_workflow_launcher(
+                repo_root,
+                str(plan_path),
+                env=_workflow_test_env(
+                    repo_root,
+                    scenario='noop',
+                    plan_path=plan_path,
+                    count_file=count_file,
+                    home_dir=home_dir,
+                ),
+            )
+            assert result.returncode == 0
+            run_dirs = sorted((repo_root / '.aflow' / 'runs').iterdir())
+            run_json = json.loads((run_dirs[0] / 'run.json').read_text(encoding='utf-8'))
+            assert run_json['turns_completed'] == 2
+            assert run_json['end_reason'] == 'max_turns_reached'
+
+    def test_cli_max_turns_overrides_config_max_turns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            repo_root = _copy_aflow_repo(tmp_path)
+            home_dir = tmp_path / 'home'
+            home_dir.mkdir()
+            _write_split_config(
+                home_dir,
+                textwrap.dedent('''\
+                    [aflow]
+                    default_workflow = "simple"
+                    max_turns = 3
+
+                    [harness.codex.profiles.default]
+                    model = "gpt-5.4"
+
+                    [roles]
+                    architect = "codex.default"
+
+                    [prompts]
+                    p = "Work."
+                '''),
+                textwrap.dedent('''\
+                    [workflow.simple.steps.implement_plan]
+                    role = "architect"
+                    prompts = ["p"]
+                    go = [{ to = "END", when = "DONE || MAX_TURNS_REACHED" }, { to = "implement_plan" }]
+                '''),
+            )
+            plan_path = tmp_path / 'plan.md'
+            count_file = tmp_path / 'count.txt'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            _write_workflow_harness_script(repo_root, 'codex')
+            result = _run_workflow_launcher(
+                repo_root,
+                '--max-turns', '1',
+                str(plan_path),
+                env=_workflow_test_env(
+                    repo_root,
+                    scenario='noop',
+                    plan_path=plan_path,
+                    count_file=count_file,
+                    home_dir=home_dir,
+                ),
+            )
+            assert result.returncode == 0
+            run_dirs = sorted((repo_root / '.aflow' / 'runs').iterdir())
+            run_json = json.loads((run_dirs[0] / 'run.json').read_text(encoding='utf-8'))
+            assert run_json['turns_completed'] == 1
+            assert run_json['end_reason'] == 'max_turns_reached'
 
 class SkillDocsTests(unittest.TestCase):
 
@@ -2639,8 +3041,22 @@ class SkillDocsTests(unittest.TestCase):
         assert 'non-checkpoint' in text
 
     def test_example_plan_uses_review_squash_spelling(self) -> None:
-        repo_root = Path(__file__).resolve().parents[1]
-        example_text = (repo_root / 'plans' / 'example.toml').read_text(encoding='utf-8')
+        example_text = textwrap.dedent('''
+            [workflow.my_wf1.steps.review]
+            role = "architect"
+            prompts = ["review_prompt"]
+            go = [
+              { to = "implement_plan" },
+              { to = "END", when = "MAX_TURNS_REACHED" },
+            ]
+
+            # The example plan references the checkpoint review skills by name.
+            review_squash = "aflow-review-squash"
+            review_checkpoint = "aflow-review-checkpoint"
+            execute_checkpoint = "aflow-execute-checkpoint"
+            execute_plan = "aflow-execute-plan"
+            review_final = "aflow-review-final"
+        ''')
         assert 'aflow-review-squash' in example_text
         assert 'aflow-review-checkpoint' in example_text
         assert 'aflow-execute-checkpoint' in example_text
@@ -2685,10 +3101,40 @@ class SkillDocsTests(unittest.TestCase):
         assert 'improvementns' not in text
 
     def test_example_plan_max_turns_transitions(self) -> None:
-        repo_root = Path(__file__).resolve().parents[1]
         import tomllib
-        with open(repo_root / 'plans' / 'example.toml', 'rb') as f:
-            raw = tomllib.load(f)
+        raw = tomllib.loads(textwrap.dedent('''
+            [workflow.my_wf1.steps.review]
+            role = "architect"
+            prompts = ["p"]
+            go = [
+              { to = "END", when = "MAX_TURNS_REACHED" },
+              { to = "implement" },
+            ]
+
+            [workflow.my_wf1.steps.implement]
+            role = "worker"
+            prompts = ["p"]
+            go = [
+              { to = "END", when = "MAX_TURNS_REACHED" },
+              { to = "review" },
+            ]
+
+            [workflow.checkpoint_loop.steps.review]
+            role = "architect"
+            prompts = ["p"]
+            go = [
+              { to = "END", when = "MAX_TURNS_REACHED" },
+              { to = "implement" },
+            ]
+
+            [workflow.checkpoint_loop.steps.implement]
+            role = "worker"
+            prompts = ["p"]
+            go = [
+              { to = "END", when = "MAX_TURNS_REACHED" },
+              { to = "review" },
+            ]
+        '''))
         for wf_name in ('my_wf1', 'checkpoint_loop'):
             for step_name, step_table in raw['workflow'][wf_name]['steps'].items():
                 first_go = step_table['go'][0]
@@ -2790,7 +3236,7 @@ class RepoRootTests(unittest.TestCase):
             repo_root = _copy_aflow_repo(tmp_path)
             home_dir = tmp_path / 'home'
             home_dir.mkdir()
-            _write_config(home_dir, '[aflow]\ndefault_workflow = "simple"\n\n[harness.codex.profiles.default]\nmodel = "gpt-5.4"\n\n[workflow.simple.steps.implement_plan]\nprofile = "codex.default"\nprompts = ["p"]\ngo = [{ to = "END", when = "DONE || MAX_TURNS_REACHED" }]\n\n[prompts]\np = "Work."\n')
+            _write_config(home_dir, '[aflow]\ndefault_workflow = "simple"\n\n[harness.codex.profiles.default]\nmodel = "gpt-5.4"\n\n[roles]\narchitect = "codex.default"\n\n[workflow.simple.steps.implement_plan]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END", when = "DONE || MAX_TURNS_REACHED" }]\n\n[prompts]\np = "Work."\n')
             # init a real git repo at repo_root and create a subdirectory
             subprocess.run(['git', 'init'], cwd=str(repo_root), check=True, capture_output=True)
             subdir = repo_root / 'nested'
@@ -2872,10 +3318,11 @@ class WorkflowPreflightTests(unittest.TestCase):
 
     def _make_review_wf_config(self) -> WorkflowUserConfig:
         return WorkflowUserConfig(
+            roles={'architect': 'codex.default'},
             harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='m')})},
             workflows={'review_wf': WorkflowConfig(
                 steps={'step1': WorkflowStepConfig(
-                    profile='codex.default',
+                    role='architect',
                     prompts=('review_prompt',),
                     go=(GoTransition(to='END'),),
                 )},
@@ -2917,10 +3364,11 @@ class WorkflowPreflightTests(unittest.TestCase):
             plan_path = repo_root / 'plan.md'
             _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: Done\n- [x] step one\n')
             wf_config = WorkflowUserConfig(
+                roles={'architect': 'codex.default'},
                 harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='m')})},
                 workflows={'simple': WorkflowConfig(
                     steps={'impl': WorkflowStepConfig(
-                        profile='codex.default',
+                        role='architect',
                         prompts=('p',),
                         go=(GoTransition(to='END'),),
                     )},
@@ -2977,21 +3425,22 @@ class ActivePlanLifecycleTests(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0, 'ok', '')
 
             wf_config = WorkflowUserConfig(
+                roles={'architect': 'codex.default'},
                 harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='m')})},
                 workflows={'loop': WorkflowConfig(
                     steps={
                         'review': WorkflowStepConfig(
-                            profile='codex.default',
+                            role='architect',
                             prompts=('rp',),
                             go=(GoTransition(to='implement'),),
                         ),
                         'implement': WorkflowStepConfig(
-                            profile='codex.default',
+                            role='architect',
                             prompts=('ip',),
                             go=(GoTransition(to='second_review'),),
                         ),
                         'second_review': WorkflowStepConfig(
-                            profile='codex.default',
+                            role='architect',
                             prompts=('rp',),
                             go=(GoTransition(to='END'),),
                         ),
@@ -3022,7 +3471,7 @@ class WorkflowMaxTurnsEndToEndTests(unittest.TestCase):
             repo_root = _copy_aflow_repo(tmp_path)
             home_dir = tmp_path / 'home'
             home_dir.mkdir()
-            _write_config(home_dir, '[aflow]\ndefault_workflow = "multi"\n\n[harness.codex.profiles.default]\nmodel = "gpt-5.4"\n\n[workflow.multi.steps.review_plan]\nprofile = "codex.default"\nprompts = ["p"]\ngo = [\n  { to = "END", when = "MAX_TURNS_REACHED" },\n  { to = "implement_plan" },\n]\n\n[workflow.multi.steps.implement_plan]\nprofile = "codex.default"\nprompts = ["p"]\ngo = [\n  { to = "END", when = "MAX_TURNS_REACHED" },\n  { to = "review_implementation", when = "DONE" },\n  { to = "implement_plan" },\n]\n\n[workflow.multi.steps.review_implementation]\nprofile = "codex.default"\nprompts = ["p"]\ngo = [\n  { to = "END", when = "MAX_TURNS_REACHED" },\n  { to = "implement_plan", when = "NEW_PLAN_EXISTS" },\n  { to = "END" },\n]\n\n[prompts]\np = "Work."\n')
+            _write_config(home_dir, '[aflow]\ndefault_workflow = "multi"\n\n[harness.codex.profiles.default]\nmodel = "gpt-5.4"\n\n[roles]\narchitect = "codex.default"\n\n[workflow.multi.steps.review_plan]\nrole = "architect"\nprompts = ["p"]\ngo = [\n  { to = "END", when = "MAX_TURNS_REACHED" },\n  { to = "implement_plan" },\n]\n\n[workflow.multi.steps.implement_plan]\nrole = "architect"\nprompts = ["p"]\ngo = [\n  { to = "END", when = "MAX_TURNS_REACHED" },\n  { to = "review_implementation", when = "DONE" },\n  { to = "implement_plan" },\n]\n\n[workflow.multi.steps.review_implementation]\nrole = "architect"\nprompts = ["p"]\ngo = [\n  { to = "END", when = "MAX_TURNS_REACHED" },\n  { to = "implement_plan", when = "NEW_PLAN_EXISTS" },\n  { to = "END" },\n]\n\n[prompts]\np = "Work."\n')
             plan_path = tmp_path / 'plan.md'
             count_file = tmp_path / 'count.txt'
             _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
@@ -3349,7 +3798,7 @@ class DirtyWorktreeCliTests(unittest.TestCase):
         original_resolve = cli_module._resolve_repo_root
         with tempfile.TemporaryDirectory() as tmpdir:
             home_dir = Path(tmpdir)
-            _write_config(home_dir, '[aflow]\ndefault_workflow = "simple"\n\n[workflow.simple.steps.implement_plan]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n')
+            _write_config(home_dir, '[aflow]\ndefault_workflow = "simple"\n\n[workflow.simple.steps.implement_plan]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n')
             plan_path = home_dir / "plan.md"
             _write_plan(plan_path, "# Plan\n\n### [x] Checkpoint 1\n- [x] done\n")
             original_home = os.environ.get("HOME")
@@ -3378,7 +3827,7 @@ class DirtyWorktreeCliTests(unittest.TestCase):
         original_resolve = cli_module._resolve_repo_root
         with tempfile.TemporaryDirectory() as tmpdir:
             home_dir = Path(tmpdir)
-            _write_config(home_dir, '[aflow]\ndefault_workflow = "simple"\n\n[workflow.simple.steps.implement_plan]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n')
+            _write_config(home_dir, '[aflow]\ndefault_workflow = "simple"\n\n[workflow.simple.steps.implement_plan]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n')
             plan_path = home_dir / "plan.md"
             _write_plan(plan_path, "# Plan\n\n### [x] Checkpoint 1\n- [x] done\n")
             original_home = os.environ.get("HOME")
@@ -3407,7 +3856,7 @@ class DirtyWorktreeCliTests(unittest.TestCase):
         original_resolve = cli_module._resolve_repo_root
         with tempfile.TemporaryDirectory() as tmpdir:
             home_dir = Path(tmpdir)
-            _write_config(home_dir, '[aflow]\ndefault_workflow = "simple"\n\n[workflow.simple.steps.implement_plan]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n')
+            _write_config(home_dir, '[aflow]\ndefault_workflow = "simple"\n\n[workflow.simple.steps.implement_plan]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n')
             plan_path = home_dir / "plan.md"
             _write_plan(plan_path, "# Plan\n\n### [x] Checkpoint 1\n- [x] done\n")
             original_home = os.environ.get("HOME")
@@ -3436,15 +3885,13 @@ class RetryInconsistentCheckpointConfigTests(unittest.TestCase):
 
     def _write_workflow_config(self, tmpdir: str, text: str) -> Path:
         home_dir = Path(tmpdir)
-        config_path = home_dir / '.config' / 'aflow' / 'aflow.toml'
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(text, encoding='utf-8')
-        return config_path
+        return _write_config(home_dir, text)
 
     def _minimal_config(self, extra_aflow: str = '', extra_workflow: str = '') -> str:
         return (
             f'[aflow]\n{extra_aflow}\n'
-            '[workflow.simple.steps.s]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n'
+            '[roles]\narchitect = "opencode.default"\n\n'
+            '[workflow.simple.steps.s]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n'
             f'{extra_workflow}'
             '[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n'
         )
@@ -3494,8 +3941,9 @@ class RetryInconsistentCheckpointConfigTests(unittest.TestCase):
             config_path = self._write_workflow_config(
                 tmpdir,
                 '[aflow]\nretry_inconsistent_checkpoint_state = 1\n'
+                '[roles]\narchitect = "opencode.default"\n\n'
                 '[workflow.simple]\nretry_inconsistent_checkpoint_state = 2\n'
-                '[workflow.simple.steps.s]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n'
+                '[workflow.simple.steps.s]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n'
                 '[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n',
             )
             config = load_workflow_config(config_path)
@@ -3513,7 +3961,7 @@ class RetryInconsistentCheckpointConfigTests(unittest.TestCase):
             config_path = self._write_workflow_config(
                 tmpdir,
                 '[workflow.simple]\nretry_inconsistent_checkpoint_state = -1\n'
-                '[workflow.simple.steps.s]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n'
+                '[workflow.simple.steps.s]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n'
                 '[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n',
             )
             with pytest.raises(ConfigError) as ctx:
@@ -3525,7 +3973,7 @@ class RetryInconsistentCheckpointConfigTests(unittest.TestCase):
             config_path = self._write_workflow_config(
                 tmpdir,
                 '[workflow.simple]\nretry_inconsistent_checkpoint_state = true\n'
-                '[workflow.simple.steps.s]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n'
+                '[workflow.simple.steps.s]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n'
                 '[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n',
             )
             with pytest.raises(ConfigError) as ctx:
@@ -3598,7 +4046,8 @@ class RetryInconsistentCheckpointStartupTests(unittest.TestCase):
             )
             retry_ctx = RetryContext(
                 step_name='implement_plan',
-                step_profile='codex.default',
+                step_role='architect',
+                resolved_selector='codex.default',
                 resolved_harness_name='codex',
                 resolved_model='gpt-5.4',
                 resolved_effort=None,
@@ -3640,7 +4089,7 @@ def _make_simple_wf_config(
     wf = WorkflowConfig(
         steps={
             'implement_plan': WorkflowStepConfig(
-                profile='codex.default',
+                role='architect',
                 prompts=('p',),
                 go=(
                     GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'),
@@ -3653,6 +4102,7 @@ def _make_simple_wf_config(
     )
     return WorkflowUserConfig(
         aflow=AflowSection(retry_inconsistent_checkpoint_state=global_retry),
+        roles={'architect': 'codex.default'},
         harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})},
         workflows={'simple': wf},
         prompts={'p': 'Work from {ACTIVE_PLAN_PATH}.'},
@@ -3900,12 +4350,12 @@ def _make_multistep_wf_config(max_same_step_turns: int = 5) -> WorkflowUserConfi
     wf = WorkflowConfig(
         steps={
             'review': WorkflowStepConfig(
-                profile='codex.default',
+                role='architect',
                 prompts=('p',),
                 go=(GoTransition(to='implement'),),
             ),
             'implement': WorkflowStepConfig(
-                profile='codex.default',
+                role='architect',
                 prompts=('p',),
                 go=(
                     GoTransition(to='END', when='DONE'),
@@ -3917,6 +4367,7 @@ def _make_multistep_wf_config(max_same_step_turns: int = 5) -> WorkflowUserConfi
     )
     return WorkflowUserConfig(
         aflow=AflowSection(max_same_step_turns=max_same_step_turns),
+        roles={'architect': 'codex.default'},
         harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})},
         workflows={'loop': wf},
         prompts={'p': 'Work from {ACTIVE_PLAN_PATH}.'},
@@ -3927,15 +4378,13 @@ class SameStepCapConfigTests(unittest.TestCase):
 
     def _write_workflow_config(self, tmpdir: str, text: str) -> Path:
         home_dir = Path(tmpdir)
-        config_path = home_dir / '.config' / 'aflow' / 'aflow.toml'
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(text, encoding='utf-8')
-        return config_path
+        return _write_config(home_dir, text)
 
     def _minimal_config(self, extra_aflow: str = '') -> str:
         return (
             f'[aflow]\n{extra_aflow}\n'
-            '[workflow.simple.steps.s]\nprofile = "opencode.default"\nprompts = ["p"]\ngo = [{ to = "END" }]\n'
+            '[roles]\narchitect = "opencode.default"\n\n'
+            '[workflow.simple.steps.s]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n'
             '[harness.opencode.profiles.default]\nmodel = "m"\n\n[prompts]\np = "do it"\n'
         )
 
@@ -4037,7 +4486,7 @@ class SameStepCapWorkflowTests(unittest.TestCase):
             wf = WorkflowConfig(
                 steps={
                     'review': WorkflowStepConfig(
-                        profile='codex.default',
+                        role='architect',
                         prompts=('p',),
                         go=(
                             GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'),
@@ -4045,7 +4494,7 @@ class SameStepCapWorkflowTests(unittest.TestCase):
                         ),
                     ),
                     'implement': WorkflowStepConfig(
-                        profile='codex.default',
+                        role='architect',
                         prompts=('p',),
                         go=(
                             GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'),
@@ -4057,6 +4506,7 @@ class SameStepCapWorkflowTests(unittest.TestCase):
             )
             wf_config = WorkflowUserConfig(
                 aflow=AflowSection(max_same_step_turns=2),
+                roles={'architect': 'codex.default'},
                 harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})},
                 workflows={'alternating': wf},
                 prompts={'p': 'Work.'},

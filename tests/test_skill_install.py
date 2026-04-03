@@ -42,17 +42,18 @@ def test_discover_bundled_skills_uses_package_resources() -> None:
 def test_detect_auto_targets_selects_installed_executables(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    for executable in ("claude", "gemini", "pi"):
+    for executable in ("claude", "codex", "gemini", "pi"):
         _write_executable(bin_dir / executable)
     monkeypatch.setenv("PATH", str(bin_dir))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
     targets = detect_auto_targets()
 
-    assert [target.harness for target in targets] == ["claude", "gemini", "pi"]
+    assert [target.harness for target in targets] == ["claude", "codex", "gemini", "pi"]
     assert targets[0].destination == Path("~/.claude/skills").expanduser()
     assert targets[1].destination == Path("~/.agents/skills").expanduser()
     assert targets[2].destination == Path("~/.agents/skills").expanduser()
+    assert targets[3].destination == Path("~/.agents/skills").expanduser()
 
 
 def test_manual_destination_installs_six_child_directories(tmp_path: Path) -> None:
@@ -136,26 +137,27 @@ def test_overwrite_in_place_updates_existing_skill_files_without_pruning_extras(
     assert unrelated_file.read_text(encoding="utf-8") == "keep me\n"
 
 
-def test_auto_install_plan_uses_shared_agents_directory_for_gemini_and_pi(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_auto_install_plan_uses_shared_agents_directory_for_codex_gemini_and_pi(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    for executable in ("gemini", "pi"):
+    for executable in ("codex", "gemini", "pi"):
         _write_executable(bin_dir / executable)
     monkeypatch.setenv("PATH", str(bin_dir))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
     plan = build_install_plan()
 
-    assert [target.harness for target in plan.targets] == ["gemini", "pi"]
+    assert [target.harness for target in plan.targets] == ["codex", "gemini", "pi"]
     assert plan.targets[0].destination == Path("~/.agents/skills").expanduser()
     assert plan.targets[1].destination == Path("~/.agents/skills").expanduser()
+    assert plan.targets[2].destination == Path("~/.agents/skills").expanduser()
 
 
-def test_auto_install_gemini_and_pi_grouped_preview(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_auto_install_codex_gemini_and_pi_grouped_preview(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from aflow.skill_installer import render_preview
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    for executable in ("gemini", "pi"):
+    for executable in ("codex", "gemini", "pi"):
         _write_executable(bin_dir / executable)
     monkeypatch.setenv("PATH", str(bin_dir))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
@@ -164,15 +166,15 @@ def test_auto_install_gemini_and_pi_grouped_preview(tmp_path: Path, monkeypatch:
     preview = render_preview(plan)
 
     expanded_dest = str(Path("~/.agents/skills").expanduser())
-    assert "gemini, pi" in preview
+    assert "codex, gemini, pi" in preview
     assert "Total copy operations: 6" in preview
     assert preview.count(expanded_dest) == 1
 
 
-def test_auto_install_gemini_and_pi_copies_only_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_auto_install_codex_gemini_and_pi_copies_only_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    for executable in ("gemini", "pi"):
+    for executable in ("codex", "gemini", "pi"):
         _write_executable(bin_dir / executable)
     monkeypatch.setenv("PATH", str(bin_dir))
     agents_home = tmp_path / "home"

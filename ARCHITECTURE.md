@@ -8,12 +8,12 @@ AFlow is a plan-driven workflow orchestrator that runs coding tasks through exis
 flowchart TD
     User["User runs: aflow run [workflow] plan.md"]
     CLI["cli.py — parse args, resolve repo root"]
-    Config["config.py — load & validate aflow.toml"]
+    Config["config.py — load & validate aflow.toml + workflows.toml"]
     PlanParse["plan.py — parse Markdown plan into checkpoints"]
     Backup["workflow.py — back up original plan to plans/backups/"]
     WorkflowLoop["workflow.py — main turn loop"]
     PromptRender["workflow.py — render_step_prompts()"]
-    Profile["workflow.py — resolve_profile()"]
+    Role["workflow.py — resolve_role_selector()"]
     Adapter["harnesses/ — build CLI invocation"]
     Subprocess["workflow.py — _run_process() via subprocess.Popen"]
     PlanReload["plan.py — reload plan, compute post-snapshot"]
@@ -30,8 +30,8 @@ flowchart TD
     PlanParse --> Backup
     Backup --> WorkflowLoop
     WorkflowLoop --> PromptRender
-    WorkflowLoop --> Profile
-    Profile --> Adapter
+    WorkflowLoop --> Role
+    Role --> Adapter
     PromptRender --> Subprocess
     Adapter --> Subprocess
     Subprocess --> PlanReload
@@ -50,7 +50,7 @@ Entry point. Exposes two subcommands:
 - **`aflow run [workflow_name] --start-step STEP_NAME plan.md [-- extra instructions]`** -- starts a workflow from a named step.
 - **`aflow install-skills [destination]`** -- copies bundled skills into harness skill directories.
 
-Resolves the repo root via `git rev-parse`, loads and validates the TOML config, resolves the selected workflow, and handles startup step selection or recovery before calling `run_workflow()`.
+Resolves the repo root via `git rev-parse`, loads and validates the TOML config, resolves the selected workflow and optional team, and handles startup step selection or recovery before calling `run_workflow()`.
 
 Startup resolution happens in `main()` before the workflow loop starts:
 
@@ -62,14 +62,15 @@ Startup resolution happens in `main()` before the workflow loop starts:
 6. When recovery is accepted, load a tolerant snapshot from the invalid plan, seed startup retry state, and pass both the parsed plan and retry context into `run_workflow()`.
 
 ### `config.py`
-Loads `~/.config/aflow/aflow.toml` (bootstrapped from the bundled default on first run). Parses and validates:
-- **`[aflow]`** section: `default_workflow`, `keep_runs`, `retry_inconsistent_checkpoint_state`, `max_same_step_turns`.
-- **`[harness.<name>.profiles.<profile>]`** tables: `model`, `effort` per harness profile.
-- **`[workflow.<name>]`** table: optional `retry_inconsistent_checkpoint_state` override that takes precedence over the `[aflow]` global when set.
-- **`[workflow.<name>.steps.<step>]`** tables: `profile` (harness.profile selector), `prompts` (list of prompt keys), `go` (transition array with `to` and optional `when` condition).
+Loads `~/.config/aflow/aflow.toml` plus sibling `workflows.toml` (bootstrapped from the bundled defaults on first run). Parses and validates:
+- **`[aflow]`** section: `default_workflow`, `keep_runs`, `max_turns`, `retry_inconsistent_checkpoint_state`, `banner_files_limit`, `max_same_step_turns`.
+- **`[harness.<name>.profiles.<profile>]`** tables: `model`, optional `effort` per harness profile.
+- **`[roles]`** and **`[teams.<name>]`** tables: role-to-selector mappings, with team tables allowed to override a subset of the global map.
 - **`[prompts]`** section: named prompt templates.
+- **`[workflow.<name>]`** tables in `workflows.toml`: concrete workflows define `steps`, alias workflows use `extends` and optional `team`.
+- **`[workflow.<name>.steps.<step>]`** tables: `role` (global role key), `prompts` (list of prompt keys), `go` (transition array with `to` and optional `when` condition).
 
-Cross-validates that profiles, prompts, and transition targets all reference things that exist.
+Cross-validates that harness profiles, roles, teams, prompts, aliases, and transition targets all reference things that exist.
 
 ### `plan.py`
 Parses a Markdown plan file into structured checkpoint data. Expects `### [x] Checkpoint ...` headings (h3 with checkbox) and `- [ ] step` items underneath. Produces a `PlanSnapshot` with:
@@ -87,7 +88,7 @@ The core engine. `run_workflow()` executes the turn loop:
 2. Parse the plan unless `main()` already provided a pre-loaded `ParsedPlan`.
 3. For each turn (up to `max_turns`):
    a. Reload the plan from disk (the agent may have modified it).
-   b. Resolve the step's harness profile to get model/effort settings.
+   b. Resolve the step's role through the selected team and global role map to get the concrete harness selector.
    c. Render prompt templates with path placeholders (`{ORIGINAL_PLAN_PATH}`, `{NEW_PLAN_PATH}`, `{ACTIVE_PLAN_PATH}`).
    d. Build a `HarnessInvocation` via the adapter.
    e. Run the agent CLI as a subprocess, streaming stdout/stderr.
@@ -97,7 +98,7 @@ The core engine. `run_workflow()` executes the turn loop:
    i. Log turn artifacts and update run metadata.
    j. If transition target is `END`, return. For multi-step workflows, check the same-step cap: if the same step has been selected consecutively `max_same_step_turns` times, fail the run before starting the next turn. Otherwise, advance to the next step.
 
-A scheduled retry skips the pre-turn plan reload and reuses the last valid snapshot and saved prompt context. The same `ACTIVE_PLAN_PATH`, `NEW_PLAN_PATH`, and step selector are reused; the retry appendix (containing the exact parse error) is added to the prompt. Startup recovery seeds that same retry machinery by passing a `RetryContext` into `run_workflow()`, which stores it in `state.pending_retry` before turn 1. Retry turns still count toward `max_turns`.
+A scheduled retry skips the pre-turn plan reload and reuses the last valid snapshot and saved prompt context. The same `ACTIVE_PLAN_PATH`, `NEW_PLAN_PATH`, and resolved step selector are reused; the retry appendix (containing the exact parse error) is added to the prompt. Startup recovery seeds that same retry machinery by passing a `RetryContext` into `run_workflow()`, which stores the step name, role, resolved selector, and prompt context in `state.pending_retry` before turn 1. Retry turns still count toward `max_turns`.
 
 The condition evaluator is a full recursive-descent parser supporting `&&`, `||`, `!`, and parentheses over the three condition symbols.
 
@@ -121,7 +122,7 @@ All harnesses run in non-interactive, auto-approve mode with full tool access.
 Data classes for runtime state:
 - `ControllerConfig` -- immutable run parameters (repo root, plan path, max turns, keep runs, extra instructions).
 - `ControllerState` -- mutable per-run state (snapshot, turn count, issues, timing, status, pending retry context, consecutive same-step streak tracking).
-- `RetryContext` -- frozen dataclass holding everything needed to rerun the same step on the next turn without re-parsing the broken plan (step name, profile, resolved harness/model/effort, pre-failure snapshot, saved plan paths, base prompt, parse error string, attempt counter, retry limit).
+- `RetryContext` -- frozen dataclass holding everything needed to rerun the same step on the next turn without re-parsing the broken plan (step name, role, resolved selector, pre-failure snapshot, saved plan paths, base prompt, parse error string, attempt counter, retry limit).
 - `ControllerConfig` also carries the selected startup step, if any, so the workflow loop can start from a non-default step without re-parsing CLI arguments.
 - `ControllerRunResult` -- final result with end reason.
 - `WorkflowEndReason` -- literal type: `already_complete`, `done`, `max_turns_reached`, `transition_end`.
@@ -147,7 +148,7 @@ Rich-based live banner rendered to stderr during a run. Shows elapsed time, work
 `BannerRenderer` owns a background daemon thread that rebuilds and pushes the panel every `refresh_interval_seconds` (default 1 s) and polls for a new `GitSummary` every `git_poll_interval_seconds` (default 10 s). This keeps the elapsed timer alive between step transitions without requiring external pushes. `set_context(...)` is used to update mutable banner fields instead of directly writing private attributes.
 
 ### `skill_installer.py`
-Discovers the six bundled skills from package resources and copies them into harness-specific skill directories. Supports auto-detection (looks for harness CLIs on PATH) and manual mode (explicit destination path). Handles duplicate destinations when multiple harnesses share a path (e.g., gemini and pi both use `~/.agents/skills`).
+Discovers the six bundled skills from package resources and copies them into harness-specific skill directories. Supports auto-detection (looks for harness CLIs on PATH) and manual mode (explicit destination path). Handles duplicate destinations when multiple harnesses share a path (e.g., codex, gemini, and pi all use `~/.agents/skills`).
 
 ### `bundled_skills/`
 Six Markdown-based skill definitions installed into harness skill directories:
@@ -163,10 +164,12 @@ Six Markdown-based skill definitions installed into harness skill directories:
 
 ## Workflow Configuration
 
-Workflows are state machines defined in TOML. Each step has:
-- A `profile` (e.g., `opencode.turbo`) selecting harness + model + effort.
+Workflows are state machines defined in `workflows.toml`. Each step has:
+- A `role` key that resolves through the selected team and then global `[roles]`.
 - A `prompts` list referencing named prompt templates.
 - A `go` array of transitions, each with a `to` target (step name or `END`) and an optional `when` condition expression.
+
+Workflow tables can also use `extends` to alias a concrete base workflow and `team` to override the team for that alias. In v1, aliases inherit the base workflow's steps and cannot redefine them.
 
 Transitions are evaluated top-to-bottom; the first match wins. An entry without `when` is an unconditional fallback.
 
@@ -186,7 +189,8 @@ aflow/
   status.py            # Rich live banner with background refresh thread
   git_status.py        # git snapshot helpers (probe, baseline, summary)
   skill_installer.py   # bundled skill installer
-  aflow.toml           # default config (bootstrapped on first run)
+  aflow.toml           # global config, harness profiles, roles, teams, prompts
+  workflows.toml       # workflow definitions and aliases
   harnesses/
     __init__.py        # adapter registry (ADAPTERS dict)
     base.py            # HarnessAdapter protocol, HarnessInvocation dataclass
