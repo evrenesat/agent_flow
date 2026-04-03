@@ -29,6 +29,7 @@ class HarnessInstallSpec:
 SUPPORTED_HARNESS_INSTALL_SPECS = (
     HarnessInstallSpec("claude", "claude", "~/.claude/skills"),
     HarnessInstallSpec("codex", "codex", "~/.agents/skills"),
+    HarnessInstallSpec("copilot", "copilot", "~/.agents/skills"),
     HarnessInstallSpec("gemini", "gemini", "~/.agents/skills"),
     HarnessInstallSpec("kiro", "kiro-cli", "~/.kiro/skills"),
     HarnessInstallSpec("opencode", "opencode", "~/.config/opencode/skills"),

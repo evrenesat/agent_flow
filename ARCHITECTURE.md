@@ -105,12 +105,13 @@ The condition evaluator is a full recursive-descent parser supporting `&&`, `||`
 Prompt templates support `file://` references (absolute, config-relative, or cwd-relative).
 
 ### `harnesses/`
-Adapter layer. Each harness implements `HarnessAdapter.build_invocation()` to produce a `HarnessInvocation` (argv, env, prompt texts). Six adapters:
+Adapter layer. Each harness implements `HarnessAdapter.build_invocation()` to produce a `HarnessInvocation` (argv, env, prompt texts). Seven adapters:
 
 | Harness    | CLI binary  | Prompt mode                    | Effort support |
 |------------|-------------|--------------------------------|----------------|
 | `claude`   | `claude`    | `--system-prompt` flag         | Yes            |
 | `codex`    | `codex`     | system prefixed into user prompt | Yes          |
+| `copilot`  | `copilot`   | system prefixed into user prompt | Yes          |
 | `gemini`   | `gemini`    | system prefixed into user prompt | No           |
 | `kiro`     | `kiro-cli`  | system prefixed into user prompt | No           |
 | `opencode` | `opencode`  | system prefixed into user prompt | No           |
@@ -148,7 +149,7 @@ Rich-based live banner rendered to stderr during a run. Shows elapsed time, work
 `BannerRenderer` owns a background daemon thread that rebuilds and pushes the panel every `refresh_interval_seconds` (default 1 s) and polls for a new `GitSummary` every `git_poll_interval_seconds` (default 10 s). This keeps the elapsed timer alive between step transitions without requiring external pushes. `set_context(...)` is used to update mutable banner fields instead of directly writing private attributes.
 
 ### `skill_installer.py`
-Discovers the six bundled skills from package resources and copies them into harness-specific skill directories. Supports auto-detection (looks for harness CLIs on PATH) and manual mode (explicit destination path). Handles duplicate destinations when multiple harnesses share a path (e.g., codex, gemini, and pi all use `~/.agents/skills`).
+Discovers the six bundled skills from package resources and copies them into harness-specific skill directories. Supports auto-detection (looks for harness CLIs on PATH) and manual mode (explicit destination path). Handles duplicate destinations when multiple harnesses share a path (e.g., codex, copilot, gemini, and pi all use `~/.agents/skills`).
 
 ### `bundled_skills/`
 Six Markdown-based skill definitions installed into harness skill directories:

@@ -48,6 +48,7 @@ The auto-install destination map is:
 
 - `claude` -> `~/.claude/skills`
 - `codex` -> `~/.agents/skills`
+- `copilot` -> `~/.agents/skills`
 - `gemini` -> `~/.agents/skills`
 - `kiro` -> `~/.kiro/skills`
 - `opencode` -> `~/.config/opencode/skills`
@@ -270,6 +271,7 @@ Supported harness adapters are:
 
 - `claude`
 - `codex`
+- `copilot`
 - `gemini`
 - `kiro`
 - `opencode`
@@ -281,12 +283,13 @@ Current adapter behavior:
 
 - `codex` uses `codex exec --dangerously-bypass-approvals-and-sandbox`
 - `claude` uses `claude -p --permission-mode bypassPermissions --dangerously-skip-permissions`
+- `copilot` uses `copilot -p ... -s --allow-all --no-ask-user`
 - `gemini` uses `gemini --prompt ... --approval-mode yolo --sandbox=false`
 - `kiro` uses `kiro-cli chat --no-interactive --trust-all-tools`
 - `opencode` uses `opencode run --format default --dir <repo-root>`
 - `pi` uses `pi --print --tools read,bash,edit,write,grep,find,ls`
 
-`effort` is currently passed through only by the `claude`, `codex`, and `pi` adapters.
+`effort` is currently passed through only by the `claude`, `codex`, `copilot`, and `pi` adapters.
 
 
 ## Live Status

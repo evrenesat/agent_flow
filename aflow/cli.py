@@ -53,6 +53,7 @@ per skill.
 Supported auto targets:
   claude -> ~/.claude/skills
   codex -> ~/.agents/skills
+  copilot -> ~/.agents/skills
   gemini -> ~/.agents/skills
   kiro -> ~/.kiro/skills
   opencode -> ~/.config/opencode/skills

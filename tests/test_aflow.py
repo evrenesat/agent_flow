@@ -17,6 +17,7 @@ from aflow.workflow import WorkflowError, _backup_original_plan, evaluate_condit
 from aflow.cli import _confirm_startup_recovery, _maybe_move_completed_plan_to_done, _parse_run_args, _pick_workflow_step, build_parser, main
 from aflow.harnesses.claude import ClaudeAdapter
 from aflow.harnesses.codex import CodexAdapter
+from aflow.harnesses.copilot import CopilotAdapter
 from aflow.harnesses.gemini import GeminiAdapter
 from aflow.harnesses.kiro import KiroAdapter
 from aflow.harnesses.opencode import OpencodeAdapter
@@ -905,6 +906,35 @@ class AdaptersTests(unittest.TestCase):
         invocation = adapter.build_invocation(repo_root=Path('/repo'), model=None, system_prompt='SYSTEM', user_prompt='USER')
         assert '--model' not in invocation.argv
         assert invocation.argv[-1] == 'SYSTEM\n\nUSER'
+
+    def test_copilot_without_effort(self) -> None:
+        adapter = CopilotAdapter()
+        invocation = adapter.build_invocation(repo_root=Path('/repo'), model='gpt-5.4', system_prompt='SYSTEM', user_prompt='USER')
+        assert invocation.argv == ('copilot', '-p', 'SYSTEM\n\nUSER', '-s', '--allow-all', '--no-ask-user', '--model', 'gpt-5.4')
+        assert invocation.prompt_mode == 'prefix-system-into-user-prompt'
+        assert invocation.effective_prompt == 'SYSTEM\n\nUSER'
+
+    def test_copilot_with_effort(self) -> None:
+        adapter = CopilotAdapter()
+        invocation = adapter.build_invocation(repo_root=Path('/repo'), model='gpt-5.4', system_prompt='SYSTEM', user_prompt='USER', effort='high')
+        argv = invocation.argv
+        assert '--reasoning-effort' in argv
+        assert 'high' in argv
+        assert argv[-2:] == ('--reasoning-effort', 'high')
+
+    def test_copilot_without_model_omits_model_flag(self) -> None:
+        adapter = CopilotAdapter()
+        invocation = adapter.build_invocation(repo_root=Path('/repo'), model=None, system_prompt='SYSTEM', user_prompt='USER')
+        assert '--model' not in invocation.argv
+        assert invocation.argv[:6] == ('copilot', '-p', 'SYSTEM\n\nUSER', '-s', '--allow-all', '--no-ask-user')
+
+    def test_copilot_without_model_and_with_effort_uses_reasoning_effort_flag(self) -> None:
+        adapter = CopilotAdapter()
+        invocation = adapter.build_invocation(repo_root=Path('/repo'), model=None, system_prompt='SYSTEM', user_prompt='USER', effort='low')
+        argv = invocation.argv
+        assert '--model' not in argv
+        assert '--reasoning-effort' in argv
+        assert argv[-2:] == ('--reasoning-effort', 'low')
 
     def test_pi_without_effort(self) -> None:
         adapter = PiAdapter()
