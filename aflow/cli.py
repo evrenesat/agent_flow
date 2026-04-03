@@ -21,6 +21,7 @@ from .workflow import (
     WorkflowError,
     _effective_retry_limit,
     generate_new_plan_path,
+    move_completed_plan_to_done,
     render_step_prompts,
     resolve_role_selector,
     resolve_profile,
@@ -249,6 +250,31 @@ def _confirm_startup_recovery(error_message: str) -> bool:
     except (EOFError, KeyboardInterrupt):
         return False
     return response in ("y", "yes")
+
+
+def _maybe_move_completed_plan_to_done(repo_root: Path, plan_path: Path, *, is_complete: bool) -> Path:
+    if not is_complete or not plan_path.is_file():
+        return plan_path
+    is_tty = sys.stdin.isatty() and sys.stdout.isatty()
+    if not is_tty:
+        return plan_path
+
+    in_progress_root = (repo_root / "plans" / "in-progress").resolve()
+    try:
+        plan_path.resolve().relative_to(in_progress_root)
+    except ValueError:
+        return plan_path
+
+    try:
+        response = input(
+            f"Plan '{plan_path.name}' is complete and still in plans/in-progress. "
+            "Move it to plans/done? [Y/n]: "
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return plan_path
+    if response in ("", "y", "yes"):
+        return move_completed_plan_to_done(repo_root, plan_path)
+    return plan_path
 
 
 def run_install_skills(argv: list[str] | None = None) -> int:
@@ -488,6 +514,15 @@ def main(argv: list[str] | None = None) -> int:
             startup_retry=startup_retry,
             config_dir=config_path.parent,
             working_dir=working_dir,
+        )
+    except WorkflowError as exc:
+        print(exc.summary, file=sys.stderr)
+        return 1
+    try:
+        _maybe_move_completed_plan_to_done(
+            repo_root,
+            plan_path,
+            is_complete=result.final_snapshot.is_complete,
         )
     except WorkflowError as exc:
         print(exc.summary, file=sys.stderr)

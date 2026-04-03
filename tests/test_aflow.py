@@ -13,8 +13,8 @@ import unittest
 from importlib import resources
 from unittest.mock import patch
 from aflow.config import AflowSection, ConfigError, GoTransition, HarnessProfileConfig, WorkflowConfig, WorkflowHarnessConfig, WorkflowStepConfig, WorkflowUserConfig, bootstrap_config, find_placeholders, load_workflow_config, validate_workflow_config
-from aflow.workflow import WorkflowError, _backup_original_plan, evaluate_condition, generate_new_plan_path, pick_transition, render_prompt, render_step_prompts, resolve_profile, resolve_role_selector, run_workflow
-from aflow.cli import _confirm_startup_recovery, _parse_run_args, _pick_workflow_step, build_parser, main
+from aflow.workflow import WorkflowError, _backup_original_plan, evaluate_condition, generate_new_plan_path, move_completed_plan_to_done, pick_transition, render_prompt, render_step_prompts, resolve_profile, resolve_role_selector, run_workflow
+from aflow.cli import _confirm_startup_recovery, _maybe_move_completed_plan_to_done, _parse_run_args, _pick_workflow_step, build_parser, main
 from aflow.harnesses.claude import ClaudeAdapter
 from aflow.harnesses.codex import CodexAdapter
 from aflow.harnesses.gemini import GeminiAdapter
@@ -304,6 +304,27 @@ class WorkflowStartupFlowTests(unittest.TestCase):
         with patch('builtins.input', return_value='n'):
             assert _confirm_startup_recovery('error: boom') is False
 
+    def test_maybe_move_completed_plan_to_done_defaults_yes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plans' / 'in-progress' / 'plan.md'
+            plan_path.parent.mkdir(parents=True, exist_ok=True)
+            _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: Done\n- [x] step one\n')
+
+            with patch('sys.stdin.isatty', return_value=True), \
+                 patch('sys.stdout.isatty', return_value=True), \
+                 patch('builtins.input', return_value=''):
+                moved_path = _maybe_move_completed_plan_to_done(
+                    repo_root,
+                    plan_path,
+                    is_complete=True,
+                )
+
+            expected_path = repo_root / 'plans' / 'done' / 'plan.md'
+            assert moved_path.resolve() == expected_path.resolve()
+            assert expected_path.read_text(encoding='utf-8') == '# Plan\n\n### [x] Checkpoint 1: Done\n- [x] step one\n'
+            assert not plan_path.exists()
+
     def test_cli_rejects_start_step_on_complete_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -399,6 +420,57 @@ class WorkflowStartupFlowTests(unittest.TestCase):
             assert run_json['selected_start_step'] == 'implement_plan'
             assert run_json['startup_recovery_used'] is False
             assert run_json['startup_recovery_reason'] is None
+
+    def test_cli_moves_completed_in_progress_plan_to_done_after_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            repo_root = tmp_path
+            home_dir = tmp_path / 'home'
+            home_dir.mkdir()
+            self._write_workflow_config(home_dir, workflow_name='simple', multi_step=False)
+            plan_path = repo_root / 'plans' / 'in-progress' / 'plan.md'
+            completed_plan_path = repo_root / 'completed.md'
+            count_file = repo_root / 'count.txt'
+            plan_path.parent.mkdir(parents=True, exist_ok=True)
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            _write_plan(completed_plan_path, '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n')
+            _write_workflow_harness_script(repo_root, 'codex')
+            env = _workflow_test_env(
+                repo_root,
+                scenario='complete',
+                plan_path=plan_path,
+                count_file=count_file,
+                home_dir=home_dir,
+                completed_plan_path=completed_plan_path,
+            )
+            original_cwd = Path.cwd()
+            import io
+            import aflow.cli as cli_module
+            original_probe = cli_module.probe_worktree
+            stdout_capture = io.StringIO()
+            stderr_capture = io.StringIO()
+            stdout_capture.isatty = lambda: True  # type: ignore[attr-defined]
+            stderr_capture.isatty = lambda: True  # type: ignore[attr-defined]
+            try:
+                with patch.dict(os.environ, env, clear=True):
+                    cli_module.probe_worktree = lambda _: None
+                    os.chdir(repo_root)
+                    with patch('sys.stdin.isatty', return_value=True), \
+                         patch('builtins.input', return_value=''), \
+                         patch('sys.stdout', stdout_capture), \
+                         patch('sys.stderr', stderr_capture):
+                        result = main(['run', str(plan_path)])
+            finally:
+                os.chdir(original_cwd)
+                cli_module.probe_worktree = original_probe
+
+            assert result == 0
+            moved_path = repo_root / 'plans' / 'done' / 'plan.md'
+            assert moved_path.resolve().exists()
+            assert not plan_path.exists()
+            assert "Workflow 'simple' completed after 1 turn because DONE evaluated true." in stdout_capture.getvalue()
+            assert 'error:' not in stderr_capture.getvalue().lower()
+            run_dirs = sorted((repo_root / '.aflow' / 'runs').iterdir())
             turn_result = json.loads((run_dirs[0] / 'turns' / 'turn-001' / 'result.json').read_text(encoding='utf-8'))
             assert turn_result['step_name'] == 'implement_plan'
             assert turn_result['status'] == 'completed'
@@ -2492,6 +2564,58 @@ class WorkflowArtifactTests(unittest.TestCase):
             assert result_json['stderr'] == 'err'
             assert (turn_dir / 'stdout.txt').read_text(encoding='utf-8') == 'bad'
             assert (turn_dir / 'stderr.txt').read_text(encoding='utf-8') == 'err'
+
+    def test_run_workflow_accepts_completed_plan_moved_to_done(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            config_dir = repo_root
+            plan_path = repo_root / 'plans' / 'in-progress' / 'plan.md'
+            plan_path.parent.mkdir(parents=True, exist_ok=True)
+            _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n\n### [ ] Checkpoint 2: Review\n- [ ] reviewer step\n')
+            wf_config = WorkflowUserConfig(
+                roles={'reviewer': 'codex.default'},
+                harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})},
+                workflows={'simple': WorkflowConfig(
+                    steps={'review_implementation': WorkflowStepConfig(
+                        role='reviewer',
+                        prompts=('p',),
+                        go=(GoTransition(to='END'),),
+                    )},
+                    first_step='review_implementation',
+                )},
+                prompts={'p': 'Review.'},
+            )
+
+            def runner(argv, **kwargs):
+                _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n\n### [x] Checkpoint 2: Review\n- [x] reviewer step\n')
+                moved_path = move_completed_plan_to_done(repo_root, plan_path)
+                assert moved_path.resolve() == (repo_root / 'plans' / 'done' / 'plan.md').resolve()
+                return subprocess.CompletedProcess(argv, 0, 'approved', '')
+
+            result = run_workflow(
+                ControllerConfig(
+                    repo_root=repo_root,
+                    plan_path=plan_path,
+                    max_turns=2,
+                    start_step='review_implementation',
+                ),
+                wf_config,
+                'simple',
+                config_dir=config_dir,
+                adapter=CodexAdapter(),
+                runner=runner,
+            )
+
+            assert result.turns_completed == 1
+            assert result.end_reason == 'transition_end'
+            assert result.final_snapshot.is_complete is True
+            run_json = json.loads((result.run_dir / 'run.json').read_text(encoding='utf-8'))
+            assert run_json['status'] == 'completed'
+            assert Path(run_json['original_plan_path']).resolve() == (repo_root / 'plans' / 'done' / 'plan.md').resolve()
+            turn_result = json.loads((result.run_dir / 'turns' / 'turn-001' / 'result.json').read_text(encoding='utf-8'))
+            assert turn_result['status'] == 'completed'
+            assert Path(turn_result['original_plan_path']).resolve() == (repo_root / 'plans' / 'done' / 'plan.md').resolve()
+            assert Path(turn_result['active_plan_path']).resolve() == (repo_root / 'plans' / 'done' / 'plan.md').resolve()
 
     def test_run_json_records_workflow_step_on_active_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

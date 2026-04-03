@@ -326,6 +326,61 @@ def _backup_original_plan(repo_root: Path, original_plan_path: Path) -> Path:
         ) from exc
 
 
+def _done_plan_path(repo_root: Path, plan_path: Path) -> Path | None:
+    plans_root = (repo_root / "plans").resolve()
+    in_progress_root = plans_root / "in-progress"
+    try:
+        relative_plan_path = plan_path.resolve().relative_to(in_progress_root)
+    except ValueError:
+        return None
+    return plans_root / "done" / relative_plan_path
+
+
+def move_completed_plan_to_done(repo_root: Path, plan_path: Path) -> Path:
+    done_plan_path = _done_plan_path(repo_root, plan_path)
+    if done_plan_path is None:
+        raise WorkflowError(
+            f"completed plan is not under '{repo_root / 'plans' / 'in-progress'}': {plan_path}"
+        )
+    if not plan_path.is_file():
+        raise WorkflowError(f"completed plan file does not exist: {plan_path}")
+
+    done_plan_path.parent.mkdir(parents=True, exist_ok=True)
+    if done_plan_path.exists():
+        if done_plan_path.is_file() and _same_file_contents(plan_path, done_plan_path):
+            plan_path.unlink()
+            return done_plan_path
+        raise WorkflowError(
+            f"done plan path already exists: {done_plan_path}"
+        )
+
+    try:
+        shutil.move(str(plan_path), str(done_plan_path))
+    except OSError as exc:
+        raise WorkflowError(
+            f"failed to move completed plan {plan_path} to {done_plan_path}: {exc}"
+        ) from exc
+    return done_plan_path
+
+
+def _resolve_post_turn_original_plan_path(
+    repo_root: Path,
+    original_plan_path: Path,
+    *,
+    completed_returncode: int,
+) -> Path:
+    if original_plan_path.is_file():
+        return original_plan_path
+    if completed_returncode != 0:
+        raise FileNotFoundError(
+            f"{original_plan_path}: plan file does not exist"
+        )
+    done_plan_path = _done_plan_path(repo_root, original_plan_path)
+    if done_plan_path is not None and done_plan_path.is_file():
+        return done_plan_path
+    raise FileNotFoundError(f"{original_plan_path}: plan file does not exist")
+
+
 def _evaluate_condition_token(
     token: str,
     *,
@@ -1081,7 +1136,16 @@ def run_workflow(
             raise WorkflowError(summary, run_dir=run_paths.run_dir)
 
         try:
-            parsed_after = load_plan(original_plan_path)
+            resolved_original_plan_path = _resolve_post_turn_original_plan_path(
+                config.repo_root,
+                original_plan_path,
+                completed_returncode=completed.returncode,
+            )
+            parsed_after = load_plan(resolved_original_plan_path)
+            if resolved_original_plan_path != original_plan_path:
+                original_plan_path = resolved_original_plan_path
+                if active_plan_path == config.plan_path:
+                    active_plan_path = resolved_original_plan_path
             post_snapshot = parsed_after.snapshot
         except (PlanParseError, FileNotFoundError) as exc:
             is_retryable = (
