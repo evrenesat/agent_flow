@@ -54,12 +54,13 @@ Resolves the repo root via `git rev-parse`, loads and validates the TOML config,
 
 Startup resolution happens in `main()` before the workflow loop starts:
 
-1. Resolve config and workflow.
-2. Load the original plan strictly.
-3. If the plan is complete and `--start-step` was given, fail with a clear error.
-4. If the plan is half-done and the workflow has more than one step, require a TTY and prompt for an explicit step unless `--start-step` was given.
-5. If strict plan loading fails with `inconsistent_checkpoint_state`, require a TTY and ask whether to recover.
-6. When recovery is accepted, load a tolerant snapshot from the invalid plan, seed startup retry state, and pass both the parsed plan and retry context into `run_workflow()`.
+1. Ensure `~/.config/aflow/aflow.toml` and sibling `workflows.toml` exist. If either file was created, print both paths and exit so the user can edit them first.
+2. Resolve config and workflow.
+3. Load the original plan strictly.
+4. If the plan is complete and `--start-step` was given, fail with a clear error.
+5. If the plan is half-done and the workflow has more than one step, require a TTY and prompt for an explicit step unless `--start-step` was given.
+6. If strict plan loading fails with `inconsistent_checkpoint_state`, require a TTY and ask whether to recover.
+7. When recovery is accepted, load a tolerant snapshot from the invalid plan, seed startup retry state, and pass both the parsed plan and retry context into `run_workflow()`.
 
 ### `config.py`
 Loads `~/.config/aflow/aflow.toml` plus sibling `workflows.toml` (bootstrapped from the bundled defaults on first run). Parses and validates:

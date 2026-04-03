@@ -118,7 +118,7 @@ Current parser rules:
 
 `aflow` reads `~/.config/aflow/aflow.toml`.
 
-If that file does not exist, `aflow` copies the packaged `aflow/aflow.toml` and sibling `aflow/workflows.toml` into place and exits. Those are the default config sources, so edit them there if you want different models, roles, teams, or workflows before the first real run.
+If those files do not exist, `aflow` copies the packaged `aflow/aflow.toml` and sibling `aflow/workflows.toml` into place, prints both paths, and exits. That happens even if you run bare `aflow` with no subcommand, so you can open the files and edit them before the first real run.
 
 Example:
 

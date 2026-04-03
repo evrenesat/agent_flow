@@ -567,20 +567,32 @@ def load_workflow_config(
     return merged
 
 
-def bootstrap_config(config_path: Path | None = None) -> Path:
+def _bootstrap_config_files(config_path: Path | None = None) -> tuple[Path, tuple[Path, ...]]:
     path = config_path or _config_path()
+    workflows_path = path.with_name("workflows.toml")
+    created_paths: list[Path] = []
+
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         config_text = resources.files("aflow").joinpath("aflow.toml").read_text(
             encoding="utf-8"
         )
-        workflow_text = resources.files("aflow").joinpath(
-            "workflows.toml"
-        ).read_text(encoding="utf-8")
         path.write_text(config_text, encoding="utf-8")
-        path.with_name("workflows.toml").write_text(
-            workflow_text, encoding="utf-8"
+        created_paths.append(path)
+
+    if not workflows_path.exists():
+        workflows_path.parent.mkdir(parents=True, exist_ok=True)
+        workflow_text = resources.files("aflow").joinpath("workflows.toml").read_text(
+            encoding="utf-8"
         )
+        workflows_path.write_text(workflow_text, encoding="utf-8")
+        created_paths.append(workflows_path)
+
+    return path, tuple(created_paths)
+
+
+def bootstrap_config(config_path: Path | None = None) -> Path:
+    path, _ = _bootstrap_config_files(config_path)
     return path
 
 

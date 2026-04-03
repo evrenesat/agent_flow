@@ -1,4 +1,5 @@
 from __future__ import annotations
+import io
 import json
 from pathlib import Path
 from datetime import datetime, timezone
@@ -10,6 +11,7 @@ import tempfile
 import textwrap
 import time
 import unittest
+from contextlib import redirect_stderr
 from importlib import resources
 from unittest.mock import patch
 from aflow.config import AflowSection, ConfigError, GoTransition, HarnessProfileConfig, WorkflowConfig, WorkflowHarnessConfig, WorkflowStepConfig, WorkflowUserConfig, bootstrap_config, find_placeholders, load_workflow_config, validate_workflow_config
@@ -134,18 +136,49 @@ class WorkflowCliTests(unittest.TestCase):
     def test_cli_bootstraps_missing_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             home_dir = Path(tmpdir)
+            stderr = io.StringIO()
             original_home = os.environ.get('HOME')
             try:
                 os.environ['HOME'] = str(home_dir)
-                result = main(['run', 'plan.md'])
+                with redirect_stderr(stderr):
+                    result = main([])
             finally:
                 if original_home is None:
                     os.environ.pop('HOME', None)
                 else:
                     os.environ['HOME'] = original_home
             config_file = home_dir / '.config' / 'aflow' / 'aflow.toml'
+            workflows_file = home_dir / '.config' / 'aflow' / 'workflows.toml'
             assert config_file.exists()
-            assert result == 1
+            assert workflows_file.exists()
+            assert result == 0
+            output = stderr.getvalue()
+            assert str(config_file) in output
+            assert str(workflows_file) in output
+
+    def test_cli_run_bootstraps_missing_config_and_exits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir)
+            stderr = io.StringIO()
+            original_home = os.environ.get('HOME')
+            try:
+                os.environ['HOME'] = str(home_dir)
+                with redirect_stderr(stderr):
+                    result = main(['run', 'plan.md'])
+            finally:
+                if original_home is None:
+                    os.environ.pop('HOME', None)
+                else:
+                    os.environ['HOME'] = original_home
+            config_file = home_dir / '.config' / 'aflow' / 'aflow.toml'
+            workflows_file = home_dir / '.config' / 'aflow' / 'workflows.toml'
+            assert config_file.exists()
+            assert workflows_file.exists()
+            assert result == 0
+            output = stderr.getvalue()
+            assert str(config_file) in output
+            assert str(workflows_file) in output
+            assert 'plan file does not exist' not in output
 
     def test_cli_rejects_missing_default_workflow(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1499,6 +1532,7 @@ class WorkflowConfigTests(unittest.TestCase):
             config_path.write_text('existing', encoding='utf-8')
             result = bootstrap_config(config_path)
             assert result.read_text(encoding='utf-8') == 'existing'
+            assert (config_path.parent / 'workflows.toml').exists()
 
     def test_parse_rejects_unsupported_workflow_level_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3173,7 +3207,6 @@ class SkillDocsTests(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[1]
         config = load_workflow_config(repo_root / 'aflow' / 'aflow.toml')
         expected = {
-            'simple_implementation': 'aflow-execute-plan',
             'cp_loop_implementation': 'aflow-execute-checkpoint',
             'followup_implementation': 'aflow-execute-plan',
             'review_squash': 'aflow-review-squash',
@@ -3242,11 +3275,11 @@ class SkillDocsTests(unittest.TestCase):
             assert step.go[0].to == 'END', f"step {step_name} first transition must be END"
             assert step.go[0].when == 'MAX_TURNS_REACHED', f"step {step_name} first transition must be MAX_TURNS_REACHED"
 
-    def test_bundled_config_ralph_includes_input_vars_prompt(self) -> None:
+    def test_bundled_config_ralph_uses_checkpoint_prompt(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         config = load_workflow_config(repo_root / 'aflow' / 'aflow.toml')
         step = config.workflows['ralph'].steps['implement_plan']
-        assert 'input_vars' in step.prompts
+        assert 'cp_loop_implementation' in step.prompts
 
     def test_bundled_config_typos_are_fixed(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]

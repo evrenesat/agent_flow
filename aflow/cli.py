@@ -8,6 +8,7 @@ import sys
 from .config import (
     ConfigError,
     bootstrap_config,
+    _bootstrap_config_files,
     find_placeholders,
     load_workflow_config,
     validate_workflow_config,
@@ -253,6 +254,16 @@ def _confirm_startup_recovery(error_message: str) -> bool:
     return response in ("y", "yes")
 
 
+def _print_bootstrap_paths(config_path: Path) -> None:
+    workflows_path = config_path.with_name("workflows.toml")
+    print(
+        "Bootstrapped aflow config files. Edit these paths and rerun when ready:",
+        file=sys.stderr,
+    )
+    print(f"  {config_path}", file=sys.stderr)
+    print(f"  {workflows_path}", file=sys.stderr)
+
+
 def _maybe_move_completed_plan_to_done(repo_root: Path, plan_path: Path, *, is_complete: bool) -> Path:
     if not is_complete or not plan_path.is_file():
         return plan_path
@@ -302,6 +313,13 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         return 0
 
+    config_path: Path | None = None
+    if args.command in (None, "run"):
+        config_path, created_paths = _bootstrap_config_files()
+        if created_paths:
+            _print_bootstrap_paths(config_path)
+            return 0
+
     if args.command != "run":
         parser.print_help(sys.stderr)
         return 1
@@ -318,8 +336,10 @@ def main(argv: list[str] | None = None) -> int:
     working_dir = Path.cwd()
     plan_path = Path(plan_file_arg).expanduser().resolve()
 
-    try:
+    if config_path is None:
         config_path = bootstrap_config()
+
+    try:
         workflow_config = load_workflow_config(config_path)
     except ConfigError as exc:
         print(exc, file=sys.stderr)
