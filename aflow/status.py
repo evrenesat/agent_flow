@@ -139,6 +139,10 @@ def _render_turn_history(state: ControllerState) -> Group | Text | None:
         body.add_row("Harness/Model", record.resolved_model_display)
         body.add_row("Duration", _duration_display(record.started_at, record.finished_at))
         body.add_row("Outcome", record.outcome)
+        if record.stdout_artifact_path is not None:
+            body.add_row("Stdout", record.stdout_artifact_path)
+        if record.stderr_artifact_path is not None:
+            body.add_row("Stderr", record.stderr_artifact_path)
         panels.append(
             Panel(
                 body,

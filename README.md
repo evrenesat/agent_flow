@@ -295,13 +295,15 @@ Fields shown:
 - checkpoint progress and turn count
 - original and active plan paths, with the follow-up path only shown once the file exists
 - a larger workflow graph in the upper-right, with one box per step and `go` arrows between them
-- a growing turn-history area that keeps each completed/current turn visible for the whole run
+- a growing turn-history area that keeps each completed/current turn visible for the whole run, and shows repo-relative `stdout.txt` / `stderr.txt` paths when those files contain non-whitespace output
 - git summary: modified, added, and deleted file counts since workflow start, net line additions and removals, commits made since start, and up to `[aflow].banner_files_limit` changed file paths (then `+N more`)
 - current run status
 
 The changed-file list uses `[aflow].banner_files_limit`, which defaults to `10`.
 
 The banner does not show a speculative follow-up plan path before the file exists. When a review step actually creates the follow-up file, `Active Plan` switches to that file.
+
+Empty stdout and stderr files stay hidden in the turn history.
 
 The git summary is based on a working-tree snapshot captured at workflow start, so pre-existing dirty state is excluded. If git is unavailable the git rows are omitted and the workflow still runs.
 

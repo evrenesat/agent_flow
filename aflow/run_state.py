@@ -60,12 +60,15 @@ class TurnRecord:
     step_name: str
     resolved_harness_name: str
     resolved_model_display: str
+    turn_dir: Path | None = None
     step_role: str | None = None
     resolved_selector: str | None = None
     outcome: str = "running"
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     finished_at: datetime | None = None
     duration_seconds: float | None = None
+    stdout_artifact_path: str | None = None
+    stderr_artifact_path: str | None = None
 
 
 def format_harness_model_display(

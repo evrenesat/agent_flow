@@ -1172,6 +1172,87 @@ class LazyBannerTests(unittest.TestCase):
             assert followup.name in text
             assert 'Active Plan' in text
 
+    def test_turn_artifact_display_path_uses_repo_relative_paths_only_for_non_whitespace_content(self) -> None:
+        import aflow.workflow as workflow_mod
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            turn_dir = root / '.aflow' / 'runs' / 'run-1' / 'turns' / 'turn-001'
+            turn_dir.mkdir(parents=True)
+            (turn_dir / 'stdout.txt').write_text('   \n', encoding='utf-8')
+            (turn_dir / 'stderr.txt').write_text('tool failure\n', encoding='utf-8')
+            assert workflow_mod._turn_artifact_display_path(root, turn_dir, 'stdout.txt') is None
+            assert workflow_mod._turn_artifact_display_path(root, turn_dir, 'stderr.txt') == '.aflow/runs/run-1/turns/turn-001/stderr.txt'
+
+    def test_banner_renders_stdout_and_stderr_artifact_paths_from_turn_history(self) -> None:
+        import aflow.workflow as workflow_mod
+        from rich.console import Console
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            turns_root = root / '.aflow' / 'runs' / 'run-1' / 'turns'
+
+            def make_record(
+                *,
+                turn_number: int,
+                stdout_text: str | None = None,
+                stderr_text: str | None = None,
+                outcome: str = 'completed',
+            ) -> TurnRecord:
+                turn_dir = turns_root / f'turn-{turn_number:03d}'
+                turn_dir.mkdir(parents=True, exist_ok=False)
+                if stdout_text is not None:
+                    (turn_dir / 'stdout.txt').write_text(stdout_text, encoding='utf-8')
+                if stderr_text is not None:
+                    (turn_dir / 'stderr.txt').write_text(stderr_text, encoding='utf-8')
+                started_at = datetime.now(timezone.utc)
+                finished_at = started_at if outcome != 'running' else None
+                return TurnRecord(
+                    turn_number=turn_number,
+                    step_name=f'step-{turn_number}',
+                    step_role='architect',
+                    resolved_selector='codex.default',
+                    resolved_harness_name='codex',
+                    resolved_model_display='codex / gpt-5.4',
+                    turn_dir=turn_dir,
+                    outcome=outcome,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    duration_seconds=0.0 if outcome != 'running' else None,
+                    stdout_artifact_path=workflow_mod._turn_artifact_display_path(root, turn_dir, 'stdout.txt'),
+                    stderr_artifact_path=workflow_mod._turn_artifact_display_path(root, turn_dir, 'stderr.txt'),
+                )
+
+            state = ControllerState(last_snapshot=PlanSnapshot(None, 0, 0, False))
+            state.active_turn = 4
+            state.current_turn_started_at = datetime.now(timezone.utc)
+            state.turn_history.extend([
+                make_record(turn_number=1, stdout_text='ok\n', stderr_text=''),
+                make_record(turn_number=2, stdout_text='   \n', stderr_text='oops\n'),
+                make_record(turn_number=3, stdout_text='ok\n', stderr_text='oops\n'),
+                make_record(turn_number=4, outcome='running'),
+            ])
+
+            panel = build_banner(
+                config_harness='codex',
+                config_model='gpt-5.4',
+                config_effort=None,
+                config_max_turns=10,
+                config_plan_path=root / 'plan.md',
+                state=state,
+            )
+            assert panel is not None
+            console = Console(record=True, width=200)
+            console.print(panel)
+            text = console.export_text()
+            assert '.aflow/runs/run-1/turns/turn-001/stdout.txt' in text
+            assert '.aflow/runs/run-1/turns/turn-001/stderr.txt' not in text
+            assert '.aflow/runs/run-1/turns/turn-002/stdout.txt' not in text
+            assert '.aflow/runs/run-1/turns/turn-002/stderr.txt' in text
+            assert '.aflow/runs/run-1/turns/turn-003/stdout.txt' in text
+            assert '.aflow/runs/run-1/turns/turn-003/stderr.txt' in text
+            assert '.aflow/runs/run-1/turns/turn-004/stdout.txt' not in text
+            assert '.aflow/runs/run-1/turns/turn-004/stderr.txt' not in text
+            assert 'result.json' not in text
+
     def test_banner_renders_workflow_graph_and_turn_history(self) -> None:
         from rich.console import Console
         state = ControllerState(last_snapshot=PlanSnapshot('Checkpoint 1', 1, 0, False))

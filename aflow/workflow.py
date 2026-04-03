@@ -53,6 +53,15 @@ class ResolvedProfile:
     effort: str | None
 
 
+def _turn_artifact_display_path(repo_root: Path, turn_dir: Path, filename: str) -> str | None:
+    artifact_path = turn_dir / filename
+    if not artifact_path.is_file():
+        return None
+    if not artifact_path.read_text(encoding="utf-8").strip():
+        return None
+    return str(artifact_path.relative_to(repo_root))
+
+
 def resolve_profile(
     selector: str,
     config: WorkflowUserConfig,
@@ -958,6 +967,7 @@ def run_workflow(
             active_plan_path=active_path,
             new_plan_path=new_path if new_path.is_file() else None,
         )
+        state.turn_history[-1].turn_dir = turn_dir
         banner.update(state)
         return turn_dir, started_at
 
@@ -1015,6 +1025,9 @@ def run_workflow(
             was_retry=was_retry,
         )
         record = state.turn_history[-1]
+        record.turn_dir = turn_dir
+        record.stdout_artifact_path = _turn_artifact_display_path(run_paths.repo_root, turn_dir, "stdout.txt")
+        record.stderr_artifact_path = _turn_artifact_display_path(run_paths.repo_root, turn_dir, "stderr.txt")
         record.outcome = "completed" if status in {"running", "completed"} else status
         record.finished_at = datetime.now(timezone.utc)
         record.duration_seconds = (record.finished_at - record.started_at).total_seconds()
