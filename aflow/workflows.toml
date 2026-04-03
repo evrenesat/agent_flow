@@ -4,7 +4,7 @@
 # The step runs under a role. The selected team decides which selector that role maps to at runtime.
 role = "worker"
 # Prompt keys are rendered in order.
-prompts = ["input_vars", "simple_implementation"]
+prompts = ["cp_loop_implementation"]
 # Transition rules are checked top to bottom. Each rule uses a `to` target and an optional `when` condition.
 go = [
   { to = "END", when = "DONE || MAX_TURNS_REACHED" },
@@ -29,7 +29,7 @@ go = [
 
 [workflow.review_implement_review.steps.implement_plan]
 role = "worker"
-prompts = ["input_vars", "cp_loop_implementation", "simple_implementation"]
+prompts = ["cp_loop_implementation"]
 go = [
   { to = "END", when = "MAX_TURNS_REACHED" },
   { to = "review_implementation", when = "DONE" },
@@ -38,7 +38,7 @@ go = [
 
 [workflow.review_implement_review.steps.review_implementation]
 role = "reviewer"
-prompts = ["input_vars", "output_vars", "review_squash"]
+prompts = ["review_plans","review_squash"]
 go = [
   { to = "END", when = "MAX_TURNS_REACHED" },
   { to = "implement_plan", when = "NEW_PLAN_EXISTS" },
@@ -57,7 +57,7 @@ go = [
 
 [workflow.review_implement_cp_review.steps.implement_plan]
 role = "worker"
-prompts = ["input_vars", "cp_loop_implementation"]
+prompts = ["cp_loop_implementation"]
 go = [
   { to = "END", when = "MAX_TURNS_REACHED" },
   { to = "review_cp_implementation" },
@@ -65,7 +65,7 @@ go = [
 
 [workflow.review_implement_cp_review.steps.review_cp_implementation]
 role = "reviewer"
-prompts = ["input_vars", "output_vars", "review_cp"]
+prompts = ["review_plans","review_cp"]
 go = [
   { to = "END", when = "MAX_TURNS_REACHED" },
   { to = "implement_plan", when = "NEW_PLAN_EXISTS || !DONE" },
@@ -75,7 +75,7 @@ go = [
 # Final review against the original plan before any optional follow-up work.
 [workflow.review_implement_cp_review.steps.final_review]
 role = "architect"
-prompts = ["input_vars", "output_vars", "final_review"]
+prompts = ["review_plans","final_review"]
 go = [
   { to = "END", when = "MAX_TURNS_REACHED" },
   { to = "followup", when = "NEW_PLAN_EXISTS" },
@@ -84,7 +84,7 @@ go = [
 
 [workflow.review_implement_cp_review.steps.followup]
 role = "senior_architect"
-prompts = ["input_vars", "followup_implementation"]
+prompts = ["followup_implementation"]
 go = [
   { to = "END", when = "MAX_TURNS_REACHED" },
   { to = "final_review" },

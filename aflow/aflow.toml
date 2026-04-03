@@ -83,25 +83,24 @@ worker = 'codex.nano'
 # Named prompt templates that workflow steps reference by key.
 [prompts]
 
-input_vars = """
-ORIGINAL_PLAN: "{ORIGINAL_PLAN_PATH}". This is the original implementation plan.
-ACTIVE_PLAN: "{ACTIVE_PLAN_PATH}". This maybe same as the original plan file, or could be a transient follow-up plan focused on fixing of review findings.
-"""
-output_vars = """
+review_plans = """
+This is the original implementation plan:
+ORIGINAL_PLAN: "{ORIGINAL_PLAN_PATH}".
+
+This can same as the original plan file, or could be a smaller follow-up plan focused on fixing of review findings:
+ACTIVE_PLAN: "{ACTIVE_PLAN_PATH}".
+
+If ORIGINAL_PLAN and ACTIVE_PLAN point to different files, take both into account in your review.
+
+This file is not yet exist, if you are tasked to create a follow-up plan for possible review fixes, use this path:
 NEW_PLAN_PATH: "{NEW_PLAN_PATH}"
 """
 
+cp_loop_implementation = "Implement {ACTIVE_PLAN_PATH} using 'aflow-execute-checkpoint' skill."
+followup_implementation = "Implement {ACTIVE_PLAN_PATH} using 'aflow-execute-plan' skill."
+
+review_squash = "Use 'aflow-review-squash' skill. Take into account both ORIGINAL_PLAN and ACTIVE_PLAN (if they differ)"
+final_review = "Use 'aflow-review-final' skill."
+review_cp = "Use 'aflow-review-checkpoint' skill."
 review_plan = "Review the plan at {ORIGINAL_PLAN_PATH} for obvious/indisputable weak spots, ambiguity, and missing constraints and directly apply improvements to the plan file."
 
-simple_implementation = "Work from {ACTIVE_PLAN_PATH}. Use 'aflow-execute-plan' skill."
-
-cp_loop_implementation = "Use 'aflow-execute-checkpoint' skill."
-
-followup_implementation = "Use 'aflow-execute-plan' skill."
-
-
-review_squash = "Use 'aflow-review-squash' skill."
-
-final_review = "Use 'aflow-review-final' skill."
-
-review_cp = "Use 'aflow-review-checkpoint' skill."
