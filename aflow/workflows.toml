@@ -1,0 +1,110 @@
+#### WORKFLOWS ####
+# RALPH LOOPs
+# This is a simple single step workflow that emulates ralph loop style execution.
+#
+[workflow.ralph.steps.implement_plan]
+role = "worker"
+prompts = ["input_vars", "simple_implementation"]
+go = [
+  { to = "END", when = "DONE || MAX_TURNS_REACHED" },
+  { to = "implement_plan" },
+]
+
+[workflow.ralph_jr]
+extends = "ralph"
+team = "7teen"
+
+
+
+# REVIEW-IMPLEMENT-REVIEW
+# This workflow first requests an improvement review from a capable model before
+# actually starting on implementation. A worker model then implements the whole
+# plan in one go (one checkpoint per context). When the implementer thinks it is
+# done, the workflow goes to a final review step. If the reviewer is satisfied it
+# calls aflow-review-squash, which rewrites all post-handoff history into one
+# final commit. If not satisfied, the reviewer creates a fix-up follow-up plan
+# and the workflow loops back to implementation. This squash-on-approval behavior
+# is specific to this workflow, not an engine-wide invariant.
+[workflow.review_implement_review.steps.review_plan]
+role = "architect"
+prompts = ["review_plan"]
+go = [
+  { to = "END", when = "MAX_TURNS_REACHED" },
+  { to = "implement_plan" },
+]
+
+[workflow.review_implement_review.steps.implement_plan]
+role = "worker"
+prompts = ["input_vars", "cp_loop_implementation", "simple_implementation"]
+go = [
+  { to = "END", when = "MAX_TURNS_REACHED" },
+  { to = "review_implementation", when = "DONE" },
+  { to = "implement_plan" },
+]
+
+[workflow.review_implement_review.steps.review_implementation]
+role =  "reviewer"
+prompts = ["input_vars","output_vars","review_squash"]
+go = [
+  { to = "END", when = "MAX_TURNS_REACHED" },
+  { to = "implement_plan", when = "NEW_PLAN_EXISTS" },
+  { to = "END" },
+]
+
+
+# REVIEW-IMPLEMENT_CHECKPOINT-REVIEW-FINAL_REVIEW-FOLLOW_UP
+# This workflow uses checkpoint-scoped review (aflow-review-checkpoint) and a
+# no-squash final review (aflow-review-final). History is not rewritten on
+# approval; the checkpoint commit structure is left intact.
+#
+[workflow.review_implement_cp_review.steps.review_plan]
+role = "architect"
+prompts = ["review_plan"]
+go = [
+  { to = "END", when = "MAX_TURNS_REACHED" },
+  { to = "implement_plan" },
+]
+
+[workflow.review_implement_cp_review.steps.implement_plan]
+role = "worker"
+prompts = ["input_vars","cp_loop_implementation"]
+go = [
+  { to = "END", when = "MAX_TURNS_REACHED" },
+  { to = "review_cp_implementation" },
+]
+
+[workflow.review_implement_cp_review.steps.review_cp_implementation]
+role =  "reviewer"
+prompts = ["input_vars","output_vars","review_cp"]
+go = [
+  { to = "END", when = "MAX_TURNS_REACHED" },
+  { to = "implement_plan", when = "NEW_PLAN_EXISTS || !DONE" },
+  { to = "final_review" },
+]
+
+# Make a final review against original plan for the complete implementation.
+[workflow.review_implement_cp_review.steps.final_review]
+role = "architect"
+prompts = ["input_vars","output_vars","final_review"]
+go = [
+  { to = "END", when = "MAX_TURNS_REACHED" },
+  { to = "followup", when = "NEW_PLAN_EXISTS" },
+  { to = "END" },
+]
+
+[workflow.review_implement_cp_review.steps.followup]
+role =  "senior_architect"
+prompts = ["input_vars","followup_implementation"]
+go = [
+  { to = "END", when = "MAX_TURNS_REACHED" },
+  { to = "final_review" },
+]
+
+# to create an alias
+[worklflow.hard]
+extends = "review_implement_cp_review"
+
+
+[worklflow.jr]
+extends = "review_implement_cp_review"
+team = "7teen"
