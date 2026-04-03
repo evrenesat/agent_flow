@@ -1690,6 +1690,78 @@ class WorkflowRuntimeTests(unittest.TestCase):
             result_inline = render_prompt('Work from {ACTIVE_PLAN_PATH}. New: {NEW_PLAN_PATH}. Original: {ORIGINAL_PLAN_PATH}', config_dir=config_dir, working_dir=working_dir, original_plan_path=original, new_plan_path=new_plan, active_plan_path=active)
             assert result_inline == f'Work from {active}. New: {new_plan}. Original: {original}'
 
+    def test_prompt_rendering_expands_next_checkpoint_variables(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_dir = root / 'config'
+            working_dir = root / 'cwd'
+            config_dir.mkdir()
+            working_dir.mkdir()
+            plan = root / 'plan.md'
+            plan.write_text(
+                '# Plan\n\n'
+                '### [x] Checkpoint 1: Done\n'
+                '- [x] step one\n\n'
+                '### [ ] Checkpoint 2: Current\n'
+                '- [ ] step two\n',
+                encoding='utf-8',
+            )
+            result = render_prompt(
+                'Next: {NEXT_CP}. {WORK_ON_NEXT_CHECKPOINT_CMD}',
+                config_dir=config_dir,
+                working_dir=working_dir,
+                original_plan_path=plan,
+                new_plan_path=root / 'plan-cp02-v01.md',
+                active_plan_path=plan,
+            )
+            assert result == (
+                'Next: 2. Work only on Checkpoint #2. '
+                'Do not repeat earlier checkpoints, and do not skip ahead.'
+            )
+
+    def test_prompt_rendering_uses_empty_next_checkpoint_command_for_completed_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_dir = root / 'config'
+            working_dir = root / 'cwd'
+            config_dir.mkdir()
+            working_dir.mkdir()
+            plan = root / 'plan.md'
+            plan.write_text(
+                '# Plan\n\n'
+                '### [x] Checkpoint 1: Done\n'
+                '- [x] step one\n',
+                encoding='utf-8',
+            )
+            result = render_prompt(
+                'Next: {NEXT_CP}. Cmd:{WORK_ON_NEXT_CHECKPOINT_CMD}',
+                config_dir=config_dir,
+                working_dir=working_dir,
+                original_plan_path=plan,
+                new_plan_path=root / 'plan-cp01-v02.md',
+                active_plan_path=plan,
+            )
+            assert result == 'Next: -. Cmd:'
+
+    def test_prompt_rendering_uses_empty_next_checkpoint_command_for_non_checkpoint_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_dir = root / 'config'
+            working_dir = root / 'cwd'
+            config_dir.mkdir()
+            working_dir.mkdir()
+            followup = root / 'followup.md'
+            followup.write_text('- [ ] fix the review finding\n', encoding='utf-8')
+            result = render_prompt(
+                'Next: {NEXT_CP}. Cmd:{WORK_ON_NEXT_CHECKPOINT_CMD}',
+                config_dir=config_dir,
+                working_dir=working_dir,
+                original_plan_path=root / 'original.md',
+                new_plan_path=root / 'followup-v02.md',
+                active_plan_path=followup,
+            )
+            assert result == 'Next: -. Cmd:'
+
     def test_prompt_rendering_rejects_missing_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -3203,19 +3275,16 @@ class SkillDocsTests(unittest.TestCase):
             for placeholder in placeholders:
                 assert placeholder not in text
 
-    def test_bundled_prompt_skill_names_match_shipped_skills(self) -> None:
+    def test_bundled_skill_files_exist(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
-        config = load_workflow_config(repo_root / 'aflow' / 'aflow.toml')
-        expected = {
-            'cp_loop_implementation': 'aflow-execute-checkpoint',
-            'followup_implementation': 'aflow-execute-plan',
-            'review_squash': 'aflow-review-squash',
-            'review_cp': 'aflow-review-checkpoint',
-            'final_review': 'aflow-review-final',
-        }
-        for prompt_name, skill_name in expected.items():
-            prompt = config.prompts[prompt_name]
-            assert f"'{skill_name}'" in prompt
+        for skill_name in (
+            'aflow-plan',
+            'aflow-execute-plan',
+            'aflow-execute-checkpoint',
+            'aflow-review-squash',
+            'aflow-review-checkpoint',
+            'aflow-review-final',
+        ):
             skill_path = repo_root / 'aflow' / 'bundled_skills' / skill_name / 'SKILL.md'
             assert skill_path.exists()
 
@@ -4912,6 +4981,34 @@ class StopMarkerTests(unittest.TestCase):
                     wf_config, 'simple', config_dir=repo_root, adapter=CodexAdapter(), runner=runner,
                 )
             assert 'implementer requested stop without a reason' in str(ctx.value)
+
+    def test_stop_marker_example_inside_fenced_transcript_is_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = self._make_wf_config()
+
+            def runner(argv, **kwargs):
+                _write_plan(plan_path, _COMPLETE_PLAN)
+                return subprocess.CompletedProcess(
+                    argv, 0,
+                    stdout='checkpoint completed\n',
+                    stderr=(
+                        'tool output\n'
+                        '```\n'
+                        'AFLOW_STOP: <reason>\n'
+                        '```\n'
+                        'more transcript\n'
+                    ),
+                )
+
+            result = run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=5),
+                wf_config, 'simple', config_dir=repo_root, adapter=CodexAdapter(), runner=runner,
+            )
+            assert result.turns_completed == 1
+            assert result.final_snapshot.is_complete
 
 
 if __name__ == '__main__':

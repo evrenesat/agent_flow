@@ -49,11 +49,11 @@ effort = "high"
 # The harness model identifier for this profile.
 model = "gpt-5.4-mini"
 # Optional effort setting passed through to harnesses that support it.
-effort = "high"
 
 [harness.codex.profiles.nano]
 # The harness model identifier for this profile.
-model = "gpt-5.4-nano"
+model = "gpt-5.4-mini"
+effort = "none"
 
 
 #### Roles & Teams ####
@@ -83,6 +83,17 @@ worker = 'codex.nano'
 # Named prompt templates that workflow steps reference by key.
 [prompts]
 
+implementation_plans = """
+This is the original implementation plan:
+ORIGINAL_PLAN: "{ORIGINAL_PLAN_PATH}".
+
+This is the active plan for the current implementation step:
+ACTIVE_PLAN: "{ACTIVE_PLAN_PATH}".
+
+NEXT_CHECKPOINT: "{NEXT_CP}".
+{WORK_ON_NEXT_CHECKPOINT_CMD}
+"""
+
 review_plans = """
 This is the original implementation plan:
 ORIGINAL_PLAN: "{ORIGINAL_PLAN_PATH}".
@@ -96,11 +107,10 @@ This file is not yet exist, if you are tasked to create a follow-up plan for pos
 NEW_PLAN_PATH: "{NEW_PLAN_PATH}"
 """
 
-cp_loop_implementation = "Implement {ACTIVE_PLAN_PATH} using 'aflow-execute-checkpoint' skill."
+cp_loop_implementation = "Implement {ACTIVE_PLAN_PATH} using 'aflow-execute-checkpoint' skill. {WORK_ON_NEXT_CHECKPOINT_CMD}"
 followup_implementation = "Implement {ACTIVE_PLAN_PATH} using 'aflow-execute-plan' skill."
 
 review_squash = "Use 'aflow-review-squash' skill. Take into account both ORIGINAL_PLAN and ACTIVE_PLAN (if they differ)"
 final_review = "Use 'aflow-review-final' skill."
 review_cp = "Use 'aflow-review-checkpoint' skill."
 review_plan = "Review the plan at {ORIGINAL_PLAN_PATH} for obvious/indisputable weak spots, ambiguity, and missing constraints and directly apply improvements to the plan file."
-

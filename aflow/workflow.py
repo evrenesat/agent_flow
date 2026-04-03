@@ -22,7 +22,7 @@ from .config import (
 )
 from .harnesses import get_adapter
 from .harnesses.base import HarnessAdapter, HarnessInvocation
-from .plan import ParsedPlan, PlanParseError, PlanSnapshot, load_plan, plan_has_git_tracking
+from .plan import FENCE_RE, ParsedPlan, PlanParseError, PlanSnapshot, load_plan, load_plan_tolerant, plan_has_git_tracking
 from .run_state import ControllerConfig, ControllerRunResult, ControllerState, RetryContext, TurnRecord, WorkflowEndReason, format_harness_model_display
 from .runlog import create_run_paths, finalize_turn_artifacts, prune_old_runs, write_run_metadata, write_turn_artifacts_start
 from .status import BannerRenderer
@@ -180,9 +180,31 @@ def render_prompt(
             raise WorkflowError(f"prompt file not found: {file_path}")
         prompt_text = file_path.read_text(encoding="utf-8")
 
+    next_checkpoint = "-"
+    work_on_next_checkpoint_cmd = ""
+    if (
+        "{NEXT_CP}" in prompt_text
+        or "{WORK_ON_NEXT_CHECKPOINT_CMD}" in prompt_text
+    ):
+        try:
+            active_plan = load_plan_tolerant(active_plan_path)
+        except PlanParseError as exc:
+            if "no checkpoint sections were found" not in str(exc):
+                raise WorkflowError(str(exc)) from exc
+        else:
+            checkpoint_index = active_plan.parsed_plan.snapshot.current_checkpoint_index
+            if checkpoint_index is not None:
+                next_checkpoint = str(checkpoint_index)
+                work_on_next_checkpoint_cmd = (
+                    f"Work only on Checkpoint #{checkpoint_index}. "
+                    "Do not repeat earlier checkpoints, and do not skip ahead."
+                )
+
     prompt_text = prompt_text.replace("{ORIGINAL_PLAN_PATH}", str(original_plan_path))
     prompt_text = prompt_text.replace("{NEW_PLAN_PATH}", str(new_plan_path))
     prompt_text = prompt_text.replace("{ACTIVE_PLAN_PATH}", str(active_plan_path))
+    prompt_text = prompt_text.replace("{NEXT_CP}", next_checkpoint)
+    prompt_text = prompt_text.replace("{WORK_ON_NEXT_CHECKPOINT_CMD}", work_on_next_checkpoint_cmd)
     return prompt_text
 
 
@@ -709,13 +731,39 @@ def _build_retry_appendix(parse_error_str: str) -> str:
 
 _STOP_SENTINEL_PREFIX = "AFLOW_STOP:"
 _STOP_SENTINEL_FALLBACK_REASON = "implementer requested stop without a reason"
+_STOP_SENTINEL_PLACEHOLDER_REASON = "<reason>"
+
+
+def _iter_non_fenced_lines(text: str):
+    in_fence = False
+    fence_char: str | None = None
+    fence_len = 0
+
+    for line in text.splitlines():
+        fence_match = FENCE_RE.match(line)
+        if fence_match:
+            marker = fence_match.group(1)
+            if not in_fence:
+                in_fence = True
+                fence_char = marker[0]
+                fence_len = len(marker)
+            elif marker[0] == fence_char and len(marker) >= fence_len:
+                in_fence = False
+                fence_char = None
+                fence_len = 0
+            continue
+
+        if not in_fence:
+            yield line
 
 
 def _detect_stop_marker(stdout: str, stderr: str) -> str | None:
     for text in (stdout, stderr):
-        for line in text.splitlines():
+        for line in _iter_non_fenced_lines(text):
             if line.startswith(_STOP_SENTINEL_PREFIX):
                 reason = line[len(_STOP_SENTINEL_PREFIX):].strip()
+                if reason == _STOP_SENTINEL_PLACEHOLDER_REASON:
+                    continue
                 return reason or _STOP_SENTINEL_FALLBACK_REASON
     return None
 

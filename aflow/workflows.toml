@@ -57,7 +57,7 @@ go = [
 
 [workflow.review_implement_cp_review.steps.implement_plan]
 role = "worker"
-prompts = ["cp_loop_implementation"]
+prompts = ["implementation_plans", "cp_loop_implementation"]
 go = [
   { to = "END", when = "MAX_TURNS_REACHED" },
   { to = "review_cp_implementation" },
@@ -84,16 +84,18 @@ go = [
 
 [workflow.review_implement_cp_review.steps.followup]
 role = "senior_architect"
-prompts = ["followup_implementation"]
+prompts = ["implementation_plans", "followup_implementation"]
 go = [
   { to = "END", when = "MAX_TURNS_REACHED" },
   { to = "final_review" },
 ]
 
-# Alias workflow, same steps as `review_implement_cp_review`.
+# Alias workflows
 [workflow.hard]
 extends = "review_implement_cp_review"
 
+[workflow.medium]
+extends = "review_implement_review"
 
 # Alias workflow, same steps as `review_implement_cp_review` with the `7teen` team.
 [workflow.jr]

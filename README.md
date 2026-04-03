@@ -1,8 +1,15 @@
-# aflow
+# agent flow
 
 `aflow` runs plan-driven coding workflows through existing agent CLIs such as Codex, Claude, Gemini, Kiro, OpenCode, and Pi.
 
-It does not call provider APIs directly. It shells out to the harnesses you already use and have access to. The main use case is a stricter loop where a stronger model plans or reviews, a cheaper model implements the current checkpoint, and the run keeps moving until the original plan is done or the workflow reaches `END`.
+It does not call provider APIs directly. It shells out to the harnesses you already use. The main use case is a stricter loop where a stronger model plans or reviews, a fast cheap model implements the current checkpoint, and the run keeps moving until the original plan is done or reaches `END`.
+
+## Why?
+
+I kept wanting two things. First, a clean, repeatable way to make a detailed plan with a capable model, implement the current checkpoint with a fast cheap model, review it, and sometimes improve the plan again with a stronger model. I was doing that manually, so I wanted to automate it.
+
+Second, I don't want to stick to a single provider harness. The best value keeps changing, and a lot of free or included usage is tied to the provider CLI, not an API budget. `aflow` is a reliable wrapper for that workflow.
+
 
 ## Install
 
@@ -38,21 +45,15 @@ Manual mode:
 aflow install-skills ~/.claude/skills
 ```
 
-Skip the confirmation prompt:
-
-```bash
-aflow install-skills --yes
-```
-
 The auto-install destination map is:
 
-- `claude` -> `~/.claude/skills`
 - `codex` -> `~/.agents/skills`
 - `copilot` -> `~/.agents/skills`
 - `gemini` -> `~/.agents/skills`
+- `pi` -> `~/.agents/skills`
 - `kiro` -> `~/.kiro/skills`
 - `opencode` -> `~/.config/opencode/skills`
-- `pi` -> `~/.agents/skills`
+- `claude` -> `~/.claude/skills`
 
 ## Usage
 
@@ -79,16 +80,6 @@ If startup hits an `inconsistent_checkpoint_state` parse error, `aflow` asks whe
 
 If you pass `--start-step` on a plan that is already complete, `aflow` exits with a clear error instead of ignoring the flag.
 
-## Why This Exists
-
-Some provider subscriptions and free monthly allowances are tied to the provider's own CLI or harness rather than an API budget. `aflow` is for that setup.
-
-Instead of building around direct API calls, `aflow` lets you:
-
-- keep planning and review with a stronger profile
-- delegate checkpoint-sized implementation work to a cheaper profile
-- carry state through a plan file on disk instead of chat history
-- enforce an explicit transition loop instead of an open-ended agent session
 
 ## Plan Format
 
