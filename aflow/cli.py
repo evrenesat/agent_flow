@@ -14,7 +14,7 @@ from .config import (
     validate_workflow_config,
     WorkflowStepConfig,
 )
-from .git_status import probe_worktree
+from .git_status import probe_worktree, classify_dirtiness_by_prefix
 from .plan import PlanParseError, load_plan, load_plan_tolerant
 from .skill_installer import InstallerError, install_skills
 from .run_state import ControllerConfig, RetryContext, WorkflowEndReason, describe_end_reason
@@ -498,23 +498,61 @@ def main(argv: list[str] | None = None) -> int:
 
     probe = probe_worktree(repo_root)
     if probe is not None and probe.is_dirty:
-        is_tty = sys.stdin.isatty() and sys.stdout.isatty()
-        dirty_desc = f"M {probe.modified_count}, A {probe.added_count}, D {probe.removed_count}"
-        if not is_tty:
-            print(
-                f"error: worktree is dirty ({dirty_desc}). "
-                "Interactive confirmation is required to start with a dirty worktree.",
-                file=sys.stderr,
+        uses_worktree = workflow is not None and workflow.setup and "worktree" in workflow.setup
+
+        if uses_worktree:
+            status_result = subprocess.run(
+                ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+                cwd=str(repo_root),
+                capture_output=True,
+                text=True,
+                check=False,
             )
-            return 1
-        try:
-            response = input(
-                f"Worktree is dirty ({dirty_desc}). Start anyway? [y/N]: "
-            ).strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            return 1
-        if response not in ("y", "yes"):
-            return 1
+            if status_result.returncode == 0:
+                _, non_plan_paths = classify_dirtiness_by_prefix(status_result.stdout)
+                if non_plan_paths:
+                    print(
+                        f"error: worktree has non-plan dirtiness that must be cleaned before running a worktree workflow. "
+                        f"Untracked or uncommitted paths outside plans/: {', '.join(non_plan_paths[:3])}{'...' if len(non_plan_paths) > 3 else ''}",
+                        file=sys.stderr,
+                    )
+                    return 1
+            else:
+                is_tty = sys.stdin.isatty() and sys.stdout.isatty()
+                dirty_desc = f"M {probe.modified_count}, A {probe.added_count}, D {probe.removed_count}"
+                if not is_tty:
+                    print(
+                        f"error: worktree is dirty ({dirty_desc}). "
+                        "Interactive confirmation is required to start with a dirty worktree.",
+                        file=sys.stderr,
+                    )
+                    return 1
+                try:
+                    response = input(
+                        f"Worktree is dirty ({dirty_desc}). Start anyway? [y/N]: "
+                    ).strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    return 1
+                if response not in ("y", "yes"):
+                    return 1
+        else:
+            is_tty = sys.stdin.isatty() and sys.stdout.isatty()
+            dirty_desc = f"M {probe.modified_count}, A {probe.added_count}, D {probe.removed_count}"
+            if not is_tty:
+                print(
+                    f"error: worktree is dirty ({dirty_desc}). "
+                    "Interactive confirmation is required to start with a dirty worktree.",
+                    file=sys.stderr,
+                )
+                return 1
+            try:
+                response = input(
+                    f"Worktree is dirty ({dirty_desc}). Start anyway? [y/N]: "
+                ).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                return 1
+            if response not in ("y", "yes"):
+                return 1
 
     config = ControllerConfig(
         repo_root=repo_root,

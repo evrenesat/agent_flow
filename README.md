@@ -267,7 +267,8 @@ Plan-path behavior is strict:
 - Before the workflow starts, `aflow` copies the original plan into `<repo_root>/plans/backups/`.
 - If the matching backup content already exists, `aflow` reuses it.
 - If the same backup name already exists with different content, `aflow` writes the next `_vNN` file instead of overwriting anything.
-- In a normal checkout, ignore `.aflow/` and `plans/backups/` in git. They are engine artifacts, not source files.
+- For worktree workflows, the original plan file is copied into the linked worktree before the first step's prompt is rendered, making it available even if the file is untracked or gitignored in the primary checkout. After each worktree turn, the plan is synced back to the primary checkout so later turns and restart logic see the updated state.
+- In a normal checkout, ignore `.aflow/`, `.aflow/runs/`, and `plans/backups/` in git. They are engine artifacts, not source files. The original plan under `plans/` may be untracked or gitignored per your workflow.
 
 Extra CLI instructions after the plan path are appended to the rendered step prompt.
 
@@ -345,9 +346,16 @@ The git summary is based on a working-tree snapshot captured at workflow start, 
 
 ## Dirty Worktree
 
-`aflow run` checks the git working tree before starting. If the worktree is dirty:
+`aflow run` checks the git working tree before starting. Behavior depends on the selected workflow's setup type:
+
+**For worktree workflows:** If the only dirty files are under `plans/` (the directory where untracked or gitignored plan files live), the workflow proceeds without prompting. If any dirty files exist outside `plans/`, it treats the working tree as having unrelated dirtiness:
 
 - in interactive mode (stdin and stdout are TTYs), it prompts: `Worktree is dirty (M N, A N, D N). Start anyway? [y/N]:`. Enter `y` or `yes` to continue. Any other input exits with code 1.
+- in non-interactive mode, it prints an error and exits with code 1.
+
+**For branch-only and no-lifecycle workflows:** The worktree must be clean before starting. If dirty:
+
+- in interactive mode, it prompts for confirmation as above.
 - in non-interactive mode, it prints an error and exits with code 1.
 
 ## Success Reporting

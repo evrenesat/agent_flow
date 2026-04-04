@@ -21,6 +21,7 @@ from .config import (
     WorkflowStepConfig,
     WorkflowUserConfig,
 )
+from .git_status import classify_dirtiness_by_prefix
 from .harnesses import get_adapter
 from .harnesses.base import HarnessAdapter, HarnessInvocation
 from .plan import FENCE_RE, ParsedPlan, PlanParseError, PlanSnapshot, load_plan, load_plan_tolerant, plan_has_git_tracking
@@ -800,6 +801,18 @@ def _run_git(args: list[str], *, cwd: Path) -> tuple[int, str, str]:
     return result.returncode, result.stdout.strip(), result.stderr.strip()
 
 
+def _is_git_tracked(repo_root: Path, path: Path) -> bool:
+    try:
+        rel = path.resolve().relative_to(repo_root.resolve())
+    except ValueError:
+        return False
+    rc, _, _ = _run_git(
+        ["ls-files", "--error-unmatch", "--", rel.as_posix()],
+        cwd=repo_root,
+    )
+    return rc == 0
+
+
 @dataclass(frozen=True)
 class _LifecyclePlan:
     main_branch: str
@@ -851,10 +864,20 @@ def _lifecycle_preflight(
         raise WorkflowError(
             f"lifecycle preflight: cannot check working tree state in '{primary_root}'"
         )
+
+    uses_worktree = "worktree" in setup
     if status_out.strip():
-        raise WorkflowError(
-            f"lifecycle preflight: primary checkout at '{primary_root}' has uncommitted changes"
-        )
+        if uses_worktree:
+            _, non_plan_paths = classify_dirtiness_by_prefix(status_out)
+            if non_plan_paths:
+                raise WorkflowError(
+                    f"lifecycle preflight: primary checkout at '{primary_root}' has non-plan dirtiness: "
+                    f"{', '.join(non_plan_paths[:3])}{'...' if len(non_plan_paths) > 3 else ''}"
+                )
+        else:
+            raise WorkflowError(
+                f"lifecycle preflight: primary checkout at '{primary_root}' has uncommitted changes"
+            )
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     stem = _sanitize_plan_stem(plan_path.stem)
@@ -877,6 +900,11 @@ def _lifecycle_preflight(
             raise WorkflowError(
                 f"lifecycle preflight: plan file '{plan_path}' must be under "
                 f"the primary repo root '{primary_root}' for worktree workflows"
+            )
+        if not plan_path.is_file():
+            raise WorkflowError(
+                f"lifecycle preflight: plan file '{plan_path}' must exist "
+                "for worktree workflows"
             )
 
         worktree_root_str = aflow_section.worktree_root
@@ -988,6 +1016,58 @@ def _exec_plan_path(path: Path, exec_ctx: ExecutionContext | None) -> Path:
         return exec_ctx.execution_repo_root / rel
     except ValueError:
         return path
+
+
+def _sync_plan_to_worktree(primary_plan_path: Path, exec_ctx: ExecutionContext | None) -> None:
+    """Copy the original plan from primary checkout to worktree if needed.
+
+    Creates parent directories in the worktree if they don't exist.
+    Raises WorkflowError if the source is unreadable or the copy fails.
+    """
+    if exec_ctx is None or exec_ctx.worktree_path is None:
+        return
+
+    exec_plan_path = _exec_plan_path(primary_plan_path, exec_ctx)
+
+    try:
+        if not primary_plan_path.is_file():
+            raise WorkflowError(
+                f"_sync_plan_to_worktree: original plan file not found: {primary_plan_path}"
+            )
+
+        exec_plan_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(primary_plan_path, exec_plan_path)
+    except (OSError, IOError) as exc:
+        raise WorkflowError(
+            f"_sync_plan_to_worktree: failed to copy original plan from "
+            f"{primary_plan_path} to {exec_plan_path}: {exc}"
+        ) from exc
+
+
+def _sync_plan_from_worktree(primary_plan_path: Path, exec_ctx: ExecutionContext | None) -> None:
+    """Copy the original plan from worktree back to primary checkout if it was edited.
+
+    Raises WorkflowError if the copy fails.
+    Sync happens regardless of harness success/failure — if the plan was edited,
+    the primary copy must reflect those edits for restart correctness.
+    """
+    if exec_ctx is None or exec_ctx.worktree_path is None:
+        return
+
+    exec_plan_path = _exec_plan_path(primary_plan_path, exec_ctx)
+
+    try:
+        if not exec_plan_path.is_file():
+            raise WorkflowError(
+                f"_sync_plan_from_worktree: worktree plan file not found: {exec_plan_path}"
+            )
+
+        shutil.copyfile(exec_plan_path, primary_plan_path)
+    except (OSError, IOError) as exc:
+        raise WorkflowError(
+            f"_sync_plan_from_worktree: failed to copy original plan from "
+            f"{exec_plan_path} back to {primary_plan_path}: {exc}"
+        ) from exc
 
 
 _MERGE_BUILTIN_INSTRUCTION = "Use the `aflow-merge` skill to merge the feature branch into the target branch."
@@ -1331,6 +1411,31 @@ def run_workflow(
 
     execution_repo_root = exec_ctx.execution_repo_root if exec_ctx else config.repo_root
 
+    def _raise_pre_turn_failure(
+        *,
+        reason: str,
+        snapshot: PlanSnapshot,
+        active_path: Path,
+        new_path: Path | None,
+    ) -> None:
+        state.status_message = "failed"
+        banner.stop(state)
+        summary = _format_failure(
+            reason=reason,
+            run_dir=run_paths.run_dir,
+            snapshot=snapshot,
+        )
+        write_run_metadata(
+            run_paths, config, state, status="failed", failure_reason=summary,
+            execution_context=exec_ctx,
+            last_snapshot=state.last_snapshot,
+            turns_completed=state.turns_completed,
+            workflow_name=workflow_name, original_plan_path=original_plan_path,
+            current_step_name=current_step_name, active_plan_path=active_path,
+            new_plan_path=new_path,
+        )
+        raise WorkflowError(summary, run_dir=run_paths.run_dir)
+
     def _start_turn(
         *,
         turn_number: int,
@@ -1474,15 +1579,23 @@ def run_workflow(
                 step_path=step_path,
             )
             step_adapter = adapter or get_adapter(resolved.harness_name)
-            user_prompt = retry_ctx.base_user_prompt + "\n\n" + _build_retry_appendix(retry_ctx.parse_error_str)
-            invocation = step_adapter.build_invocation(
-                repo_root=execution_repo_root,
-                model=resolved.model,
-                system_prompt="",
-                user_prompt=user_prompt,
-                effort=resolved.effort,
-            )
             snapshot_before = retry_ctx.snapshot_before
+            try:
+                user_prompt = retry_ctx.base_user_prompt + "\n\n" + _build_retry_appendix(retry_ctx.parse_error_str)
+                invocation = step_adapter.build_invocation(
+                    repo_root=execution_repo_root,
+                    model=resolved.model,
+                    system_prompt="",
+                    user_prompt=user_prompt,
+                    effort=resolved.effort,
+                )
+            except Exception as exc:
+                _raise_pre_turn_failure(
+                    reason=str(exc),
+                    snapshot=snapshot_before,
+                    active_path=active_plan_path,
+                    new_path=new_plan_path,
+                )
         else:
             state.status_message = f"running turn {turn_number}: step {current_step_name}"
             write_run_metadata(
@@ -1490,6 +1603,8 @@ def run_workflow(
                 workflow_name=workflow_name, original_plan_path=original_plan_path,
                 current_step_name=current_step_name, active_plan_path=active_plan_path,
             )
+
+            _sync_plan_to_worktree(original_plan_path, exec_ctx)
 
             try:
                 current_plan = load_plan(original_plan_path)
@@ -1526,30 +1641,39 @@ def run_workflow(
             )
 
             step_adapter = adapter or get_adapter(resolved.harness_name)
-
-            user_prompt = render_step_prompts(
-                step,
-                workflow_config,
-                config_dir=config_dir,
-                working_dir=working_dir,
-                original_plan_path=_exec_plan_path(original_plan_path, exec_ctx),
-                new_plan_path=_exec_plan_path(new_plan_path, exec_ctx),
-                active_plan_path=_exec_plan_path(active_plan_path, exec_ctx),
-            )
-
-            if config.extra_instructions:
-                extra_text = " ".join(config.extra_instructions).strip()
-                user_prompt = "\n\n".join((user_prompt, extra_text))
-
-            invocation = step_adapter.build_invocation(
-                repo_root=execution_repo_root,
-                model=resolved.model,
-                system_prompt="",
-                user_prompt=user_prompt,
-                effort=resolved.effort,
-            )
-
             snapshot_before = state.last_snapshot
+
+            _sync_plan_to_worktree(original_plan_path, exec_ctx)
+
+            try:
+                user_prompt = render_step_prompts(
+                    step,
+                    workflow_config,
+                    config_dir=config_dir,
+                    working_dir=working_dir,
+                    original_plan_path=_exec_plan_path(original_plan_path, exec_ctx),
+                    new_plan_path=_exec_plan_path(new_plan_path, exec_ctx),
+                    active_plan_path=_exec_plan_path(active_plan_path, exec_ctx),
+                )
+
+                if config.extra_instructions:
+                    extra_text = " ".join(config.extra_instructions).strip()
+                    user_prompt = "\n\n".join((user_prompt, extra_text))
+
+                invocation = step_adapter.build_invocation(
+                    repo_root=execution_repo_root,
+                    model=resolved.model,
+                    system_prompt="",
+                    user_prompt=user_prompt,
+                    effort=resolved.effort,
+                )
+            except Exception as exc:
+                _raise_pre_turn_failure(
+                    reason=str(exc),
+                    snapshot=snapshot_before,
+                    active_path=active_plan_path,
+                    new_path=new_plan_path,
+                )
 
         turn_dir, turn_started_at = _start_turn(
             turn_number=turn_number,
@@ -1621,6 +1745,19 @@ def run_workflow(
                 completed_returncode=completed.returncode,
             )
             parsed_after = load_plan(resolved_exec_plan_path)
+
+            # Sync plan back from worktree to primary for durability.
+            # Skip for successful merges since the merge will bring in the changes automatically.
+            # Always sync for failed turns so restart state reflects the latest plan edits.
+            skip_sync_for_merge = (
+                exec_ctx is not None
+                and exec_ctx.worktree_path is not None
+                and "merge" in exec_ctx.teardown
+                and completed.returncode == 0
+            )
+            if exec_ctx is not None and exec_ctx.worktree_path is not None and not skip_sync_for_merge:
+                _sync_plan_from_worktree(original_plan_path, exec_ctx)
+
             if resolved_exec_plan_path != exec_original:
                 if exec_ctx is not None and exec_ctx.worktree_path is not None:
                     try:

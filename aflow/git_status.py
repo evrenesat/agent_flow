@@ -138,6 +138,31 @@ def capture_baseline(repo_root: Path) -> GitBaseline | None:
         return None
 
 
+def classify_dirtiness_by_prefix(
+    porcelain_output: str,
+    prefix: str = "plans/",
+) -> tuple[list[str], list[str]]:
+    """Classify repo-relative paths from git porcelain output by prefix.
+
+    Returns (paths_under_prefix, paths_outside_prefix).
+    Both lists contain repo-relative paths from the porcelain output.
+    """
+    plan_paths: list[str] = []
+    non_plan_paths: list[str] = []
+
+    for line in porcelain_output.splitlines():
+        if len(line) < 3:
+            continue
+        path = line[3:].lstrip()
+
+        if path.startswith(prefix):
+            plan_paths.append(path)
+        else:
+            non_plan_paths.append(path)
+
+    return plan_paths, non_plan_paths
+
+
 def summarize_since_baseline(repo_root: Path, baseline: GitBaseline) -> GitSummary | None:
     """Compare current working-tree state to baseline and return a delta summary."""
     try:

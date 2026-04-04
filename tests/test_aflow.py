@@ -2532,6 +2532,36 @@ class WorkflowRuntimeTests(unittest.TestCase):
                 run_workflow(controller_config, wf_config, 'simple', config_dir=config_dir, adapter=CodexAdapter(), runner=runner)
             assert 'exited with code 1' in str(ctx.value)
 
+    def test_workflow_prompt_render_failure_marks_run_failed_without_turn_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            config_dir = repo_root
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            wf_config = WorkflowUserConfig(
+                roles={'architect': 'codex.default'},
+                harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})},
+                workflows={'simple': WorkflowConfig(
+                    steps={'implement_plan': WorkflowStepConfig(
+                        role='architect',
+                        prompts=('p',),
+                        go=(GoTransition(to='END', when='DONE'), GoTransition(to='implement_plan')),
+                    )},
+                    first_step='implement_plan',
+                )},
+                prompts={'p': 'file://./missing-prompt.txt'},
+            )
+            controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3)
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(controller_config, wf_config, 'simple', config_dir=config_dir, adapter=CodexAdapter(), runner=lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, '', ''))
+            assert 'prompt file not found' in str(ctx.value)
+            run_dirs = sorted((repo_root / '.aflow' / 'runs').iterdir())
+            run_json = json.loads((run_dirs[-1] / 'run.json').read_text(encoding='utf-8'))
+            assert run_json['status'] == 'failed'
+            assert 'prompt file not found' in run_json['failure_reason']
+            assert (run_dirs[-1] / 'turns').is_dir()
+            assert list((run_dirs[-1] / 'turns').iterdir()) == []
+
     def test_workflow_already_complete_returns_immediately(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = Path(tmpdir)
@@ -4203,6 +4233,54 @@ class GitStatusTests(unittest.TestCase):
             result = self._probe_worktree(repo)
             assert result is None
 
+    def test_classify_dirtiness_all_under_plans(self) -> None:
+        from aflow.git_status import classify_dirtiness_by_prefix
+        porcelain = "?? plans/a.txt\nM  plans/b.txt\nA  plans/c.txt\n"
+        plan_paths, non_plan_paths = classify_dirtiness_by_prefix(porcelain)
+        assert len(plan_paths) == 3
+        assert len(non_plan_paths) == 0
+        assert "plans/a.txt" in plan_paths
+        assert "plans/b.txt" in plan_paths
+        assert "plans/c.txt" in plan_paths
+
+    def test_classify_dirtiness_all_outside_plans(self) -> None:
+        from aflow.git_status import classify_dirtiness_by_prefix
+        porcelain = "?? src/a.txt\nM  aflow/b.txt\nA  tests/c.txt\n"
+        plan_paths, non_plan_paths = classify_dirtiness_by_prefix(porcelain)
+        assert len(plan_paths) == 0
+        assert len(non_plan_paths) == 3
+        assert "src/a.txt" in non_plan_paths
+        assert "aflow/b.txt" in non_plan_paths
+        assert "tests/c.txt" in non_plan_paths
+
+    def test_classify_dirtiness_mixed(self) -> None:
+        from aflow.git_status import classify_dirtiness_by_prefix
+        porcelain = "?? plans/a.txt\nM  src/b.txt\nA  plans/c.txt\nD  aflow/d.txt\n"
+        plan_paths, non_plan_paths = classify_dirtiness_by_prefix(porcelain)
+        assert len(plan_paths) == 2
+        assert len(non_plan_paths) == 2
+        assert "plans/a.txt" in plan_paths
+        assert "plans/c.txt" in plan_paths
+        assert "src/b.txt" in non_plan_paths
+        assert "aflow/d.txt" in non_plan_paths
+
+    def test_classify_dirtiness_rejects_similar_prefixes(self) -> None:
+        from aflow.git_status import classify_dirtiness_by_prefix
+        porcelain = "?? plans_backup/a.txt\nM  my-plans/b.txt\nA  xplans/c.txt\n"
+        plan_paths, non_plan_paths = classify_dirtiness_by_prefix(porcelain)
+        assert len(plan_paths) == 0
+        assert len(non_plan_paths) == 3
+        assert "plans_backup/a.txt" in non_plan_paths
+        assert "my-plans/b.txt" in non_plan_paths
+        assert "xplans/c.txt" in non_plan_paths
+
+    def test_classify_dirtiness_empty_porcelain(self) -> None:
+        from aflow.git_status import classify_dirtiness_by_prefix
+        porcelain = ""
+        plan_paths, non_plan_paths = classify_dirtiness_by_prefix(porcelain)
+        assert len(plan_paths) == 0
+        assert len(non_plan_paths) == 0
+
 
 class GitBannerTests(unittest.TestCase):
 
@@ -5421,6 +5499,125 @@ class WorkflowLifecycleRuntimeTests(unittest.TestCase):
                 )
             assert 'primary repo root' in str(ctx.value)
             assert str(plan_path) in str(ctx.value)
+
+    def test_worktree_accepts_untracked_original_plan(self) -> None:
+        """Verify untracked plans are now accepted for worktree workflows."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_root = root / 'repo'
+            repo_root.mkdir()
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            worktree_root = root / 'worktrees'
+            worktree_root.mkdir()
+            exclude_path = repo_root / '.git' / 'info' / 'exclude'
+            exclude_path.write_text(
+                exclude_path.read_text(encoding='utf-8') + '\n/plans\n',
+                encoding='utf-8',
+            )
+            plan_path = repo_root / 'plans' / 'in-progress' / 'plan.md'
+            plan_path.parent.mkdir(parents=True, exist_ok=True)
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = _make_worktree_wf_config(worktree_root=str(worktree_root))
+            call_count: list[int] = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                cwd = Path(kwargs['cwd'])
+                if call_count[0] == 1:
+                    # In worktree: write to the translated plan path
+                    exec_plan = cwd / plan_path.relative_to(repo_root)
+                    _write_plan(exec_plan, _COMPLETE_PLAN)
+                    _run_git_in_test(['add', str(exec_plan)], cwd=cwd)
+                    _run_git_in_test(['commit', '-m', 'complete'], cwd=cwd)
+                else:
+                    # In primary root: do the merge
+                    _git_merge_feature_into_main(cwd, 'main')
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                wf_config, 'wt_wf', config_dir=repo_root,
+                adapter=CodexAdapter(), runner=runner,
+            )
+            # Worktree workflow succeeded with untracked plan, proving the new sync support works
+            assert call_count[0] >= 1
+
+    def test_worktree_syncs_plan_back_even_on_harness_failure(self) -> None:
+        """Verify plan edits are synced back from worktree even when harness returns non-zero."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_root = root / 'repo'
+            repo_root.mkdir()
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            worktree_root = root / 'worktrees'
+            worktree_root.mkdir()
+            exclude_path = repo_root / '.git' / 'info' / 'exclude'
+            exclude_path.write_text(
+                exclude_path.read_text(encoding='utf-8') + '\n/plans\n',
+                encoding='utf-8',
+            )
+            plan_path = repo_root / 'plans' / 'in-progress' / 'plan.md'
+            plan_path.parent.mkdir(parents=True, exist_ok=True)
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = _make_worktree_wf_config(worktree_root=str(worktree_root))
+
+            def runner(argv, **kwargs):
+                cwd = Path(kwargs['cwd'])
+                # Simulate harness that edits the plan but exits non-zero.
+                exec_plan = cwd / plan_path.relative_to(repo_root)
+                _write_plan(exec_plan, _COMPLETE_PLAN)
+                return subprocess.CompletedProcess(argv, 1, 'failed', 'error')
+
+            with pytest.raises(WorkflowError):
+                # First turn exits non-zero, plan is synced back before the exception.
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                    wf_config, 'wt_wf', config_dir=repo_root,
+                    adapter=CodexAdapter(), runner=runner,
+                )
+
+            # Plan edits were synced back to primary for restart correctness.
+            assert _COMPLETE_PLAN in plan_path.read_text(encoding='utf-8')
+
+    def test_worktree_sync_creates_parent_directories_in_worktree(self) -> None:
+        """Verify sync-to-worktree creates parent directories if they don't exist."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_root = root / 'repo'
+            repo_root.mkdir()
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            worktree_root = root / 'worktrees'
+            worktree_root.mkdir()
+            # Plan in deeply nested directory under plans/
+            plan_path = repo_root / 'plans' / 'in-progress' / 'nested' / 'plan.md'
+            plan_path.parent.mkdir(parents=True, exist_ok=True)
+            _write_plan(plan_path, _VALID_PLAN)
+            _git_commit_file(repo_root, plan_path)  # Commit plan so merge doesn't fail on untracked file
+            wf_config = _make_worktree_wf_config(worktree_root=str(worktree_root))
+            call_count: list[int] = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                cwd = Path(kwargs['cwd'])
+                if call_count[0] == 1:
+                    # In worktree: write to the translated plan path
+                    exec_plan = cwd / plan_path.relative_to(repo_root)
+                    assert exec_plan.parent.exists(), "Parent directories should be created by sync-to-worktree"
+                    _write_plan(exec_plan, _COMPLETE_PLAN)
+                    _run_git_in_test(['add', str(exec_plan)], cwd=cwd)
+                    _run_git_in_test(['commit', '-m', 'complete'], cwd=cwd)
+                else:
+                    # In primary root: do the merge
+                    _git_merge_feature_into_main(cwd, 'main')
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                wf_config, 'wt_wf', config_dir=repo_root,
+                adapter=CodexAdapter(), runner=runner,
+            )
+            # Workflow succeeded with nested plan directories, proving sync creates parent dirs
+            assert call_count[0] >= 1
 
     def test_preflight_fails_when_working_tree_is_dirty(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
