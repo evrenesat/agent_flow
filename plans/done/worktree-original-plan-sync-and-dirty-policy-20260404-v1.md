@@ -18,9 +18,10 @@ The implementation must:
 
 - Plan Branch: `main`
 - Pre-Handoff Base HEAD: `48c75170033c315b320b43c1ef9fa5277767d257`
-- Last Reviewed HEAD: `none`
+- Last Reviewed HEAD: `5f6925c`
+- Squashed HEAD: `5f6925c`
 - Review Log:
-  - None yet.
+  - 2026-04-04: reviewed cp1 v01 through cp3 v01 (7 commits), all checkpoints approved, squashed to `5f6925c`, outcome: approved
 
 ## Done Means
 
