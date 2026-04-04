@@ -5833,10 +5833,40 @@ def _git_merge_feature_into_main(primary_root: Path, main_branch: str) -> None:
 
 class WorkflowMergeHandoffTests(unittest.TestCase):
 
+    def test_verify_merge_success_ignores_untracked_aflow_artifacts(self) -> None:
+        from aflow import workflow as workflow_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            run_dir = repo_root / '.aflow' / 'runs' / 'run-1'
+            run_dir.mkdir(parents=True)
+            (run_dir / 'run.json').write_text('{}\n', encoding='utf-8')
+
+            result = workflow_mod._verify_merge_success(repo_root, 'main', 'main')
+
+            assert result is None
+
+    def test_verify_merge_success_still_rejects_non_aflow_untracked_files(self) -> None:
+        from aflow import workflow as workflow_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            run_dir = repo_root / '.aflow' / 'runs' / 'run-1'
+            run_dir.mkdir(parents=True)
+            (run_dir / 'run.json').write_text('{}\n', encoding='utf-8')
+            (repo_root / 'unexpected.txt').write_text('dirty\n', encoding='utf-8')
+
+            result = workflow_mod._verify_merge_success(repo_root, 'main', 'main')
+
+            assert result == 'working tree is not clean after merge'
+
     def test_branch_only_merge_handoff_invokes_agent_from_primary_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = Path(tmpdir)
             _make_lifecycle_git_repo(repo_root, branch='main')
+            _run_git_in_test(['config', 'status.showUntrackedFiles', 'all'], cwd=repo_root)
             plan_path = repo_root / 'plan.md'
             _write_plan(plan_path, _VALID_PLAN)
             _git_commit_file(repo_root, plan_path)

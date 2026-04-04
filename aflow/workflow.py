@@ -1059,8 +1059,17 @@ def _verify_merge_success(
     if rc != 0 or out.strip():
         return "unmerged index entries remain after merge"
 
-    rc, out, _ = _run_git(["status", "--porcelain"], cwd=primary_root)
-    if rc != 0 or out.strip():
+    rc, out, _ = _run_git(
+        ["status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=primary_root,
+    )
+    if rc != 0:
+        return "working tree is not clean after merge"
+    dirty_lines = [
+        line for line in out.splitlines()
+        if line.strip() and not _is_ignored_merge_status_line(line)
+    ]
+    if dirty_lines:
         return "working tree is not clean after merge"
 
     rc, head_ref, _ = _run_git(["symbolic-ref", "HEAD"], cwd=primary_root)
@@ -1075,6 +1084,16 @@ def _verify_merge_success(
         return f"feature branch '{feature_branch}' is not an ancestor of '{main_branch}' after merge"
 
     return None
+
+
+def _is_ignored_merge_status_line(line: str) -> bool:
+    if len(line) < 4:
+        return False
+    xy = line[:2]
+    path = line[3:]
+    if " -> " in path:
+        path = path.split(" -> ", 1)[1]
+    return xy == "??" and (path == ".aflow" or path.startswith(".aflow/"))
 
 
 def _rm_worktree_safe(primary_root: Path, worktree_path: Path) -> None:
