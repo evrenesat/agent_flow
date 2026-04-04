@@ -1093,7 +1093,12 @@ def _is_ignored_merge_status_line(line: str) -> bool:
     path = line[3:]
     if " -> " in path:
         path = path.split(" -> ", 1)[1]
-    return xy == "??" and (path == ".aflow" or path.startswith(".aflow/"))
+    return xy == "??" and (
+        path == ".aflow"
+        or path.startswith(".aflow/")
+        or path == "plans/backups"
+        or path.startswith("plans/backups/")
+    )
 
 
 def _rm_worktree_safe(primary_root: Path, worktree_path: Path) -> None:

@@ -5862,6 +5862,20 @@ class WorkflowMergeHandoffTests(unittest.TestCase):
 
             assert result == 'working tree is not clean after merge'
 
+    def test_verify_merge_success_ignores_plan_backup_artifacts(self) -> None:
+        from aflow import workflow as workflow_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            backup_dir = repo_root / 'plans' / 'backups'
+            backup_dir.mkdir(parents=True)
+            (backup_dir / 'plan.md').write_text('# backup\n', encoding='utf-8')
+
+            result = workflow_mod._verify_merge_success(repo_root, 'main', 'main')
+
+            assert result is None
+
     def test_branch_only_merge_handoff_invokes_agent_from_primary_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = Path(tmpdir)

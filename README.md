@@ -267,6 +267,7 @@ Plan-path behavior is strict:
 - Before the workflow starts, `aflow` copies the original plan into `<repo_root>/plans/backups/`.
 - If the matching backup content already exists, `aflow` reuses it.
 - If the same backup name already exists with different content, `aflow` writes the next `_vNN` file instead of overwriting anything.
+- In a normal checkout, ignore `.aflow/` and `plans/backups/` in git. They are engine artifacts, not source files.
 
 Extra CLI instructions after the plan path are appended to the rendered step prompt.
 
@@ -365,6 +366,7 @@ The machine-readable `end_reason` values are:
 ## Run Logs
 
 Each workflow invocation writes structured artifacts under exactly one `.aflow/runs/<run-id>/` directory for the life of that run. Turn-start directories are created inside that directory before the harness launches and finalized in-place after it returns. No sibling run directories are created during step-to-step progression.
+Those run artifacts should stay untracked in git.
 
 Saved data includes:
 
