@@ -1,4 +1,4 @@
-# agent workflow > aworkflow > aflow   
+# aworkflow
 
 `aflow` is a workflow engine that runs plan-driven coding workflows through existing agent CLIs such as Codex, Claude, Gemini, Kiro, OpenCode, Copilot and Pi.
 
@@ -21,7 +21,7 @@ Install with `uv`:
 uv tool install aworkflow
 ```
 
-That installs the `aworkflow` package and exposes the `aflow` (and `aworkflow`) commands on your `PATH`.
+That installs the `aworkflow` package and exposes the `aflow` and `aworkflow` commands on your `PATH`.
 
 If you are working from a local checkout, you can also run:
 
