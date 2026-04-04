@@ -1,6 +1,6 @@
-# agent flow
+# agent workflow > aworkflow > aflow   
 
-`aflow` runs plan-driven coding workflows through existing agent CLIs such as Codex, Claude, Gemini, Kiro, OpenCode, and Pi.
+`aflow` is a workflow engine that runs plan-driven coding workflows through existing agent CLIs such as Codex, Claude, Gemini, Kiro, OpenCode, Copilot and Pi.
 
 It does not call provider APIs directly. It shells out to the harnesses you already use. The main use case is a stricter loop where a stronger model plans or reviews, a fast cheap model implements the current checkpoint, and the run keeps moving until the original plan is done or reaches `END`.
 
@@ -18,10 +18,10 @@ Requires Python `3.11+`.
 Install with `uv`:
 
 ```bash
-uv tool install git+https://github.com/evrenesat/agent_flow.git
+uv tool install aworkflow
 ```
 
-That exposes the `aflow` command on your `PATH`.
+That installs the `aworkflow` package and exposes the `aflow` (and `aworkflow`) commands on your `PATH`.
 
 If you are working from a local checkout, you can also run:
 

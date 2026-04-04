@@ -1,0 +1,100 @@
+name: Publish package
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - pyproject.toml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    environment:
+      name: pypi
+      url: https://pypi.org/p/aworkflow
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Detect version bump
+        id: version
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import subprocess
+          import tomllib
+
+          data = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+          package_name = data["project"]["name"]
+          version = data["project"]["version"]
+          should_publish = os.environ["GITHUB_EVENT_NAME"] == "workflow_dispatch"
+          previous_version = ""
+
+          if not should_publish:
+              try:
+                  previous_text = subprocess.check_output(
+                      ["git", "show", "HEAD^:pyproject.toml"],
+                      text=True,
+                  )
+              except subprocess.CalledProcessError:
+                  should_publish = True
+              else:
+                  previous_data = tomllib.loads(previous_text)
+                  previous_version = previous_data["project"]["version"]
+                  should_publish = previous_version != version
+
+          github_output = pathlib.Path(os.environ["GITHUB_OUTPUT"])
+          with github_output.open("a", encoding="utf-8") as handle:
+              handle.write(f"package_name={package_name}\n")
+              handle.write(f"version={version}\n")
+              handle.write(f"previous_version={previous_version}\n")
+              handle.write(
+                  f"should_publish={'true' if should_publish else 'false'}\n"
+              )
+          PY
+
+      - name: Skip when version did not change
+        if: steps.version.outputs.should_publish != 'true'
+        run: |
+          echo "pyproject.toml changed without a version bump."
+          echo "Current version: ${{ steps.version.outputs.version }}"
+          echo "Previous version: ${{ steps.version.outputs.previous_version }}"
+
+      - name: Install dependencies
+        if: steps.version.outputs.should_publish == 'true'
+        run: uv sync --frozen
+
+      - name: Run tests
+        if: steps.version.outputs.should_publish == 'true'
+        run: uv run pytest -q
+
+      - name: Build distributions
+        if: steps.version.outputs.should_publish == 'true'
+        run: uv build
+
+      - name: Publish to PyPI
+        if: steps.version.outputs.should_publish == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
