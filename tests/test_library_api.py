@@ -394,3 +394,76 @@ class LibraryStartupTests(unittest.TestCase):
 
         self.assertIsInstance(result, PreparedRun)
         self.assertIsNotNone(result.startup_retry)
+
+    def test_prepare_startup_recovery_step_selection_dirty_confirmation(self) -> None:
+        """Test the combined recovery -> step selection -> dirty confirmation chain.
+
+        This regression test ensures that the full public API chain works without
+        hidden state reconstruction: CONFIRM_RECOVERY -> PICK_STEP -> CONFIRM_WORKTREE_DIRTY -> PreparedRun.
+        """
+        from unittest.mock import patch as mock_patch
+
+        config_text = (
+            '[aflow]\ndefault_workflow = "test"\n\n'
+            '[workflow.test.steps.step1]\nrole = "architect"\nprompts = ["p"]\ngo = [{to = "step2"}]\n\n'
+            '[workflow.test.steps.step2]\nrole = "architect"\nprompts = ["p"]\ngo = [{to = "END"}]\n\n'
+            '[harness.opencode.profiles.default]\nmodel = "m"\n\n'
+            '[roles]\narchitect = "opencode.default"\n\n'
+            '[prompts]\np = "do it"\n'
+        )
+        config_path = _write_config(self.home_dir, config_text)
+        workflow_config = load_workflow_config(config_path)
+        plan_path = self.repo_root / "plan.md"
+        broken_plan = "# Plan\n\n### [x] Checkpoint 1: Broken\n- [ ] step one\n\n### [ ] Checkpoint 2: Next\n- [ ] step two\n"
+        plan_path.write_text(broken_plan)
+
+        request = StartupRequest(
+            repo_root=self.repo_root,
+            plan_path=plan_path,
+            config_path=config_path,
+            workflow_config=workflow_config,
+            workflow_name="test",
+            start_step=None,
+            max_turns=None,
+            team=None,
+            extra_instructions=(),
+        )
+
+        # Step 1: Ask for recovery confirmation
+        with patch('sys.stdin.isatty', return_value=True), \
+             patch('sys.stdout.isatty', return_value=True):
+            question1 = prepare_startup(request)
+
+        self.assertIsInstance(question1, StartupQuestion)
+        self.assertEqual(question1.kind, StartupQuestionKind.CONFIRM_RECOVERY)
+        self.assertIsNotNone(question1.continuation_request)
+
+        # Steps 2-4: Keep dirty worktree mock active throughout the chain
+        with patch('sys.stdin.isatty', return_value=True), \
+             patch('sys.stdout.isatty', return_value=True), \
+             mock_patch('aflow.api.startup.probe_worktree') as mock_probe:
+            dirty_probe = type('obj', (object,), {'is_dirty': True, 'modified_count': 1, 'added_count': 0, 'removed_count': 0})()
+            mock_probe.return_value = dirty_probe
+
+            # Step 2: Confirm recovery, ask for step selection
+            question2 = prepare_startup_with_answer(question1, request, True)
+            self.assertIsInstance(question2, StartupQuestion)
+            self.assertEqual(question2.kind, StartupQuestionKind.PICK_STEP)
+            self.assertIn("step1", question2.choices)
+            self.assertIn("step2", question2.choices)
+            self.assertIsNotNone(question2.continuation_request)
+            self.assertIsNotNone(question2.continuation_request.pre_recovered_plan)
+
+            # Step 3: Select a step, ask for dirty confirmation
+            question3 = prepare_startup_with_answer(question2, request, "step2")
+            self.assertIsInstance(question3, StartupQuestion)
+            self.assertEqual(question3.kind, StartupQuestionKind.CONFIRM_WORKTREE_DIRTY)
+            self.assertIsNotNone(question3.continuation_request)
+
+            # Step 4: Confirm dirty worktree, reach final PreparedRun
+            result = prepare_startup_with_answer(question3, request, True)
+            self.assertIsInstance(result, PreparedRun)
+            # Verify selected step survived through the chain
+            self.assertEqual(result.start_step, "step2")
+            # Verify startup retry context survived
+            self.assertIsNotNone(result.startup_retry)
