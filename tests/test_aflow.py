@@ -2387,6 +2387,68 @@ class WorkflowRuntimeTests(unittest.TestCase):
             expected_new = str(repo_root / 'plan-cp01-v01.md')
             assert captured_active_paths[1] == expected_new
 
+    def test_active_plan_updates_when_review_creates_alternate_followup_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            config_dir = repo_root
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            captured_active_paths: list[str] = []
+            turn_counter = [0]
+
+            def capturing_runner(argv, **kwargs):
+                turn_counter[0] += 1
+                prompt_text = ' '.join(argv)
+                import re as re_mod
+                match = re_mod.search('Active: (\\S+)', prompt_text)
+                if match:
+                    captured_active_paths.append(match.group(1).rstrip('.'))
+                if turn_counter[0] == 1:
+                    alt_followup = repo_root / 'plan-fix-cp01-v01.md'
+                    alt_followup.write_text('# Generated follow-up\n', encoding='utf-8')
+                    _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n')
+                return subprocess.CompletedProcess(argv, 0, stdout='ok', stderr='')
+
+            wf_config = WorkflowUserConfig(
+                roles={'architect': 'codex.default'},
+                harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})},
+                workflows={'loop': WorkflowConfig(
+                    steps={
+                        'review': WorkflowStepConfig(
+                            role='architect',
+                            prompts=('review_prompt',),
+                            go=(GoTransition(to='followup', when='NEW_PLAN_EXISTS'), GoTransition(to='END')),
+                        ),
+                        'followup': WorkflowStepConfig(
+                            role='architect',
+                            prompts=('followup_prompt',),
+                            go=(GoTransition(to='END'),),
+                        ),
+                    },
+                    first_step='review',
+                )},
+                prompts={
+                    'review_prompt': 'Review. Active: {ACTIVE_PLAN_PATH}. New: {NEW_PLAN_PATH}.',
+                    'followup_prompt': 'Follow up. Active: {ACTIVE_PLAN_PATH}.',
+                },
+            )
+            controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3)
+
+            result = run_workflow(
+                controller_config,
+                wf_config,
+                'loop',
+                config_dir=config_dir,
+                adapter=CodexAdapter(),
+                runner=capturing_runner,
+            )
+
+            assert result.turns_completed == 2
+            assert captured_active_paths == [
+                str(plan_path),
+                str((repo_root / 'plan-fix-cp01-v01.md').resolve()),
+            ]
+
     def test_workflow_multistep_review_and_implement(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = Path(tmpdir)
@@ -3723,6 +3785,14 @@ class SkillDocsTests(unittest.TestCase):
         assert 'Create the checkpoint approval commit for the reviewed work in this review turn.' in review_cp_text
         assert 'all approval-grade git/tracking chores were completed by the reviewer in the same turn' in review_final_text
         assert 'all approval-grade git/tracking chores were completed by the reviewer in the same turn' in review_text
+
+    def test_review_skills_require_new_plan_path_for_followup_files(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        for skill_name in ('aflow-review-squash', 'aflow-review-checkpoint', 'aflow-review-final'):
+            text = (repo_root / 'aflow' / 'bundled_skills' / skill_name / 'SKILL.md').read_text(encoding='utf-8')
+            assert 'write it exactly to `NEW_PLAN_PATH`' in text
+            assert 'Do not invent a different filename.' in text
+            assert 'Use the filename format' not in text
 
     def test_bundled_config_review_implement_cp_review_max_turns_transitions(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
@@ -5559,6 +5629,25 @@ def _make_worktree_no_merge_wf_config(
 
 class WorkflowLifecycleRuntimeTests(unittest.TestCase):
 
+    def test_preflight_fails_when_main_branch_has_no_commits_yet(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            subprocess.run(['git', 'init', '-b', 'main'], cwd=str(repo_root), check=True, capture_output=True)
+            subprocess.run(['git', 'config', 'user.email', 'test@test.com'], cwd=str(repo_root), check=True, capture_output=True)
+            subprocess.run(['git', 'config', 'user.name', 'Test'], cwd=str(repo_root), check=True, capture_output=True)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = _make_branch_only_wf_config(main_branch='main')
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=1),
+                    wf_config, 'branch_wf', config_dir=repo_root,
+                )
+            message = str(ctx.value)
+            assert "branch 'main'" in message
+            assert 'no commits yet' in message
+            assert 'initial commit' in message
+
     def test_preflight_fails_when_not_on_main_branch(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = Path(tmpdir)
@@ -6527,6 +6616,45 @@ class WorkflowMergeHandoffTests(unittest.TestCase):
             run_dirs = sorted((repo_root / '.aflow' / 'runs').iterdir())
             run_json = json.loads((run_dirs[-1] / 'run.json').read_text(encoding='utf-8'))
             assert run_json.get('merge_status') == 'failed'
+
+    def test_merge_handoff_preflight_blocks_dirty_primary_and_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_root = root / 'repo'
+            repo_root.mkdir()
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            worktree_root = root / 'worktrees'
+            worktree_root.mkdir()
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            _git_commit_file(repo_root, plan_path)
+            wf_config = _make_worktree_wf_config(worktree_root=str(worktree_root))
+            call_count: list[int] = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                cwd = Path(kwargs['cwd'])
+                if call_count[0] == 1:
+                    exec_plan = cwd / plan_path.relative_to(repo_root)
+                    _write_plan(exec_plan, _COMPLETE_PLAN)
+                    _run_git_in_test(['add', str(exec_plan)], cwd=cwd)
+                    _run_git_in_test(['commit', '-m', 'complete'], cwd=cwd)
+                    (repo_root / 'primary-dirty.txt').write_text('primary\n', encoding='utf-8')
+                    (cwd / 'worktree-dirty.txt').write_text('worktree\n', encoding='utf-8')
+                    return subprocess.CompletedProcess(argv, 0, 'ok', '')
+                pytest.fail('merge runner should not be invoked when merge preflight detects dirtiness')
+
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                    wf_config, 'wt_wf', config_dir=repo_root,
+                    adapter=CodexAdapter(), runner=runner,
+                )
+
+            assert 'merge handoff requires clean git state' in str(ctx.value)
+            assert 'primary checkout' in str(ctx.value)
+            assert 'feature worktree' in str(ctx.value)
+            assert call_count[0] == 1
 
     def test_merge_agent_stop_marker_is_treated_as_merge_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

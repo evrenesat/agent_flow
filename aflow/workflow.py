@@ -890,17 +890,25 @@ def _lifecycle_preflight(
             "workflow uses lifecycle setup but main_branch is not configured"
         )
 
+    rc, current_branch, err = _run_git(["symbolic-ref", "--short", "HEAD"], cwd=primary_root)
+    if rc != 0:
+        raise WorkflowError(
+            f"lifecycle preflight: cannot determine current branch in '{primary_root}': {err}"
+        )
+
+    rc, _, _ = _run_git(["rev-parse", "--verify", "HEAD"], cwd=primary_root)
+    if rc != 0 and current_branch == main_branch:
+        raise WorkflowError(
+            f"lifecycle preflight: branch '{main_branch}' in '{primary_root}' has no commits yet; "
+            "create an initial commit before running lifecycle workflows"
+        )
+
     rc, _, _ = _run_git(["show-ref", "--verify", f"refs/heads/{main_branch}"], cwd=primary_root)
     if rc != 0:
         raise WorkflowError(
             f"lifecycle preflight: branch '{main_branch}' does not exist locally in '{primary_root}'"
         )
 
-    rc, current_branch, err = _run_git(["symbolic-ref", "--short", "HEAD"], cwd=primary_root)
-    if rc != 0:
-        raise WorkflowError(
-            f"lifecycle preflight: cannot determine current branch in '{primary_root}': {err}"
-        )
     if current_branch != main_branch:
         raise WorkflowError(
             f"lifecycle preflight: current branch is '{current_branch}' "
@@ -1068,6 +1076,52 @@ def _exec_plan_path(path: Path, exec_ctx: ExecutionContext | None) -> Path:
         return path
 
 
+def _primary_plan_path(path: Path, exec_ctx: ExecutionContext | None) -> Path:
+    if exec_ctx is None or exec_ctx.worktree_path is None:
+        return path
+    try:
+        rel = path.resolve().relative_to(exec_ctx.execution_repo_root.resolve())
+        return exec_ctx.primary_repo_root / rel
+    except ValueError:
+        return path
+
+
+def _list_followup_plan_candidates(original_plan_path: Path) -> set[Path]:
+    parent = original_plan_path.parent
+    suffix = original_plan_path.suffix
+    prefix = f"{original_plan_path.stem}-"
+    if not parent.is_dir():
+        return set()
+
+    candidates: set[Path] = set()
+    for child in parent.iterdir():
+        if not child.is_file() or child == original_plan_path:
+            continue
+        if suffix and child.suffix != suffix:
+            continue
+        if not child.name.startswith(prefix):
+            continue
+        candidates.add(child.resolve())
+    return candidates
+
+
+def _resolve_post_turn_new_plan_path(
+    *,
+    original_plan_path: Path,
+    expected_new_plan_path: Path,
+    candidates_before: set[Path],
+) -> Path | None:
+    if expected_new_plan_path.is_file():
+        return expected_new_plan_path
+
+    candidates_after = _list_followup_plan_candidates(original_plan_path)
+    created_candidates = candidates_after - candidates_before
+    if len(created_candidates) == 1:
+        return next(iter(created_candidates))
+
+    return None
+
+
 def _sync_plan_to_worktree(primary_plan_path: Path, exec_ctx: ExecutionContext | None) -> None:
     """Copy the original plan from primary checkout to worktree if needed.
 
@@ -1172,7 +1226,78 @@ def _restore_primary_plan_after_merge(
         raise WorkflowError(
             f"lifecycle teardown: failed to restore original plan "
             f"'{prepared.plan_path}' after merge: {exc}"
-        ) from exc
+            ) from exc
+
+
+def _collect_merge_dirty_paths(
+    repo_root: Path,
+    *,
+    original_plan_path: Path | None,
+) -> list[str]:
+    rc, out, _ = _run_git(
+        ["status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=repo_root,
+    )
+    if rc != 0:
+        raise WorkflowError(
+            f"lifecycle teardown: cannot check working tree state in '{repo_root}' before merge"
+        )
+
+    dirty_paths: list[str] = []
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        if _is_ignored_merge_status_line(
+            line,
+            primary_root=repo_root,
+            original_plan_path=original_plan_path,
+        ):
+            continue
+        path = line[3:] if len(line) >= 4 and line[2] == " " else line[2:]
+        path = path.strip().strip('"')
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        dirty_paths.append(path)
+    return dirty_paths
+
+
+def _ensure_merge_handoff_clean(
+    exec_ctx: ExecutionContext,
+    *,
+    original_plan_path: Path,
+) -> None:
+    primary_dirty = _collect_merge_dirty_paths(
+        exec_ctx.primary_repo_root,
+        original_plan_path=original_plan_path,
+    )
+    worktree_dirty: list[str] = []
+    if exec_ctx.worktree_path is not None:
+        worktree_dirty = _collect_merge_dirty_paths(
+            exec_ctx.worktree_path,
+            original_plan_path=_exec_plan_path(original_plan_path, exec_ctx),
+        )
+
+    if not primary_dirty and not worktree_dirty:
+        return
+
+    reasons: list[str] = []
+    if primary_dirty:
+        sample = ", ".join(primary_dirty[:3])
+        suffix = "..." if len(primary_dirty) > 3 else ""
+        reasons.append(
+            f"primary checkout at '{exec_ctx.primary_repo_root}' is dirty: {sample}{suffix}"
+        )
+    if worktree_dirty:
+        sample = ", ".join(worktree_dirty[:3])
+        suffix = "..." if len(worktree_dirty) > 3 else ""
+        reasons.append(
+            f"feature worktree at '{exec_ctx.worktree_path}' is dirty and those changes are not represented by branch '{exec_ctx.feature_branch}': {sample}{suffix}"
+        )
+
+    raise WorkflowError(
+        "lifecycle teardown: merge handoff requires clean git state, but "
+        + "; ".join(reasons)
+    )
 
 
 _MERGE_BUILTIN_INSTRUCTION = "Use the `aflow-merge` skill to merge the feature branch into the target branch."
@@ -1694,6 +1819,7 @@ def run_workflow(
 
     for turn_number in range(1, config.max_turns + 1):
         retry_ctx = state.pending_retry
+        followup_candidates_before: set[Path] = set()
 
         if retry_ctx is not None:
             state.status_message = (
@@ -1708,6 +1834,9 @@ def run_workflow(
             done = retry_ctx.snapshot_before.is_complete
             active_plan_path = retry_ctx.active_plan_path
             new_plan_path = retry_ctx.new_plan_path
+            followup_candidates_before = _list_followup_plan_candidates(
+                _exec_plan_path(original_plan_path, exec_ctx)
+            )
             step = wf.steps[current_step_name]
             step_path = f"workflow.{workflow_name}.steps.{current_step_name}"
             selector, resolved = _resolve_step_runtime(
@@ -1782,6 +1911,9 @@ def run_workflow(
             snapshot_before = state.last_snapshot
 
             _sync_plan_to_worktree(original_plan_path, exec_ctx)
+            followup_candidates_before = _list_followup_plan_candidates(
+                _exec_plan_path(original_plan_path, exec_ctx)
+            )
 
             try:
                 user_prompt = render_step_prompts(
@@ -1900,6 +2032,13 @@ def run_workflow(
                     original_plan_path = resolved_exec_plan_path
                 if active_plan_path == config.plan_path:
                     active_plan_path = original_plan_path
+            resolved_exec_new_plan_path = _resolve_post_turn_new_plan_path(
+                original_plan_path=resolved_exec_plan_path,
+                expected_new_plan_path=_exec_plan_path(new_plan_path, exec_ctx),
+                candidates_before=followup_candidates_before,
+            )
+            if resolved_exec_new_plan_path is not None:
+                new_plan_path = _primary_plan_path(resolved_exec_new_plan_path, exec_ctx)
             post_snapshot = parsed_after.snapshot
         except (PlanParseError, FileNotFoundError) as exc:
             is_retryable = (
@@ -2167,6 +2306,10 @@ def run_workflow(
                     prepared_primary_plan = _prepare_primary_plan_for_merge(
                         config.repo_root,
                         original_plan_path,
+                    )
+                    _ensure_merge_handoff_clean(
+                        exec_ctx,
+                        original_plan_path=original_plan_path,
                     )
                     merge_completed = _execute_merge_handoff(
                         exec_ctx, wf, workflow_config,

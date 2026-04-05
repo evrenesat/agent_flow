@@ -33,6 +33,7 @@ Following plan paths should be provided by the prompt;
 ORIGINAL_PLAN: This is the original implementation plan.
 ACTIVE_PLAN: This maybe same as the original plan file, or could be a transient follow-up plan focused on fixing of review findings.
 NEW_PLAN_PATH: This is the path for a possible follow-up plan for the findings of your review.    
+If you need to create a follow-up fix plan, write it exactly to `NEW_PLAN_PATH`. Do not invent a different filename.
 
 Before reviewing or squashing, identify the active original aflow plan under `plans/in-progress/`.
 
@@ -85,7 +86,7 @@ If the accumulated work is not acceptable:
 1. Do not squash commits.
 2. Create a new aflow fix plan that covers only the failed checkpoints or behaviors against the current `HEAD`.
 3. Ensure `plans/in-progress/` exists before writing the fix plan. Create it if it does not exist.
-4. Use the filename format `original-plan-name-fix-cpN-v01.md` when the rejection is anchored to one checkpoint. If multiple checkpoints are involved, use a similarly descriptive focused name.
+4. Write the fix plan exactly to `NEW_PLAN_PATH`. Keep the file focused on the failed checkpoints or behaviors from this review.
 5. The fix plan must be self-contained, non-checkpoint, and must not require the implementer to read prior chat context.
 6. When creating a new fix plan, delete older superseded fix plans for the same original handoff by default unless the user explicitly asks to keep them.
 7. After creating the new fix plan, `plans/in-progress/` should contain only the original handoff plan plus that newest fix plan for the same handoff.

@@ -250,7 +250,7 @@ Each workflow step launches one fresh harness process.
 At a high level:
 
 1. `aflow` loads the selected workflow and reads the original plan file.
-2. If the workflow has a non-empty `setup`, `aflow` runs lifecycle preflight checks and creates the execution environment (a local feature branch for branch-only flows, a linked worktree plus feature branch for worktree flows). For worktree flows, normal steps run inside the created worktree while run artifacts stay under the primary checkout.
+2. If the workflow has a non-empty `setup`, `aflow` runs lifecycle preflight checks and creates the execution environment (a local feature branch for branch-only flows, a linked worktree plus feature branch for worktree flows). Lifecycle workflows require `main_branch` to already point to a local commit. If the repo is brand new and `main_branch` is still unborn, make an initial commit first. For worktree flows, normal steps run inside the created worktree while run artifacts stay under the primary checkout.
 3. It starts at the workflow's first declared step.
 4. It renders the step prompts, resolves the step role through the selected team and global `[roles]` map, and runs the harness CLI once for that step.
 5. After the harness returns, it re-reads the original plan file and evaluates the step's `go` transitions.
