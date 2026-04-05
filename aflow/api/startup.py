@@ -260,6 +260,7 @@ def prepare_startup(request: StartupRequest) -> PreparedRun | StartupQuestion:
                 return StartupQuestion(
                     kind=StartupQuestionKind.CONFIRM_RECOVERY,
                     message=recovery_msg,
+                    continuation_request=request,
                 )
             raise
 
@@ -281,6 +282,7 @@ def prepare_startup(request: StartupRequest) -> PreparedRun | StartupQuestion:
                 kind=StartupQuestionKind.PICK_STEP,
                 message="Select the workflow step to start from:",
                 choices=step_names,
+                continuation_request=request,
             )
         else:
             selected_start_step = request.workflow_config.workflows[workflow_name].first_step
@@ -306,6 +308,7 @@ def prepare_startup(request: StartupRequest) -> PreparedRun | StartupQuestion:
         return StartupQuestion(
             kind=StartupQuestionKind.CONFIRM_WORKTREE_DIRTY,
             message=f"Worktree is dirty ({dirty_desc}). Start anyway?",
+            continuation_request=request,
         )
 
     is_complete_plan = (
@@ -339,14 +342,18 @@ def prepare_startup_with_answer(
     - PreparedRun: ready to execute
     - StartupQuestion: another question (rare, but possible)
 
+    The continuation_request from the question should be used for subsequent calls.
+
     Raises StartupError if the answer is invalid or startup cannot proceed.
     """
+    effective_request = question.continuation_request or request
+
     if question.kind == StartupQuestionKind.CONFIRM_RECOVERY:
         if not isinstance(answer, bool) or not answer:
             raise StartupError("Startup recovery declined")
 
         try:
-            tolerant_result = load_plan_tolerant(request.plan_path)
+            tolerant_result = load_plan_tolerant(effective_request.plan_path)
         except FileNotFoundError as exc:
             raise StartupError(str(exc))
 
@@ -356,19 +363,29 @@ def prepare_startup_with_answer(
         else:
             startup_retry_error = None
 
-        return prepare_startup(request.__class__(
-            repo_root=request.repo_root,
-            plan_path=request.plan_path,
-            config_path=request.config_path,
-            workflow_config=request.workflow_config,
-            workflow_name=request.workflow_name,
-            start_step=request.start_step,
-            max_turns=request.max_turns,
-            team=request.team,
-            extra_instructions=request.extra_instructions,
+        new_request = effective_request.__class__(
+            repo_root=effective_request.repo_root,
+            plan_path=effective_request.plan_path,
+            config_path=effective_request.config_path,
+            workflow_config=effective_request.workflow_config,
+            workflow_name=effective_request.workflow_name,
+            start_step=effective_request.start_step,
+            max_turns=effective_request.max_turns,
+            team=effective_request.team,
+            extra_instructions=effective_request.extra_instructions,
             pre_recovered_plan=parsed_plan,
             startup_retry_error=startup_retry_error,
-        ))
+        )
+        result = prepare_startup(new_request)
+        if isinstance(result, StartupQuestion):
+            return result.__class__(
+                kind=result.kind,
+                message=result.message,
+                options=result.options,
+                choices=result.choices,
+                continuation_request=new_request,
+            )
+        return result
 
     if question.kind == StartupQuestionKind.PICK_STEP:
         if isinstance(answer, int):
@@ -384,36 +401,57 @@ def prepare_startup_with_answer(
         else:
             raise StartupError(f"Invalid step answer type: {type(answer)}")
 
-        return prepare_startup(request.__class__(
-            repo_root=request.repo_root,
-            plan_path=request.plan_path,
-            config_path=request.config_path,
-            workflow_config=request.workflow_config,
-            workflow_name=request.workflow_name,
+        new_request = effective_request.__class__(
+            repo_root=effective_request.repo_root,
+            plan_path=effective_request.plan_path,
+            config_path=effective_request.config_path,
+            workflow_config=effective_request.workflow_config,
+            workflow_name=effective_request.workflow_name,
             start_step=selected_step,
-            max_turns=request.max_turns,
-            team=request.team,
-            extra_instructions=request.extra_instructions,
-            pre_recovered_plan=request.pre_recovered_plan,
-            startup_retry_error=request.startup_retry_error,
-        ))
+            max_turns=effective_request.max_turns,
+            team=effective_request.team,
+            extra_instructions=effective_request.extra_instructions,
+            pre_recovered_plan=effective_request.pre_recovered_plan,
+            startup_retry_error=effective_request.startup_retry_error,
+            dirty_worktree_confirmed=effective_request.dirty_worktree_confirmed,
+        )
+        result = prepare_startup(new_request)
+        if isinstance(result, StartupQuestion):
+            return result.__class__(
+                kind=result.kind,
+                message=result.message,
+                options=result.options,
+                choices=result.choices,
+                continuation_request=new_request,
+            )
+        return result
 
     if question.kind == StartupQuestionKind.CONFIRM_WORKTREE_DIRTY:
         if not isinstance(answer, bool) or not answer:
             raise StartupError("Startup aborted due to dirty worktree")
-        return prepare_startup(request.__class__(
-            repo_root=request.repo_root,
-            plan_path=request.plan_path,
-            config_path=request.config_path,
-            workflow_config=request.workflow_config,
-            workflow_name=request.workflow_name,
-            start_step=request.start_step,
-            max_turns=request.max_turns,
-            team=request.team,
-            extra_instructions=request.extra_instructions,
-            pre_recovered_plan=request.pre_recovered_plan,
-            startup_retry_error=request.startup_retry_error,
+        new_request = effective_request.__class__(
+            repo_root=effective_request.repo_root,
+            plan_path=effective_request.plan_path,
+            config_path=effective_request.config_path,
+            workflow_config=effective_request.workflow_config,
+            workflow_name=effective_request.workflow_name,
+            start_step=effective_request.start_step,
+            max_turns=effective_request.max_turns,
+            team=effective_request.team,
+            extra_instructions=effective_request.extra_instructions,
+            pre_recovered_plan=effective_request.pre_recovered_plan,
+            startup_retry_error=effective_request.startup_retry_error,
             dirty_worktree_confirmed=True,
-        ))
+        )
+        result = prepare_startup(new_request)
+        if isinstance(result, StartupQuestion):
+            return result.__class__(
+                kind=result.kind,
+                message=result.message,
+                options=result.options,
+                choices=result.choices,
+                continuation_request=new_request,
+            )
+        return result
 
     raise StartupError(f"Unknown question kind: {question.kind}")

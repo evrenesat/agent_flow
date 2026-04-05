@@ -28,6 +28,7 @@ class StartupQuestion:
     message: str
     options: dict[str, str] = field(default_factory=dict)
     choices: list[str] = field(default_factory=list)
+    continuation_request: StartupRequest | None = None
 
 
 @dataclass(frozen=True)
