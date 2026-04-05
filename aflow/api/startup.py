@@ -250,7 +250,7 @@ def prepare_startup(request: StartupRequest) -> PreparedRun | StartupQuestion:
 
     if request.pre_recovered_plan is not None:
         parsed_plan = request.pre_recovered_plan
-        startup_retry_error = None
+        startup_retry_error = request.startup_retry_error
     else:
         try:
             parsed_plan, startup_retry_error = _load_plan_with_recovery(request.plan_path)
@@ -367,76 +367,18 @@ def prepare_startup_with_answer(
         else:
             startup_retry_error = None
 
-        workflow_name = _resolve_workflow_name(request)
-        _validate_start_step(workflow_name, request.start_step, request)
-
-        is_complete, has_completed_checkpoint = _check_plan_completion(parsed_plan, request)
-        effective_max_turns = _resolve_effective_max_turns(request, workflow_name)
-        effective_team = _resolve_effective_team(request, workflow_name)
-
-        if is_complete:
-            if request.start_step is not None:
-                raise StartupError("plan is already complete, --start-step has no effect")
-            selected_start_step = request.workflow_config.workflows[workflow_name].first_step
-        else:
-            if request.start_step is not None:
-                selected_start_step = request.start_step
-            elif _plan_needs_step_selection(workflow_name, parsed_plan, request):
-                is_tty = sys.stdin.isatty() and sys.stdout.isatty()
-                if not is_tty:
-                    raise StartupError(
-                        f"Workflow '{workflow_name}' has multiple steps and interactive startup selection requires a terminal. "
-                        "Re-run with --start-step STEP_NAME."
-                    )
-                workflow = request.workflow_config.workflows[workflow_name]
-                step_names = list(workflow.steps.keys())
-                return StartupQuestion(
-                    kind=StartupQuestionKind.PICK_STEP,
-                    message="Select the workflow step to start from:",
-                    choices=step_names,
-                )
-            else:
-                selected_start_step = request.workflow_config.workflows[workflow_name].first_step
-
-        startup_retry = None
-        if startup_retry_error is not None:
-            if selected_start_step is None:
-                raise StartupError(
-                    f"Workflow '{workflow_name}' has no steps"
-                )
-            startup_retry = _build_retry_context(
-                workflow_name,
-                selected_start_step,
-                startup_retry_error,
-                parsed_plan,
-                request,
-                effective_team,
-                request.config_path,
-            )
-
-        is_dirty, dirty_desc = _check_worktree_dirtiness(request, workflow_name)
-        if is_dirty:
-            return StartupQuestion(
-                kind=StartupQuestionKind.CONFIRM_WORKTREE_DIRTY,
-                message=f"Worktree is dirty ({dirty_desc}). Start anyway?",
-            )
-
-        is_complete_plan = (
-            hasattr(parsed_plan, "snapshot")
-            and getattr(parsed_plan.snapshot, "is_complete", False)
-        )
-
         return prepare_startup(request.__class__(
             repo_root=request.repo_root,
             plan_path=request.plan_path,
             config_path=request.config_path,
             workflow_config=request.workflow_config,
-            workflow_name=workflow_name,
+            workflow_name=request.workflow_name,
             start_step=request.start_step,
             max_turns=request.max_turns,
             team=request.team,
             extra_instructions=request.extra_instructions,
             pre_recovered_plan=parsed_plan,
+            startup_retry_error=startup_retry_error,
         ))
 
     if question.kind == StartupQuestionKind.PICK_STEP:
@@ -464,6 +406,7 @@ def prepare_startup_with_answer(
             team=request.team,
             extra_instructions=request.extra_instructions,
             pre_recovered_plan=request.pre_recovered_plan,
+            startup_retry_error=request.startup_retry_error,
         ))
 
     if question.kind == StartupQuestionKind.CONFIRM_WORKTREE_DIRTY:
