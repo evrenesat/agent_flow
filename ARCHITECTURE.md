@@ -46,21 +46,27 @@ flowchart TD
 
 ### `cli.py`
 Entry point. Exposes two subcommands:
-- **`aflow run [workflow_name] plan.md [-- extra instructions]`** -- runs a workflow.
-- **`aflow run [workflow_name] --start-step STEP_NAME plan.md [-- extra instructions]`** -- starts a workflow from a named step.
+- **`aflow run [plan_or_workflow ...] [-- extra instructions]`** -- runs a workflow.
+  - Plan path and workflow name are resolved from explicit flags (`--plan`/`-p`, `--workflow`/`-w`) and/or positional arguments.
+  - Two positionals are resolved intelligently by file existence and workflow name validity; one positional is always treated as the plan path.
+  - `--start-step`/`-ss` accepts either a workflow step name or a 1-based numeric index into the declared workflow step order.
 - **`aflow install-skills [destination]`** -- copies bundled skills into harness skill directories.
 
-Resolves the repo root via `git rev-parse`, loads and validates the TOML config, resolves the selected workflow and optional team, and handles startup step selection or recovery before calling `run_workflow()`.
+`main()` resolves `aflow run` startup in this order:
 
-Startup resolution happens in `main()` before the workflow loop starts:
-
-1. Ensure `~/.config/aflow/aflow.toml` and sibling `workflows.toml` exist. If either file was created, print both paths and exit so the user can edit them first.
-2. Resolve config and workflow.
-3. Load the original plan strictly.
-4. If the plan is complete and `--start-step` was given, fail with a clear error.
-5. If the plan is half-done and the workflow has more than one step, require a TTY and prompt for an explicit step unless `--start-step` was given.
-6. If strict plan loading fails with `inconsistent_checkpoint_state`, require a TTY and ask whether to recover.
-7. When recovery is accepted, load a tolerant snapshot from the invalid plan, seed startup retry state, and pass both the parsed plan and retry context into `run_workflow()`.
+1. Parse CLI arguments into explicit flags (`--plan`, `--workflow`, `--start-step`, `--team`, `--max-turns`) and remaining positional tokens.
+2. Ensure `~/.config/aflow/aflow.toml` and sibling `workflows.toml` exist. If either file was created, print both paths and exit so the user can edit them first.
+3. Load and validate the workflow config.
+4. Resolve positional tokens and explicit flags into a canonical plan path and workflow name using these rules:
+   - One bare positional means plan path only.
+   - Two bare positionals are resolved by checking whether each token is an existing plan file or a configured workflow name. If both resolve uniquely, they are assigned accordingly. If both could match both categories, neither matches both, or both could be plans, the CLI exits with a clear ambiguity error.
+   - Positional and flag values for the same field are allowed only if they resolve to the same canonical value; conflicting values cause an error with the specific conflict.
+5. Resolve any numeric `--start-step` value to a canonical workflow step name by validating the index against the selected workflow's declared step order. Out-of-range indexes fail with a clear bounds error listing the valid range.
+6. Load the original plan strictly.
+7. If the plan is complete and `--start-step` was given, fail with a clear error.
+8. If the plan is half-done and the workflow has more than one step, require a TTY and prompt for an explicit step unless `--start-step` was given.
+9. If strict plan loading fails with `inconsistent_checkpoint_state`, require a TTY and ask whether to recover.
+10. When recovery is accepted, load a tolerant snapshot from the invalid plan, seed startup retry state, and pass both the parsed plan and retry context into `run_workflow()`.
 
 ### `config.py`
 Loads `~/.config/aflow/aflow.toml` plus sibling `workflows.toml` (bootstrapped from the bundled defaults on first run). Parses and validates:

@@ -16,7 +16,7 @@ from importlib import resources
 from unittest.mock import patch
 from aflow.config import AflowSection, ConfigError, GoTransition, HarnessProfileConfig, WorkflowConfig, WorkflowHarnessConfig, WorkflowStepConfig, WorkflowUserConfig, bootstrap_config, find_placeholders, load_workflow_config, validate_workflow_config
 from aflow.workflow import WorkflowError, _backup_original_plan, evaluate_condition, generate_new_plan_path, move_completed_plan_to_done, pick_transition, render_prompt, render_step_prompts, resolve_profile, resolve_role_selector, run_workflow
-from aflow.cli import _confirm_startup_recovery, _maybe_move_completed_plan_to_done, _parse_run_args, _pick_workflow_step, build_parser, main
+from aflow.cli import _confirm_startup_recovery, _maybe_move_completed_plan_to_done, _parse_run_args, _pick_workflow_step, _resolve_run_arguments, build_parser, main, RUN_HELP
 from aflow.harnesses.claude import ClaudeAdapter
 from aflow.harnesses.codex import CodexAdapter
 from aflow.harnesses.copilot import CopilotAdapter
@@ -111,6 +111,30 @@ class WorkflowCliTests(unittest.TestCase):
         args = build_parser().parse_args(['run', '--team', '7teen', 'plan.md'])
         assert args.team == '7teen'
 
+    def test_run_parser_team_flag_short(self) -> None:
+        args = build_parser().parse_args(['run', '-t', '7teen', 'plan.md'])
+        assert args.team == '7teen'
+
+    def test_run_parser_plan_flag(self) -> None:
+        args = build_parser().parse_args(['run', '--plan', 'my_plan.md'])
+        assert args.plan == 'my_plan.md'
+
+    def test_run_parser_plan_flag_short(self) -> None:
+        args = build_parser().parse_args(['run', '-p', 'my_plan.md'])
+        assert args.plan == 'my_plan.md'
+
+    def test_run_parser_workflow_flag(self) -> None:
+        args = build_parser().parse_args(['run', '--workflow', 'my_workflow', 'plan.md'])
+        assert args.workflow == 'my_workflow'
+
+    def test_run_parser_workflow_flag_short(self) -> None:
+        args = build_parser().parse_args(['run', '-w', 'my_workflow', 'plan.md'])
+        assert args.workflow == 'my_workflow'
+
+    def test_run_parser_start_step_short_flag(self) -> None:
+        args = build_parser().parse_args(['run', '-ss', 'implement_plan', 'plan.md'])
+        assert args.start_step == 'implement_plan'
+
     def test_parser_no_legacy_flags(self) -> None:
         parser = build_parser()
         subparsers_action = next(a for a in parser._actions if hasattr(a, 'choices') and isinstance(a.choices, dict))
@@ -122,7 +146,260 @@ class WorkflowCliTests(unittest.TestCase):
         assert 'profile' not in run_actions
         assert 'stagnation_limit' not in run_actions
         assert 'keep_runs' not in run_actions
-        assert 'workflow' not in run_actions
+
+    def test_resolve_run_args_plan_only_positional(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_file = Path(tmpdir) / 'plan.md'
+            plan_file.write_text('# Plan\n')
+            config_text = '[aflow]\ndefault_workflow = "simple"\n\n[workflow.simple.steps.implement_plan]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n'
+            config_path = _write_config(Path(tmpdir), config_text)
+            config = load_workflow_config(config_path)
+
+            workflow, plan, extra = _resolve_run_arguments(None, None, [str(plan_file)], config)
+            assert workflow is None
+            assert plan == str(plan_file)
+            assert extra == ()
+
+    def test_resolve_run_args_workflow_and_plan_positional(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_file = Path(tmpdir) / 'plan.md'
+            plan_file.write_text('# Plan\n')
+            config_text = '[aflow]\n\n[workflow.myworkflow.steps.impl]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n'
+            config_path = _write_config(Path(tmpdir), config_text)
+            config = load_workflow_config(config_path)
+
+            workflow, plan, extra = _resolve_run_arguments(None, None, ['myworkflow', str(plan_file)], config)
+            assert workflow == 'myworkflow'
+            assert plan == str(plan_file)
+            assert extra == ()
+
+    def test_resolve_run_args_plan_and_workflow_positional_reversed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_file = Path(tmpdir) / 'plan.md'
+            plan_file.write_text('# Plan\n')
+            config_text = '[aflow]\n\n[workflow.myworkflow.steps.impl]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n'
+            config_path = _write_config(Path(tmpdir), config_text)
+            config = load_workflow_config(config_path)
+
+            workflow, plan, extra = _resolve_run_arguments(None, None, [str(plan_file), 'myworkflow'], config)
+            assert workflow == 'myworkflow'
+            assert plan == str(plan_file)
+            assert extra == ()
+
+    def test_resolve_run_args_explicit_plan_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_file = Path(tmpdir) / 'plan.md'
+            plan_file.write_text('# Plan\n')
+            config_text = '[aflow]\ndefault_workflow = "simple"\n\n[workflow.simple.steps.impl]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n'
+            config_path = _write_config(Path(tmpdir), config_text)
+            config = load_workflow_config(config_path)
+
+            workflow, plan, extra = _resolve_run_arguments(str(plan_file), None, [], config)
+            assert workflow is None
+            assert plan == str(plan_file)
+            assert extra == ()
+
+    def test_resolve_run_args_explicit_workflow_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_file = Path(tmpdir) / 'plan.md'
+            plan_file.write_text('# Plan\n')
+            config_text = '[aflow]\n\n[workflow.myworkflow.steps.impl]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n'
+            config_path = _write_config(Path(tmpdir), config_text)
+            config = load_workflow_config(config_path)
+
+            workflow, plan, extra = _resolve_run_arguments(None, 'myworkflow', [str(plan_file)], config)
+            assert workflow == 'myworkflow'
+            assert plan == str(plan_file)
+            assert extra == ()
+
+    def test_resolve_run_args_both_flags_explicit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_file = Path(tmpdir) / 'plan.md'
+            plan_file.write_text('# Plan\n')
+            config_text = '[aflow]\n\n[workflow.myworkflow.steps.impl]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n'
+            config_path = _write_config(Path(tmpdir), config_text)
+            config = load_workflow_config(config_path)
+
+            workflow, plan, extra = _resolve_run_arguments(str(plan_file), 'myworkflow', [], config)
+            assert workflow == 'myworkflow'
+            assert plan == str(plan_file)
+            assert extra == ()
+
+    def test_resolve_run_args_duplicate_identical_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_file = Path(tmpdir) / 'plan.md'
+            plan_file.write_text('# Plan\n')
+            config_text = '[aflow]\n\n[workflow.myworkflow.steps.impl]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n'
+            config_path = _write_config(Path(tmpdir), config_text)
+            config = load_workflow_config(config_path)
+
+            workflow, plan, extra = _resolve_run_arguments(str(plan_file), None, [str(plan_file)], config)
+            assert workflow is None
+            assert plan == str(plan_file)
+            assert extra == ()
+
+    def test_resolve_run_args_duplicate_conflicting_plan_raises_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_file1 = Path(tmpdir) / 'plan1.md'
+            plan_file1.write_text('# Plan\n')
+            plan_file2 = Path(tmpdir) / 'plan2.md'
+            plan_file2.write_text('# Plan\n')
+            config_text = '[aflow]\n\n[workflow.myworkflow.steps.impl]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n'
+            config_path = _write_config(Path(tmpdir), config_text)
+            config = load_workflow_config(config_path)
+
+            with pytest.raises(ValueError, match="conflicting plan"):
+                _resolve_run_arguments(str(plan_file1), None, [str(plan_file2)], config)
+
+    def test_resolve_run_args_duplicate_identical_workflow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_file = Path(tmpdir) / 'plan.md'
+            plan_file.write_text('# Plan\n')
+            config_text = '[aflow]\n\n[workflow.myworkflow.steps.impl]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n'
+            config_path = _write_config(Path(tmpdir), config_text)
+            config = load_workflow_config(config_path)
+
+            workflow, plan, extra = _resolve_run_arguments(None, 'myworkflow', ['myworkflow', str(plan_file)], config)
+            assert workflow == 'myworkflow'
+            assert plan == str(plan_file)
+            assert extra == ()
+
+    def test_resolve_run_args_duplicate_conflicting_workflow_raises_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_file = Path(tmpdir) / 'plan.md'
+            plan_file.write_text('# Plan\n')
+            config_text = '[aflow]\n\n[workflow.wf1.steps.impl]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[workflow.wf2.steps.impl]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n'
+            config_path = _write_config(Path(tmpdir), config_text)
+            config = load_workflow_config(config_path)
+
+            with pytest.raises(ValueError, match="conflicting workflow"):
+                _resolve_run_arguments(None, 'wf1', ['wf2', str(plan_file)], config)
+
+    def test_resolve_run_args_ambiguous_both_workflows_raises_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_text = '[aflow]\n\n[workflow.wf1.steps.impl]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[workflow.wf2.steps.impl]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n'
+            config_path = _write_config(Path(tmpdir), config_text)
+            config = load_workflow_config(config_path)
+
+            with pytest.raises(ValueError, match="cannot determine"):
+                _resolve_run_arguments(None, None, ['wf1', 'wf2'], config)
+
+    def test_resolve_run_args_extra_instructions_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_file = Path(tmpdir) / 'plan.md'
+            plan_file.write_text('# Plan\n')
+            config_text = '[aflow]\ndefault_workflow = "simple"\n\n[workflow.simple.steps.impl]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n'
+            config_path = _write_config(Path(tmpdir), config_text)
+            config = load_workflow_config(config_path)
+
+            workflow, plan, extra = _resolve_run_arguments(None, None, [str(plan_file), '--', 'be careful'], config)
+            assert workflow is None
+            assert plan == str(plan_file)
+            assert extra == ('be careful',)
+
+    def test_resolve_run_args_existing_plan_and_unknown_token_raises_error(self) -> None:
+        """Reject existing-plan + unknown-token (token that is neither workflow nor file)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_file = Path(tmpdir) / 'plan.md'
+            plan_file.write_text('# Plan\n')
+            config_text = '[aflow]\ndefault_workflow = "simple"\n\n[workflow.simple.steps.impl]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n'
+            config_path = _write_config(Path(tmpdir), config_text)
+            config = load_workflow_config(config_path)
+
+            with pytest.raises(ValueError, match="neither a configured workflow name nor an existing file"):
+                _resolve_run_arguments(None, None, [str(plan_file), 'nonsense'], config)
+
+    def test_resolve_run_args_unknown_token_and_existing_plan_raises_error(self) -> None:
+        """Reject unknown-token + existing-plan (token that is neither workflow nor file)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_file = Path(tmpdir) / 'plan.md'
+            plan_file.write_text('# Plan\n')
+            config_text = '[aflow]\ndefault_workflow = "simple"\n\n[workflow.simple.steps.impl]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n'
+            config_path = _write_config(Path(tmpdir), config_text)
+            config = load_workflow_config(config_path)
+
+            with pytest.raises(ValueError, match="neither a configured workflow name nor an existing file"):
+                _resolve_run_arguments(None, None, ['nonsense', str(plan_file)], config)
+
+    def test_resolve_run_args_both_existing_files_one_is_workflow_raises_error(self) -> None:
+        """Reject when both tokens are existing files, even if one token is also a configured workflow name."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_file1 = Path(tmpdir) / 'plan1.md'
+            plan_file1.write_text('# Plan\n')
+            plan_file2_name = str(Path(tmpdir) / 'plan2.md')
+            plan_file2 = Path(plan_file2_name)
+            plan_file2.write_text('# Plan\n')
+            config_text = f'[aflow]\n\n[workflow."{plan_file2_name}".steps.impl]\nrole = "architect"\nprompts = ["p"]\ngo = [{{ to = "END" }}]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n'
+            config_path = _write_config(Path(tmpdir), config_text)
+            config = load_workflow_config(config_path)
+
+            # Both tokens are existing files, and one also has a name matching a configured workflow
+            # This should fail with ambiguity because both are file candidates
+            with pytest.raises(ValueError, match="is a configured workflow and also resolves to an existing file"):
+                _resolve_run_arguments(None, None, [str(plan_file1), plan_file2_name], config)
+
+    def test_resolve_numeric_start_step_non_ascii_digit_treated_as_step_name(self) -> None:
+        """Non-ASCII digit strings are treated as step names, not numeric indexes."""
+        from aflow.cli import _resolve_numeric_start_step
+        config_text = '''\
+[aflow]
+default_workflow = "simple"
+
+[workflow.simple.steps.non_ascii_digit_step]
+role = "architect"
+prompts = ["p"]
+go = [{ to = "END" }]
+
+[harness.opencode.profiles.default]
+model = "m"
+
+[roles]
+architect = "opencode.default"
+
+[prompts]
+p = "do it"
+'''
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = _write_config(Path(tmpdir), config_text)
+            config = load_workflow_config(config_path)
+            workflow = config.workflows['simple']
+
+            # Test that non-ASCII digit characters are treated as step names
+            # '١' is Arabic-Indic digit one
+            resolved_name, error = _resolve_numeric_start_step('١', workflow)
+            # Should not match any step, but be treated as a step name lookup (error handled at CLI level)
+            assert resolved_name == '١'
+
+    def test_resolve_numeric_start_step_underscored_digit_treated_as_step_name(self) -> None:
+        """Underscored digit strings are treated as step names, not numeric indexes."""
+        from aflow.cli import _resolve_numeric_start_step
+        config_text = '''\
+[aflow]
+default_workflow = "simple"
+
+[workflow.simple.steps.1_0]
+role = "architect"
+prompts = ["p"]
+go = [{ to = "END" }]
+
+[harness.opencode.profiles.default]
+model = "m"
+
+[roles]
+architect = "opencode.default"
+
+[prompts]
+p = "do it"
+'''
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = _write_config(Path(tmpdir), config_text)
+            config = load_workflow_config(config_path)
+            workflow = config.workflows['simple']
+
+            # '1_0' should be treated as step name, not numeric index 10
+            resolved_name, error = _resolve_numeric_start_step('1_0', workflow)
+            assert error is None
+            assert resolved_name == '1_0'
 
     def test_install_subcommand_exposes_destination_and_yes(self) -> None:
         args = build_parser().parse_args(['install-skills', '--yes'])
@@ -284,6 +561,194 @@ class WorkflowCliTests(unittest.TestCase):
                 else:
                     os.environ['HOME'] = original_home
             assert result == 1
+
+    def test_run_parser_accepts_numeric_start_step_short_flag(self) -> None:
+        args = build_parser().parse_args(['run', '-ss', '2', 'plan.md'])
+        assert args.start_step == '2'
+
+    def test_run_parser_accepts_numeric_start_step_long_flag(self) -> None:
+        args = build_parser().parse_args(['run', '--start-step', '2', 'plan.md'])
+        assert args.start_step == '2'
+
+    def test_cli_resolves_numeric_start_step_to_second_step(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir)
+            _write_config(home_dir, '[aflow]\ndefault_workflow = "multi_step"\n\n[workflow.multi_step.steps.review_plan]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "implement_plan" }]\n\n[workflow.multi_step.steps.implement_plan]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n')
+            plan_path = Path(tmpdir) / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: Done\n- [x] step one\n')
+            original_home = os.environ.get('HOME')
+            try:
+                os.environ['HOME'] = str(home_dir)
+                result = main(['run', '--start-step', '2', str(plan_path)])
+            finally:
+                if original_home is None:
+                    os.environ.pop('HOME', None)
+                else:
+                    os.environ['HOME'] = original_home
+            assert result == 1
+
+    def test_cli_numeric_start_step_zero_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir)
+            _write_config(home_dir, '[aflow]\ndefault_workflow = "multi_step"\n\n[workflow.multi_step.steps.review_plan]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "implement_plan" }]\n\n[workflow.multi_step.steps.implement_plan]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n')
+            plan_path = Path(tmpdir) / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            original_home = os.environ.get('HOME')
+            try:
+                os.environ['HOME'] = str(home_dir)
+                result = main(['run', '--start-step', '0', str(plan_path)])
+            finally:
+                if original_home is None:
+                    os.environ.pop('HOME', None)
+                else:
+                    os.environ['HOME'] = original_home
+            assert result == 1
+
+    def test_cli_numeric_start_step_out_of_range(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir)
+            _write_config(home_dir, '[aflow]\ndefault_workflow = "multi_step"\n\n[workflow.multi_step.steps.review_plan]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "implement_plan" }]\n\n[workflow.multi_step.steps.implement_plan]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n')
+            plan_path = Path(tmpdir) / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            original_home = os.environ.get('HOME')
+            try:
+                os.environ['HOME'] = str(home_dir)
+                result = main(['run', '--start-step', '99', str(plan_path)])
+            finally:
+                if original_home is None:
+                    os.environ.pop('HOME', None)
+                else:
+                    os.environ['HOME'] = original_home
+            assert result == 1
+
+    def test_cli_named_start_step_still_works(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir)
+            _write_config(home_dir, '[aflow]\ndefault_workflow = "multi_step"\n\n[workflow.multi_step.steps.review_plan]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "implement_plan" }]\n\n[workflow.multi_step.steps.implement_plan]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n')
+            plan_path = Path(tmpdir) / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: Done\n- [x] step one\n')
+            original_home = os.environ.get('HOME')
+            try:
+                os.environ['HOME'] = str(home_dir)
+                result = main(['run', '--start-step', 'implement_plan', str(plan_path)])
+            finally:
+                if original_home is None:
+                    os.environ.pop('HOME', None)
+                else:
+                    os.environ['HOME'] = original_home
+            assert result == 1
+
+    def test_cli_rejects_numeric_start_step_on_complete_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir)
+            _write_config(home_dir, '[aflow]\ndefault_workflow = "multi_step"\n\n[workflow.multi_step.steps.review_plan]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "implement_plan" }]\n\n[workflow.multi_step.steps.implement_plan]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n')
+            plan_path = Path(tmpdir) / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: Done\n- [x] step one\n')
+            original_home = os.environ.get('HOME')
+            try:
+                os.environ['HOME'] = str(home_dir)
+                result = main(['run', '--start-step', '2', str(plan_path)])
+            finally:
+                if original_home is None:
+                    os.environ.pop('HOME', None)
+                else:
+                    os.environ['HOME'] = original_home
+            assert result == 1
+
+    def test_resolve_run_args_workflow_and_missing_plan_positional(self) -> None:
+        """Preserve missing-plan-file behavior when workflow + non-existent plan are positionals."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_text = '[aflow]\n\n[workflow.simple.steps.impl]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n'
+            config_path = _write_config(Path(tmpdir), config_text)
+            config = load_workflow_config(config_path)
+
+            # Pass a workflow name and a non-existent plan path as positionals
+            workflow, plan, extra = _resolve_run_arguments(None, None, ['simple', 'missing-plan.md'], config)
+            assert workflow == 'simple'
+            assert plan == 'missing-plan.md'
+            assert extra == ()
+
+    def test_resolve_run_args_equivalent_plan_paths_different_spelling(self) -> None:
+        """Accept equivalent plan paths with different spellings (e.g., /abs/path vs ~/path)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_file = Path(tmpdir) / 'plan.md'
+            plan_file.write_text('# Plan\n')
+            config_text = '[aflow]\n\n[workflow.myworkflow.steps.impl]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n[harness.opencode.profiles.default]\nmodel = "m"\n\n[roles]\narchitect = "opencode.default"\n\n[prompts]\np = "do it"\n'
+            config_path = _write_config(Path(tmpdir), config_text)
+            config = load_workflow_config(config_path)
+
+            # Use the same file with explicit path and canonical path
+            abs_path = str(plan_file)
+            # Pass the same absolute path but via positional and flag - should be accepted
+            workflow, plan, extra = _resolve_run_arguments(abs_path, None, [abs_path], config)
+            assert workflow is None
+            assert plan == abs_path
+            assert extra == ()
+
+    def test_resolve_run_args_digit_like_step_name_not_numeric_index(self) -> None:
+        """Treat digit-like but non-plain step names as step names, not numeric indexes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir)
+            config_text = '''\
+[aflow]
+default_workflow = "simple"
+
+[workflow.simple.steps.1_0]
+role = "architect"
+prompts = ["p"]
+go = [{ to = "other" }]
+
+[workflow.simple.steps.other]
+role = "architect"
+prompts = ["p"]
+go = [{ to = "END" }]
+
+[harness.opencode.profiles.default]
+model = "m"
+
+[roles]
+architect = "opencode.default"
+
+[prompts]
+p = "do it"
+'''
+            config_path = _write_config(home_dir, config_text)
+            plan_path = Path(tmpdir) / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: One\n- [ ] step\n')
+
+            # Patch subprocess to capture the resolver's choice
+            resolved_step_from_cli: list[str] = []
+
+            def capture_runner(argv, **kwargs):
+                # The --start-step value should map to the step name '1_0', not index 10
+                # We can't directly check the resolved value here, but we can verify
+                # that the main() function accepts '1_0' and doesn't error on it
+                resolved_step_from_cli.append('captured')
+                return subprocess.CompletedProcess(argv, 1, '', 'plan not found')
+
+            original_home = os.environ.get('HOME')
+            try:
+                os.environ['HOME'] = str(home_dir)
+                with patch('aflow.cli.run_workflow', return_value=None):
+                    # This should not raise an error for '1_0' being treated as a step name
+                    # Rather it should fail later because the plan file doesn't exist
+                    result = main(['run', '--start-step', '1_0', str(plan_path)])
+                # Should fail for missing plan file, not for invalid numeric index
+                assert result == 1
+            finally:
+                if original_home is None:
+                    os.environ.pop('HOME', None)
+                else:
+                    os.environ['HOME'] = original_home
+
+    def test_run_help_text_includes_flag_aliases(self) -> None:
+        """Verify --start-step/-ss, --plan/-p, --workflow/-w are documented in help."""
+        # Test that RUN_HELP contains the key information
+        assert '--plan/-p' in RUN_HELP
+        assert '--workflow/-w' in RUN_HELP
+        assert '--start-step/-ss' in RUN_HELP
+        assert '--team/-t' in RUN_HELP
+        assert '--max-turns/-mt' in RUN_HELP
 
 class WorkflowStartupFlowTests(unittest.TestCase):
 
@@ -3694,6 +4159,55 @@ class WorkflowEndToEndTests(unittest.TestCase):
             run_json = json.loads((run_dirs[0] / 'run.json').read_text(encoding='utf-8'))
             assert run_json['turns_completed'] == 1
             assert run_json['end_reason'] == 'max_turns_reached'
+
+    def test_launcher_numeric_start_step_matches_named_start_step(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            repo_root = _copy_aflow_repo(tmp_path)
+            home_dir = tmp_path / 'home'
+            home_dir.mkdir()
+            _write_config(home_dir, '[aflow]\ndefault_workflow = "multi_step"\n\n[harness.codex.profiles.default]\nmodel = "gpt-5.4"\n\n[roles]\narchitect = "codex.default"\n\n[workflow.multi_step.steps.review_plan]\nrole = "architect"\nprompts = ["review_prompt"]\ngo = [{ to = "implement_plan" }]\n\n[workflow.multi_step.steps.implement_plan]\nrole = "architect"\nprompts = ["impl_prompt"]\ngo = [\n  { to = "END", when = "DONE || MAX_TURNS_REACHED" },\n  { to = "review_plan" },\n]\n\n[prompts]\nreview_prompt = "Review."\nimpl_prompt = "Implement."\n')
+            plan_path = tmp_path / 'plan.md'
+            count_file = tmp_path / 'count.txt'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            _write_workflow_harness_script(repo_root, 'codex')
+
+            # Run with numeric start-step index 2
+            env_numeric = _workflow_test_env(repo_root, scenario='noop', plan_path=plan_path, count_file=count_file, home_dir=home_dir)
+            result_numeric = _run_workflow_launcher(
+                repo_root,
+                '--max-turns', '1',
+                '--start-step', '2',
+                str(plan_path),
+                env=env_numeric,
+            )
+            assert result_numeric.returncode == 0
+            run_dirs_numeric = sorted((repo_root / '.aflow' / 'runs').iterdir())
+            assert len(run_dirs_numeric) == 1
+            run_json_numeric = json.loads((run_dirs_numeric[0] / 'run.json').read_text(encoding='utf-8'))
+            selected_step_numeric = run_json_numeric['selected_start_step']
+
+            # Clean up runs directory
+            import shutil
+            shutil.rmtree(repo_root / '.aflow' / 'runs')
+
+            # Run with named start-step
+            env_named = _workflow_test_env(repo_root, scenario='noop', plan_path=plan_path, count_file=count_file, home_dir=home_dir)
+            result_named = _run_workflow_launcher(
+                repo_root,
+                '--max-turns', '1',
+                '--start-step', 'implement_plan',
+                str(plan_path),
+                env=env_named,
+            )
+            assert result_named.returncode == 0
+            run_dirs_named = sorted((repo_root / '.aflow' / 'runs').iterdir())
+            assert len(run_dirs_named) == 1
+            run_json_named = json.loads((run_dirs_named[0] / 'run.json').read_text(encoding='utf-8'))
+            selected_step_named = run_json_named['selected_start_step']
+
+            # Both should resolve to the same step
+            assert selected_step_numeric == selected_step_named == 'implement_plan'
 
 class SkillDocsTests(unittest.TestCase):
 

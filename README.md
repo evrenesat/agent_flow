@@ -57,20 +57,45 @@ The auto-install destination map is:
 
 ## Usage
 
+Positional forms (backward-compatible):
+
 ```bash
 aflow run path/to/plan.md
+aflow run workflow_name path/to/plan.md
+aflow run path/to/plan.md workflow_name
 aflow run --start-step implement_plan path/to/plan.md
-aflow run review_implement_review path/to/plan.md
+aflow run -ss 2 path/to/plan.md
 aflow run --team 7teen path/to/plan.md
 aflow run -mt 10 path/to/plan.md
 aflow run path/to/plan.md -- keep edits small and update docs if behavior changes
 ```
 
+Flag forms (explicit):
+
+```bash
+aflow run --plan path/to/plan.md
+aflow run -p path/to/plan.md -w workflow_name
+aflow run --plan path/to/plan.md --workflow workflow_name --start-step implement_plan
+aflow run -p path/to/plan.md -w workflow_name -ss 2 -t 7teen -mt 10
+```
+
+Mixed forms (flags and positionals together):
+
+```bash
+aflow run -p path/to/plan.md workflow_name
+aflow run --workflow workflow_name path/to/plan.md
+```
+
 If the workflow name is omitted, `aflow` uses `aflow.default_workflow` from config.
-`--team` selects a team for the run, and it overrides any team set in the workflow config.
+
+`--plan` / `-p` explicitly specifies the plan file path.
+`--workflow` / `-w` explicitly specifies the workflow name.
+`--team` / `-t` selects a team for the run, and it overrides any team set in the workflow config.
 `--max-turns` / `-mt` overrides `[aflow].max_turns` for that run.
 
-`--start-step` names a workflow step, not a plan checkpoint.
+`--start-step` / `-ss` selects where to begin the workflow. It accepts either a workflow step name (like `implement_plan`) or a 1-based numeric index (like `2` to start from the second declared step). Numeric indexes must be within the valid range for the selected workflow; out-of-range values fail with a clear error.
+
+When two bare positional arguments are given, they are resolved intelligently: the token matching an existing plan file is treated as the plan, and the token matching a configured workflow name is treated as the workflow. If both tokens could match both categories, or neither can be resolved safely, `aflow` exits with a clear ambiguity error. A single bare positional is always treated as the plan path for backward compatibility.
 
 If you omit `--start-step` and the plan is partly complete, `aflow` prompts you to pick a step when the workflow has more than one step. That prompt is interactive only.
 

@@ -30,9 +30,19 @@ from .workflow import (
 )
 
 RUN_HELP = """\
+Flags:
+  --plan/-p PLAN_FILE       Path to the plan Markdown file.
+  --workflow/-w WORKFLOW    Name of the workflow to run (default from config).
+  --start-step/-ss STEP     Start from this step name or 1-based index (default: first).
+  --team/-t TEAM_NAME       Override workflow team.
+  --max-turns/-mt N         Maximum turns (default from config).
+
 Positional arguments:
-  [workflow_name]   Name of the workflow to run. Omit to use default_workflow from config.
-  plan_file         Path to the plan Markdown file.
+  [workflow_name] [plan_file]   Either form works:
+                                  - One positional: treated as plan_file
+                                  - Two positionals: first is workflow (if it matches a config name),
+                                    second is plan_file
+                                  If only one token matches a workflow name, the other is the plan.
 
 Extra instructions:
   Append -- followed by free-form text to pass extra instructions to each step prompt.
@@ -40,8 +50,10 @@ Extra instructions:
 Examples:
   aflow run path/to/plan.md
   aflow run ralph path/to/plan.md
-  aflow run -mt 10 path/to/plan.md
-  aflow run path/to/plan.md -- keep edits small and update docs if behavior changes
+  aflow run --workflow ralph --plan path/to/plan.md
+  aflow run --plan path/to/plan.md --start-step my_step
+  aflow run -mt 10 -ss 2 ralph plan.md
+  aflow run plan.md -- keep edits small and update docs if behavior changes
 """
 
 INSTALL_SKILLS_HELP = """\
@@ -132,6 +144,20 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=RUN_HELP,
     )
     run_parser.add_argument(
+        "--plan", "-p",
+        type=str,
+        default=None,
+        metavar="PLAN_FILE",
+        help="Path to the plan Markdown file.",
+    )
+    run_parser.add_argument(
+        "--workflow", "-w",
+        type=str,
+        default=None,
+        metavar="WORKFLOW_NAME",
+        help="Name of the workflow to run.",
+    )
+    run_parser.add_argument(
         "--max-turns", "-mt",
         type=_positive_int,
         default=None,
@@ -139,14 +165,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum number of turns for this run. Defaults to [aflow].max_turns.",
     )
     run_parser.add_argument(
-        "--team",
+        "--team", "-t",
         type=str,
         default=None,
         metavar="TEAM_NAME",
         help="Override the workflow team for this run.",
     )
     run_parser.add_argument(
-        "--start-step",
+        "--start-step", "-ss",
         type=str,
         default=None,
         metavar="STEP_NAME",
@@ -207,6 +233,171 @@ def _parse_run_args(
     return workflow_name, plan_file, extra
 
 
+def _resolve_run_arguments(
+    plan_flag: str | None,
+    workflow_flag: str | None,
+    run_args: list[str],
+    workflow_config: WorkflowConfig,
+) -> tuple[str | None, str | None, tuple[str, ...]]:
+    """Resolve plan and workflow from explicit flags and positional args.
+
+    Positional parsing:
+      - Extract positionals before '--' (if present); everything after is extra instructions
+      - 1 positional: treat as plan file
+      - 2+ positionals: infer by checking if token resolves to existing file vs configured workflow name
+      - extra positionals beyond 2 are appended to extra instructions
+
+    Duplicate handling:
+      - If plan comes from both flag and positional, they must resolve to the same value
+      - If workflow comes from both flag and positional, they must resolve to the same value
+      - Conflicting duplicates trigger a clear error
+      - Ambiguous dual-positionals (both plan candidates, both workflow candidates, or neither) trigger a clear error
+
+    Returns (workflow_name, plan_file, extra_instructions) where workflow_name and/or plan_file
+    may be None if not determinable.
+    """
+    if "--" in run_args:
+        sep = run_args.index("--")
+        extra_instructions = tuple(run_args[sep + 1 :])
+        positionals = run_args[:sep]
+    else:
+        extra_instructions = ()
+        positionals = run_args
+
+    known_workflows = set(workflow_config.workflows.keys())
+
+    # Extract positional plan and workflow candidates
+    positional_plan = None
+    positional_workflow = None
+    extra_positionals = []
+
+    if len(positionals) == 0:
+        pass
+    elif len(positionals) == 1:
+        # Single positional is always treated as plan, never as workflow
+        positional_plan = positionals[0]
+    else:
+        # Two or more positionals: resolve by meaning
+        first_token = positionals[0]
+        second_token = positionals[1]
+
+        # Check which token is a workflow and whether each file exists
+        first_is_workflow = first_token in known_workflows
+        second_is_workflow = second_token in known_workflows
+        first_exists = Path(first_token).exists()
+        second_exists = Path(second_token).exists()
+
+        # Apply resolution rules in order:
+        # 1. If exactly one is a workflow, treat the other as plan (even if it doesn't exist)
+        #    Only accept this if the workflow token is not also an existing file (which would create ambiguity)
+        if first_is_workflow and not second_is_workflow:
+            if first_exists and second_exists:
+                # Both tokens are existing files, and first is also a workflow -> ambiguous
+                raise ValueError(
+                    f"error: cannot determine which positional is the plan file: "
+                    f"'{first_token}' is a configured workflow and also resolves to an existing file, "
+                    f"and '{second_token}' resolves to an existing file. "
+                    f"Only one plan file is allowed per run. Use --plan to specify which one."
+                )
+            positional_workflow = first_token
+            positional_plan = second_token
+        elif second_is_workflow and not first_is_workflow:
+            if first_exists and second_exists:
+                # Both tokens are existing files, and second is also a workflow -> ambiguous
+                raise ValueError(
+                    f"error: cannot determine which positional is the plan file: "
+                    f"'{second_token}' is a configured workflow and also resolves to an existing file, "
+                    f"and '{first_token}' resolves to an existing file. "
+                    f"Only one plan file is allowed per run. Use --plan to specify which one."
+                )
+            positional_workflow = second_token
+            positional_plan = first_token
+        # 2. If both are workflows, both are workflow names -> ambiguous
+        elif first_is_workflow and second_is_workflow:
+            raise ValueError(
+                f"error: cannot determine which positional is the plan file and which is the workflow: "
+                f"'{first_token}' and '{second_token}'. "
+                f"Both are configured workflow names. "
+                f"Use --plan and --workflow flags to disambiguate."
+            )
+        # 3. If neither is a workflow, check file existence to distinguish plan from workflow intent
+        else:
+            # Neither is a workflow name
+            if first_exists and second_exists:
+                # Both are existing files -> can't choose which is plan
+                raise ValueError(
+                    f"error: cannot determine which positional is the plan file: "
+                    f"both '{first_token}' and '{second_token}' resolve to existing files. "
+                    f"Only one plan file is allowed per run. Use --plan to specify which one."
+                )
+            elif first_exists and not second_exists:
+                # First exists, second doesn't -> first is plan, second is unclassified
+                raise ValueError(
+                    f"error: cannot determine which positional is the plan file and which is the workflow: "
+                    f"'{first_token}' resolves to an existing file, but '{second_token}' is neither a "
+                    f"configured workflow name nor an existing file. "
+                    f"Use --plan and --workflow flags to specify them explicitly."
+                )
+            elif second_exists and not first_exists:
+                # Second exists, first doesn't -> second is plan, first is unclassified
+                raise ValueError(
+                    f"error: cannot determine which positional is the plan file and which is the workflow: "
+                    f"'{second_token}' resolves to an existing file, but '{first_token}' is neither a "
+                    f"configured workflow name nor an existing file. "
+                    f"Use --plan and --workflow flags to specify them explicitly."
+                )
+            else:
+                # Neither exists and neither is a workflow -> can't determine
+                raise ValueError(
+                    f"error: cannot determine which positional is the plan file and which is the workflow: "
+                    f"'{first_token}' and '{second_token}'. "
+                    f"Neither resolves to an existing file, and neither is a configured workflow name. "
+                    f"Use --plan and --workflow flags to specify them explicitly."
+                )
+
+        # Collect extra positionals beyond the first two
+        if len(positionals) > 2:
+            extra_positionals = positionals[2:]
+
+    # Resolve final values from flags and positionals
+    final_plan = None
+    final_workflow = None
+
+    # Handle plan resolution
+    if plan_flag is not None and positional_plan is not None:
+        # Canonicalize both paths for comparison
+        flag_resolved = Path(plan_flag).expanduser().resolve()
+        positional_resolved = Path(positional_plan).expanduser().resolve()
+        if flag_resolved != positional_resolved:
+            raise ValueError(
+                f"error: conflicting plan specifications: --plan='{plan_flag}' but positional '{positional_plan}'. "
+                f"These must resolve to the same file."
+            )
+        final_plan = plan_flag  # Use the user-provided spelling, not the resolved one
+    elif plan_flag is not None:
+        final_plan = plan_flag
+    elif positional_plan is not None:
+        final_plan = positional_plan
+
+    # Handle workflow resolution
+    if workflow_flag is not None and positional_workflow is not None:
+        if workflow_flag != positional_workflow:
+            raise ValueError(
+                f"error: conflicting workflow specifications: --workflow='{workflow_flag}' but positional '{positional_workflow}'. "
+                f"These must resolve to the same workflow name."
+            )
+        final_workflow = workflow_flag
+    elif workflow_flag is not None:
+        final_workflow = workflow_flag
+    elif positional_workflow is not None:
+        final_workflow = positional_workflow
+
+    # Append any extra positionals to extra instructions
+    all_extra = tuple(extra_positionals) + extra_instructions
+
+    return final_workflow, final_plan, all_extra
+
+
 def _format_success_summary(workflow_name: str, turns_completed: int, end_reason: WorkflowEndReason) -> str:
     turn_label = "turn" if turns_completed == 1 else "turns"
     return (
@@ -243,6 +434,42 @@ def _pick_workflow_step(steps: dict[str, WorkflowStepConfig]) -> str | None:
             )
             continue
         return step_names[choice - 1]
+
+
+def _resolve_numeric_start_step(raw_value: str, workflow: WorkflowConfig) -> tuple[str, str | None]:
+    """
+    Resolve a raw start-step value (from --start-step/-ss) to a canonical step name.
+
+    If raw_value is a plain ASCII base-10 integer (only ASCII decimal digits 0-9), treat it as a 1-based workflow step index.
+    Otherwise, treat it as a step name.
+
+    Returns (resolved_step_name, error_message).
+    If successful, error_message is None.
+    If parsing or validation fails, resolved_step_name is the raw_value and error_message describes the issue.
+    """
+    step_names = list(workflow.steps.keys())
+
+    # Check if raw_value is a plain ASCII base-10 integer (only ASCII decimal digits, no signs or underscores)
+    is_ascii_decimal = raw_value and all(c in '0123456789' for c in raw_value)
+    if is_ascii_decimal:
+        index = int(raw_value)
+
+        # Validate numeric index
+        if index < 1 or index > len(step_names):
+            available = ", ".join(step_names)
+            error = (
+                f"error: start-step index {index} is out of range. "
+                f"Valid indexes: 1 to {len(step_names)}. "
+                f"Available steps: {available}"
+            )
+            return raw_value, error
+
+        # Map 1-based index to step name
+        resolved_name = step_names[index - 1]
+        return resolved_name, None
+    else:
+        # Not a plain ASCII integer, treat as step name
+        return raw_value, None
 
 
 def _confirm_startup_recovery(error_message: str) -> bool:
@@ -324,17 +551,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help(sys.stderr)
         return 1
 
-    workflow_arg, plan_file_arg, extra_instructions = _parse_run_args(args.run_args)
-
-    if plan_file_arg is None:
-        print("error: plan_file is required", file=sys.stderr)
-        return 1
-
     repo_root = _resolve_repo_root()
     if repo_root is None:
         return 1
     working_dir = Path.cwd()
-    plan_path = Path(plan_file_arg).expanduser().resolve()
 
     if config_path is None:
         config_path = bootstrap_config()
@@ -344,6 +564,20 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         print(exc, file=sys.stderr)
         return 1
+
+    try:
+        workflow_arg, plan_file_arg, extra_instructions = _resolve_run_arguments(
+            args.plan, args.workflow, args.run_args, workflow_config
+        )
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+
+    if plan_file_arg is None:
+        print("error: plan_file is required", file=sys.stderr)
+        return 1
+
+    plan_path = Path(plan_file_arg).expanduser().resolve()
 
     placeholders = find_placeholders(workflow_config)
     if placeholders:
@@ -391,17 +625,24 @@ def main(argv: list[str] | None = None) -> int:
     effective_max_turns = (
         args.max_turns if args.max_turns is not None else workflow_config.aflow.max_turns
     )
-    if args.start_step is not None and args.start_step not in workflow.steps:
-        print(
-            f"error: step '{args.start_step}' not found in workflow '{workflow_name}'. "
-            f"Available steps: {', '.join(workflow.steps.keys())}",
-            file=sys.stderr,
-        )
-        return 1
+
+    selected_start_step = None
+    if args.start_step is not None:
+        resolved_step, error_msg = _resolve_numeric_start_step(args.start_step, workflow)
+        if error_msg is not None:
+            print(error_msg, file=sys.stderr)
+            return 1
+        selected_start_step = resolved_step
+        if selected_start_step not in workflow.steps:
+            print(
+                f"error: step '{selected_start_step}' not found in workflow '{workflow_name}'. "
+                f"Available steps: {', '.join(workflow.steps.keys())}",
+                file=sys.stderr,
+            )
+            return 1
 
     parsed_plan = None
     startup_retry: RetryContext | None = None
-    selected_start_step = args.start_step
     try:
         parsed_plan = load_plan(plan_path)
     except PlanParseError as exc:
