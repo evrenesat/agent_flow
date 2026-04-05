@@ -31,7 +31,7 @@ uv run python -m aflow run path/to/plan.md
 
 ## Install Skills
 
-`aflow install-skills` copies the seven bundled skills into harness skill directories. In auto mode, it only targets supported harness CLIs that are already on `PATH`.
+`aflow install-skills` copies the eight bundled skills into harness skill directories. In auto mode, it only targets supported harness CLIs that are already on `PATH`.
 
 Auto mode:
 
@@ -275,7 +275,7 @@ Each workflow step launches one fresh harness process.
 At a high level:
 
 1. `aflow` loads the selected workflow and reads the original plan file.
-2. If the workflow has a non-empty `setup`, `aflow` runs lifecycle preflight checks and creates the execution environment (a local feature branch for branch-only flows, a linked worktree plus feature branch for worktree flows). Lifecycle workflows require `main_branch` to already point to a local commit. If the repo is brand new and `main_branch` is still unborn, make an initial commit first. For worktree flows, normal steps run inside the created worktree while run artifacts stay under the primary checkout.
+2. If the workflow has a non-empty `setup`, `aflow` inspects the git state at the repo root. If the directory has no git repository yet, or has a git repository with no commits, `aflow` auto-bootstraps it: the team lead agent (resolved from `[aflow].team_lead`) initializes a local repository on `main_branch`, writes a `README.md` derived from the plan preamble, and creates the initial commit. After bootstrap verification passes, `aflow` continues into normal lifecycle preflight. For this to work, git must be installed locally. If git is unavailable, the run fails with a clear error. Existing committed repositories are not affected: no re-initialization, no automatic branch creation, no remote interaction. After bootstrap (or for repos that already have commits), `aflow` runs lifecycle preflight checks and creates the execution environment (a local feature branch for branch-only flows, a linked worktree plus feature branch for worktree flows). For worktree flows, normal steps run inside the created worktree while run artifacts stay under the primary checkout.
 3. It starts at the workflow's first declared step.
 4. It renders the step prompts, resolves the step role through the selected team and global `[roles]` map, and runs the harness CLI once for that step.
 5. After the harness returns, it re-reads the original plan file and evaluates the step's `go` transitions.

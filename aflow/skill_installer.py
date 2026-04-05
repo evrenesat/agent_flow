@@ -17,6 +17,7 @@ BUNDLED_SKILL_NAMES = (
     "aflow-review-checkpoint",
     "aflow-review-final",
     "aflow-merge",
+    "aflow-init-repo",
 )
 
 

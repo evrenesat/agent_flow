@@ -21,7 +21,7 @@ from .config import (
     WorkflowStepConfig,
     WorkflowUserConfig,
 )
-from .git_status import classify_dirtiness_by_prefix
+from .git_status import classify_dirtiness_by_prefix, RepoState, probe_repo_state
 from .harnesses import get_adapter
 from .harnesses.base import HarnessAdapter, HarnessInvocation
 from .plan import FENCE_RE, ParsedPlan, PlanParseError, PlanSnapshot, load_plan, load_plan_tolerant, plan_has_git_tracking
@@ -872,22 +872,25 @@ class _LifecyclePlan:
     teardown: tuple[str, ...]
 
 
-def _lifecycle_preflight(
+def _lifecycle_preflight_git(
     primary_root: Path,
-    plan_path: Path,
-    wf: WorkflowConfig,
-    aflow_section: AflowSection,
-) -> _LifecyclePlan | None:
-    setup = wf.setup or ()
-    teardown = wf.teardown or ()
+    main_branch: str,
+    feature_branch: str,
+    uses_worktree: bool,
+    worktree_path: Path | None,
+    *,
+    allow_untracked: bool = False,
+) -> None:
+    """Phase B: git-dependent lifecycle preflight checks.
 
-    if not setup:
-        return None
-
-    main_branch = wf.main_branch
-    if not main_branch:
+    Runs only after bootstrap has ensured commits exist at primary_root.
+    When allow_untracked is True, untracked files (porcelain '??') are not treated as
+    dirtiness — used after bootstrap where pre-existing files may remain untracked.
+    """
+    rc, current_branch, err = _run_git(["symbolic-ref", "--short", "HEAD"], cwd=primary_root)
+    if rc != 0:
         raise WorkflowError(
-            "workflow uses lifecycle setup but main_branch is not configured"
+            f"lifecycle preflight: cannot determine current branch in '{primary_root}': {err}"
         )
 
     rc, current_branch, err = _run_git(["symbolic-ref", "--short", "HEAD"], cwd=primary_root)
@@ -923,10 +926,17 @@ def _lifecycle_preflight(
             f"lifecycle preflight: cannot check working tree state in '{primary_root}'"
         )
 
-    uses_worktree = "worktree" in setup
-    if status_out.strip():
+    effective_status = status_out
+    if allow_untracked:
+        tracked_lines = [
+            line for line in status_out.splitlines()
+            if len(line) >= 2 and line[:2] != "??"
+        ]
+        effective_status = "\n".join(tracked_lines)
+
+    if effective_status.strip():
         if uses_worktree:
-            _, non_plan_paths = classify_dirtiness_by_prefix(status_out)
+            _, non_plan_paths = classify_dirtiness_by_prefix(effective_status)
             if non_plan_paths:
                 raise WorkflowError(
                     f"lifecycle preflight: primary checkout at '{primary_root}' has non-plan dirtiness: "
@@ -937,15 +947,51 @@ def _lifecycle_preflight(
                 f"lifecycle preflight: primary checkout at '{primary_root}' has uncommitted changes"
             )
 
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    stem = _sanitize_plan_stem(plan_path.stem)
-    branch_prefix = (aflow_section.branch_prefix or "aflow").rstrip("-")
-    feature_branch = f"{branch_prefix}-{stem}-{ts}"
-
     rc, _, _ = _run_git(["show-ref", "--verify", f"refs/heads/{feature_branch}"], cwd=primary_root)
     if rc == 0:
         raise WorkflowError(
             f"lifecycle preflight: branch '{feature_branch}' already exists"
+        )
+
+    if uses_worktree and worktree_path is not None:
+        rc, wt_list, _ = _run_git(["worktree", "list", "--porcelain"], cwd=primary_root)
+        if rc == 0:
+            for line in wt_list.splitlines():
+                if line.startswith("worktree "):
+                    registered = line[len("worktree "):]
+                    if Path(registered).resolve() == worktree_path.resolve():
+                        raise WorkflowError(
+                            f"lifecycle preflight: path '{worktree_path}' is already "
+                            f"registered as a git worktree"
+                        )
+
+
+def _lifecycle_preflight(
+    primary_root: Path,
+    plan_path: Path,
+    wf: WorkflowConfig,
+    aflow_section: AflowSection,
+    repo_state: RepoState,
+    *,
+    skip_phase_b: bool = False,
+) -> _LifecyclePlan | None:
+    setup = wf.setup or ()
+    teardown = wf.teardown or ()
+
+    if not setup:
+        return None
+
+    if repo_state == RepoState.NO_GIT_BINARY:
+        raise WorkflowError(
+            "lifecycle bootstrap requires git to be installed locally; "
+            "git was not found on PATH"
+        )
+
+    # --- Phase A: git-independent validation ---
+    main_branch = wf.main_branch
+    if not main_branch:
+        raise WorkflowError(
+            "workflow uses lifecycle setup but main_branch is not configured"
         )
 
     uses_worktree = "worktree" in setup
@@ -982,6 +1028,11 @@ def _lifecycle_preflight(
         except ValueError:
             pass
 
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        stem = _sanitize_plan_stem(plan_path.stem)
+        branch_prefix = (aflow_section.branch_prefix or "aflow").rstrip("-")
+        feature_branch = f"{branch_prefix}-{stem}-{ts}"
+
         worktree_dir_prefix = (aflow_section.worktree_prefix or "aflow").rstrip("-")
         worktree_dir_name = f"{worktree_dir_prefix}-{stem}-{ts}"
         worktree_path = worktree_root / worktree_dir_name
@@ -990,17 +1041,17 @@ def _lifecycle_preflight(
             raise WorkflowError(
                 f"lifecycle preflight: worktree path '{worktree_path}' already exists on disk"
             )
+    else:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        stem = _sanitize_plan_stem(plan_path.stem)
+        branch_prefix = (aflow_section.branch_prefix or "aflow").rstrip("-")
+        feature_branch = f"{branch_prefix}-{stem}-{ts}"
 
-        rc, wt_list, _ = _run_git(["worktree", "list", "--porcelain"], cwd=primary_root)
-        if rc == 0:
-            for line in wt_list.splitlines():
-                if line.startswith("worktree "):
-                    registered = line[len("worktree "):]
-                    if Path(registered).resolve() == worktree_path.resolve():
-                        raise WorkflowError(
-                            f"lifecycle preflight: path '{worktree_path}' is already "
-                            f"registered as a git worktree"
-                        )
+    # --- Phase B: git-dependent validation ---
+    # Runs after bootstrap has ensured commits exist.
+    # skip_phase_b=True defers this call to after the bootstrap handoff in run_workflow.
+    if not skip_phase_b:
+        _lifecycle_preflight_git(primary_root, main_branch, feature_branch, uses_worktree, worktree_path)
 
     return _LifecyclePlan(
         main_branch=main_branch,
@@ -1300,6 +1351,205 @@ def _ensure_merge_handoff_clean(
     )
 
 
+def _lifecycle_is_bootstrap_eligible(wf: WorkflowConfig, repo_state: RepoState) -> bool:
+    """True when the lifecycle workflow needs a bootstrap before git-dependent preflight."""
+    return bool(wf.setup) and repo_state in (RepoState.NOT_A_REPO, RepoState.UNBORN)
+
+
+_SKIP_SECTION_HEADING_RE = re.compile(
+    r"^## (Git Tracking|Done Means|Critical Invariants|Forbidden)"
+)
+_CHECKPOINT_HEADING_RE = re.compile(r"^###\s+\[")
+_SUMMARY_SECTION_RE = re.compile(
+    r"^## Summary\s*\n(.*?)(?=\n## |\Z)", re.MULTILINE | re.DOTALL
+)
+
+
+def derive_readme_content(plan_text: str, plan_stem: str) -> tuple[str, str]:
+    """Extract (title, body) for README from plan text.
+
+    Pure function — does not call git or read files. Accept plan text as a string.
+    """
+    title = _derive_readme_title(plan_text, plan_stem)
+    body = _derive_readme_body(plan_text, title)
+    return title, body
+
+
+def _derive_readme_title(plan_text: str, plan_stem: str) -> str:
+    for line in plan_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# ") and not stripped.startswith("## "):
+            return stripped[2:].strip()
+    return plan_stem.replace("-", " ").title()
+
+
+def _derive_readme_body(plan_text: str, title: str) -> str:
+    summary_match = _SUMMARY_SECTION_RE.search(plan_text)
+    if summary_match:
+        body = summary_match.group(1).strip()
+        if body:
+            return body
+
+    lines = plan_text.splitlines()
+    past_title = False
+    in_fenced = False
+    skip_section = False
+    prose_lines: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+
+        if not past_title:
+            if stripped.startswith("# ") and not stripped.startswith("## "):
+                past_title = True
+            continue
+
+        if _CHECKPOINT_HEADING_RE.match(stripped):
+            break
+
+        if stripped.startswith("## "):
+            if _SKIP_SECTION_HEADING_RE.match(stripped):
+                skip_section = True
+            else:
+                skip_section = False
+                if prose_lines:
+                    return " ".join(prose_lines)
+            continue
+
+        if skip_section:
+            continue
+
+        if stripped.startswith("#"):
+            if prose_lines:
+                return " ".join(prose_lines)
+            continue
+
+        if stripped.startswith("```"):
+            in_fenced = not in_fenced
+            if not in_fenced and prose_lines:
+                return " ".join(prose_lines)
+            if in_fenced and prose_lines:
+                return " ".join(prose_lines)
+            continue
+
+        if in_fenced:
+            continue
+
+        if not stripped:
+            if prose_lines:
+                return " ".join(prose_lines)
+            continue
+
+        if stripped.startswith("- ") or stripped.startswith("* "):
+            if prose_lines:
+                return " ".join(prose_lines)
+            continue
+
+        prose_lines.append(stripped)
+
+    if prose_lines:
+        return " ".join(prose_lines)
+
+    return f'This repository is being initialized from the aflow plan "{title}".'
+
+
+_INIT_REPO_BUILTIN_INSTRUCTION = (
+    "Use the `aflow-init-repo` skill to initialize the repository and create the initial commit."
+)
+
+
+def _build_init_repo_user_prompt(
+    repo_root: Path,
+    main_branch: str,
+    readme_title: str,
+    readme_body: str,
+) -> str:
+    return "\n\n".join([
+        _INIT_REPO_BUILTIN_INSTRUCTION,
+        f"Repo root: `{repo_root}`",
+        f"Main branch: `{main_branch}`",
+        f"README title: {readme_title}",
+        f"README body:\n{readme_body}",
+    ])
+
+
+def _verify_init_repo_success(repo_root: Path, main_branch: str) -> str | None:
+    """Returns None on success, or a description of which check failed."""
+    rc, _, _ = _run_git(["rev-parse", "--verify", "HEAD"], cwd=repo_root)
+    if rc != 0:
+        return "HEAD does not resolve to a commit after bootstrap"
+
+    rc, head_ref, _ = _run_git(["symbolic-ref", "--short", "HEAD"], cwd=repo_root)
+    if rc != 0 or head_ref.strip() != main_branch:
+        return f"HEAD is not on '{main_branch}' after bootstrap (got '{head_ref.strip()}')"
+
+    readme_path = repo_root / "README.md"
+    if not readme_path.exists() or readme_path.stat().st_size == 0:
+        return "README.md does not exist or is empty after bootstrap"
+    rc, ls_out, _ = _run_git(["ls-files", "README.md"], cwd=repo_root)
+    if rc != 0 or "README.md" not in ls_out:
+        return "README.md is not tracked by git after bootstrap"
+
+    rc, status_out, _ = _run_git(
+        ["status", "--porcelain=v1", "--untracked-files=all"], cwd=repo_root
+    )
+    if rc != 0:
+        return "cannot check working tree state after bootstrap"
+    for line in status_out.splitlines():
+        if len(line) < 2:
+            continue
+        xy = line[:2]
+        if xy != "??":
+            return f"working tree has tracked-file dirtiness after bootstrap: {line.strip()}"
+
+    return None
+
+
+def _execute_init_repo_handoff(
+    primary_root: Path,
+    workflow_config: WorkflowUserConfig,
+    *,
+    team_name: str | None,
+    adapter: HarnessAdapter | None,
+    runner: Callable[..., subprocess.CompletedProcess[str]] | None,
+    main_branch: str,
+    readme_title: str,
+    readme_body: str,
+    banner: BannerRenderer,
+    state: ControllerState,
+) -> subprocess.CompletedProcess[str]:
+    team_lead_role = workflow_config.aflow.team_lead
+    if not team_lead_role:
+        raise WorkflowError("lifecycle bootstrap requires [aflow].team_lead to be configured")
+
+    team_lead_selector = resolve_role_selector(
+        team_lead_role, team_name, workflow_config, step_path="lifecycle bootstrap"
+    )
+    resolved = resolve_profile(team_lead_selector, workflow_config, step_path="lifecycle bootstrap")
+
+    user_prompt = _build_init_repo_user_prompt(primary_root, main_branch, readme_title, readme_body)
+
+    init_adapter = adapter or get_adapter(resolved.harness_name)
+    invocation = init_adapter.build_invocation(
+        repo_root=primary_root,
+        model=resolved.model,
+        system_prompt="",
+        user_prompt=user_prompt,
+        effort=resolved.effort,
+    )
+
+    if runner is None:
+        return _run_process(invocation, primary_root, banner, state)
+    return runner(
+        list(invocation.argv),
+        cwd=str(primary_root),
+        env={**os.environ, **invocation.env},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 _MERGE_BUILTIN_INSTRUCTION = "Use the `aflow-merge` skill to merge the feature branch into the target branch."
 
 
@@ -1521,8 +1771,11 @@ def run_workflow(
     if wf.first_step is None:
         raise WorkflowError(f"workflow '{workflow_name}' has no steps")
 
+    repo_state = probe_repo_state(config.repo_root)
+    needs_bootstrap = _lifecycle_is_bootstrap_eligible(wf, repo_state)
     lifecycle_plan = _lifecycle_preflight(
-        config.repo_root, config.plan_path, wf, workflow_config.aflow
+        config.repo_root, config.plan_path, wf, workflow_config.aflow, repo_state,
+        skip_phase_b=needs_bootstrap,
     )
     exec_ctx: ExecutionContext | None = None
 
@@ -1655,6 +1908,55 @@ def run_workflow(
 
     if lifecycle_plan is not None:
         try:
+            if needs_bootstrap:
+                plan_text = original_plan_path.read_text(encoding="utf-8")
+                readme_title, readme_body = derive_readme_content(
+                    plan_text, original_plan_path.stem
+                )
+                bootstrap_result = _execute_init_repo_handoff(
+                    config.repo_root,
+                    workflow_config,
+                    team_name=team_name,
+                    adapter=adapter,
+                    runner=runner,
+                    main_branch=lifecycle_plan.main_branch,
+                    readme_title=readme_title,
+                    readme_body=readme_body,
+                    banner=banner,
+                    state=state,
+                )
+                stop_reason = _detect_stop_marker(
+                    bootstrap_result.stdout, bootstrap_result.stderr
+                )
+                if stop_reason is not None:
+                    raise WorkflowError(
+                        f"lifecycle bootstrap: init-repo agent emitted AFLOW_STOP: {stop_reason}"
+                    )
+                if bootstrap_result.returncode != 0:
+                    raise WorkflowError(
+                        "lifecycle bootstrap: init-repo agent failed with exit code "
+                        f"{bootstrap_result.returncode}"
+                    )
+                verify_failure = _verify_init_repo_success(
+                    config.repo_root, lifecycle_plan.main_branch
+                )
+                if verify_failure:
+                    raise WorkflowError(
+                        f"lifecycle bootstrap verification failed: {verify_failure}"
+                    )
+                print(
+                    f"aflow: lifecycle bootstrap succeeded at '{config.repo_root}' "
+                    f"on branch '{lifecycle_plan.main_branch}'",
+                    file=sys.stderr,
+                )
+                _lifecycle_preflight_git(
+                    config.repo_root,
+                    lifecycle_plan.main_branch,
+                    lifecycle_plan.feature_branch,
+                    "worktree" in (wf.setup or ()),
+                    lifecycle_plan.worktree_path,
+                    allow_untracked=True,
+                )
             exec_ctx = _do_lifecycle_setup(config.repo_root, lifecycle_plan)
             _sync_plan_branch_for_execution(original_plan_path, exec_ctx)
         except WorkflowError as exc:

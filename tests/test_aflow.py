@@ -15,7 +15,7 @@ from contextlib import redirect_stderr
 from importlib import resources
 from unittest.mock import patch
 from aflow.config import AflowSection, ConfigError, GoTransition, HarnessProfileConfig, WorkflowConfig, WorkflowHarnessConfig, WorkflowStepConfig, WorkflowUserConfig, bootstrap_config, find_placeholders, load_workflow_config, validate_workflow_config
-from aflow.workflow import WorkflowError, _backup_original_plan, evaluate_condition, generate_new_plan_path, move_completed_plan_to_done, pick_transition, render_prompt, render_step_prompts, resolve_profile, resolve_role_selector, run_workflow
+from aflow.workflow import WorkflowError, _backup_original_plan, derive_readme_content, evaluate_condition, generate_new_plan_path, move_completed_plan_to_done, pick_transition, render_prompt, render_step_prompts, resolve_profile, resolve_role_selector, run_workflow
 from aflow.cli import _confirm_startup_recovery, _maybe_move_completed_plan_to_done, _parse_run_args, _pick_workflow_step, _resolve_run_arguments, build_parser, main, RUN_HELP
 from aflow.harnesses.claude import ClaudeAdapter
 from aflow.harnesses.codex import CodexAdapter
@@ -2075,13 +2075,13 @@ class WorkflowConfigTests(unittest.TestCase):
         assert 'teardown' in readme
         assert 'merge_prompt' in readme
         assert 'aflow-merge' in readme
-        assert 'seven bundled skills' in readme
+        assert 'eight bundled skills' in readme
 
         assert 'team_lead' in architecture
         assert 'worktree_root' in architecture
         assert 'ExecutionContext' in architecture
         assert 'aflow-merge' in architecture
-        assert 'seven' in architecture
+        assert 'eight' in architecture
 
         # lifecycle defaults table is documented in workflows.toml
         assert '[workflow]' in workflows_text
@@ -4932,6 +4932,68 @@ class GitStatusTests(unittest.TestCase):
         assert len(non_plan_paths) == 0
 
 
+class RepoStateProbeTests(unittest.TestCase):
+
+    def setUp(self) -> None:
+        from aflow.git_status import probe_repo_state, RepoState
+        self._probe_repo_state = probe_repo_state
+        self._RepoState = RepoState
+
+    def test_probe_repo_state_not_a_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            result = self._probe_repo_state(repo)
+            assert result == self._RepoState.NOT_A_REPO
+
+    def test_probe_repo_state_unborn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(
+                ['git', 'init', '-b', 'main'], cwd=str(repo), check=True, capture_output=True
+            )
+            result = self._probe_repo_state(repo)
+            assert result == self._RepoState.UNBORN
+
+    def test_probe_repo_state_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _make_git_repo(repo)
+            result = self._probe_repo_state(repo)
+            assert result == self._RepoState.READY
+
+    def test_probe_repo_state_no_git_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            with patch('aflow.git_status.shutil.which', return_value=None):
+                result = self._probe_repo_state(repo)
+            assert result == self._RepoState.NO_GIT_BINARY
+
+    def test_probe_repo_state_file_not_found_is_no_git_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            with patch('subprocess.run', side_effect=FileNotFoundError):
+                result = self._probe_repo_state(repo)
+            assert result == self._RepoState.NO_GIT_BINARY
+
+    def test_preflight_still_fails_when_committed_repo_main_branch_missing(self) -> None:
+        """Committed repos with a missing main_branch must still fail after the split."""
+        from aflow.workflow import run_workflow, WorkflowError
+        from aflow.run_state import ControllerConfig
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            _git_commit_file(repo_root, plan_path)
+            wf_config = _make_branch_only_wf_config(main_branch='nonexistent')
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=1),
+                    wf_config, 'branch_wf', config_dir=repo_root,
+                )
+            assert 'nonexistent' in str(ctx.value)
+
+
 class GitBannerTests(unittest.TestCase):
 
     def test_build_banner_renders_git_row_when_clean(self) -> None:
@@ -6143,7 +6205,7 @@ def _make_worktree_no_merge_wf_config(
 
 class WorkflowLifecycleRuntimeTests(unittest.TestCase):
 
-    def test_preflight_fails_when_main_branch_has_no_commits_yet(self) -> None:
+    def test_bootstrap_succeeds_for_unborn_main_branch_repo(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = Path(tmpdir)
             subprocess.run(['git', 'init', '-b', 'main'], cwd=str(repo_root), check=True, capture_output=True)
@@ -6152,15 +6214,32 @@ class WorkflowLifecycleRuntimeTests(unittest.TestCase):
             plan_path = repo_root / 'plan.md'
             _write_plan(plan_path, _VALID_PLAN)
             wf_config = _make_branch_only_wf_config(main_branch='main')
-            with pytest.raises(WorkflowError) as ctx:
-                run_workflow(
-                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=1),
-                    wf_config, 'branch_wf', config_dir=repo_root,
-                )
-            message = str(ctx.value)
-            assert "branch 'main'" in message
-            assert 'no commits yet' in message
-            assert 'initial commit' in message
+            call_count: list[int] = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                cwd = Path(kwargs['cwd'])
+                if call_count[0] == 1:
+                    (cwd / 'README.md').write_text('# Plan\n\nBootstrapped.\n', encoding='utf-8')
+                    subprocess.run(['git', 'add', 'README.md'], cwd=str(cwd), check=True, capture_output=True)
+                    subprocess.run(['git', 'commit', '-m', 'Initial commit'], cwd=str(cwd), check=True, capture_output=True)
+                    return subprocess.CompletedProcess(argv, 0, 'bootstrap ok', '')
+                elif call_count[0] == 2:
+                    _write_plan(plan_path, _COMPLETE_PLAN)
+                    _run_git_in_test(['add', str(plan_path)], cwd=cwd)
+                    _run_git_in_test(['commit', '-m', 'complete'], cwd=cwd)
+                    return subprocess.CompletedProcess(argv, 0, 'ok', '')
+                else:
+                    _git_merge_feature_into_main(cwd, 'main')
+                    return subprocess.CompletedProcess(argv, 0, 'merged', '')
+
+            result = run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                wf_config, 'branch_wf', config_dir=repo_root,
+                adapter=CodexAdapter(), runner=runner,
+            )
+            assert call_count[0] >= 2
+            assert result.final_snapshot.is_complete
 
     def test_preflight_fails_when_not_on_main_branch(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -7196,6 +7275,366 @@ class WorkflowMergeHandoffTests(unittest.TestCase):
                     adapter=CodexAdapter(), runner=runner,
                 )
             assert 'AFLOW_STOP' in str(ctx.value) or 'ambiguous' in str(ctx.value)
+
+
+class ReadmeDerivationTests(unittest.TestCase):
+    """Unit tests for derive_readme_content — pure function, no git or file I/O."""
+
+    def test_readme_derivation_summary_section_extracted(self) -> None:
+        plan = textwrap.dedent("""\
+            # My Feature
+
+            ## Summary
+
+            This is a summary of what the feature does.
+            It spans multiple lines.
+
+            ## Git Tracking
+
+            - Branch: main
+
+            ### [ ] Checkpoint 1: First
+            - [ ] do thing
+        """)
+        title, body = derive_readme_content(plan, "my-feature")
+        assert title == "My Feature"
+        assert "This is a summary of what the feature does." in body
+        assert "spans multiple lines" in body
+        assert "Git Tracking" not in body
+        assert "Checkpoint" not in body
+
+    def test_readme_derivation_falls_back_to_prose_paragraph(self) -> None:
+        plan = textwrap.dedent("""\
+            # My Feature
+
+            This is a prose description of the feature.
+            It continues here.
+
+            - list item one
+            - list item two
+
+            ### [ ] Checkpoint 1: First
+            - [ ] step
+        """)
+        title, body = derive_readme_content(plan, "my-feature")
+        assert title == "My Feature"
+        assert "prose description" in body
+        assert "list item" not in body
+
+    def test_readme_derivation_uses_fallback_sentence_for_structured_only(self) -> None:
+        plan = textwrap.dedent("""\
+            # My Feature
+
+            - only list items here
+            - no prose paragraph
+
+            ### [ ] Checkpoint 1: First
+            - [ ] step
+        """)
+        title, body = derive_readme_content(plan, "my-feature")
+        assert title == "My Feature"
+        assert 'being initialized from the aflow plan "My Feature"' in body
+
+    def test_readme_derivation_humanizes_stem_when_no_h1(self) -> None:
+        plan = textwrap.dedent("""\
+            ## Summary
+
+            A summary without a top-level heading.
+        """)
+        title, body = derive_readme_content(plan, "my-cool-feature")
+        assert title == "My Cool Feature"
+        assert "A summary without a top-level heading." in body
+
+    def test_readme_derivation_skips_fenced_code_blocks(self) -> None:
+        plan = textwrap.dedent("""\
+            # My Feature
+
+            ```
+            This looks like prose but is inside a fence.
+            It should be skipped.
+            ```
+
+            Actual prose paragraph here.
+
+            ### [ ] Checkpoint 1: First
+            - [ ] step
+        """)
+        title, body = derive_readme_content(plan, "my-feature")
+        assert title == "My Feature"
+        assert "Actual prose paragraph here." in body
+        assert "looks like prose but is inside a fence" not in body
+
+    def test_readme_derivation_skips_git_tracking_section(self) -> None:
+        plan = textwrap.dedent("""\
+            # My Feature
+
+            ## Git Tracking
+
+            Tracking info that should not appear in README.
+
+            ## Another Section
+
+            Real prose here that should be used.
+
+            ### [ ] Checkpoint 1: First
+            - [ ] step
+        """)
+        title, body = derive_readme_content(plan, "my-feature")
+        assert "Tracking info" not in body
+        assert "Real prose here" in body
+
+    def test_readme_derivation_skips_critical_invariants_section(self) -> None:
+        plan = textwrap.dedent("""\
+            # My Feature
+
+            ## Critical Invariants
+
+            Must not appear in README.
+
+            ## Overview
+
+            This is the actual description.
+        """)
+        title, body = derive_readme_content(plan, "my-feature")
+        assert "Must not appear" not in body
+        assert "actual description" in body
+
+    def test_readme_derivation_empty_summary_falls_back_to_prose(self) -> None:
+        plan = textwrap.dedent("""\
+            # My Feature
+
+            ## Summary
+
+            ## Overview
+
+            This prose appears after an empty summary section.
+        """)
+        title, body = derive_readme_content(plan, "my-feature")
+        assert "This prose appears" in body
+
+
+def _make_unborn_git_repo(path: Path, branch: str = 'main') -> None:
+    """Initialize a git repo with NO commits (unborn HEAD)."""
+    subprocess.run(['git', 'init', '-b', branch], cwd=str(path), check=True, capture_output=True)
+    subprocess.run(['git', 'config', 'user.email', 'test@test.com'], cwd=str(path), check=True, capture_output=True)
+    subprocess.run(['git', 'config', 'user.name', 'Test'], cwd=str(path), check=True, capture_output=True)
+
+
+class LifecycleBootstrapTests(unittest.TestCase):
+    """Runtime tests for the team-lead repo-init bootstrap handoff."""
+
+    def test_init_repo_handoff_invoked_for_no_git_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = _make_branch_only_wf_config(main_branch='main')
+            call_count: list[int] = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                cwd = Path(kwargs['cwd'])
+                if call_count[0] == 1:
+                    subprocess.run(['git', 'init', '-b', 'main'], cwd=str(cwd), check=True, capture_output=True)
+                    subprocess.run(['git', 'config', 'user.email', 'test@test.com'], cwd=str(cwd), check=True, capture_output=True)
+                    subprocess.run(['git', 'config', 'user.name', 'Test'], cwd=str(cwd), check=True, capture_output=True)
+                    (cwd / 'README.md').write_text('# Plan\n\nBootstrapped.\n', encoding='utf-8')
+                    subprocess.run(['git', 'add', 'README.md'], cwd=str(cwd), check=True, capture_output=True)
+                    subprocess.run(['git', 'commit', '-m', 'Initial commit'], cwd=str(cwd), check=True, capture_output=True)
+                    return subprocess.CompletedProcess(argv, 0, 'bootstrap ok', '')
+                elif call_count[0] == 2:
+                    _write_plan(plan_path, _COMPLETE_PLAN)
+                    _run_git_in_test(['add', str(plan_path)], cwd=cwd)
+                    _run_git_in_test(['commit', '-m', 'complete'], cwd=cwd)
+                    return subprocess.CompletedProcess(argv, 0, 'ok', '')
+                else:
+                    _git_merge_feature_into_main(cwd, 'main')
+                    return subprocess.CompletedProcess(argv, 0, 'merged', '')
+
+            result = run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                wf_config, 'branch_wf', config_dir=repo_root,
+                adapter=CodexAdapter(), runner=runner,
+            )
+            assert call_count[0] >= 2, 'at least init + workflow step should be called'
+            assert result.final_snapshot.is_complete
+
+    def test_init_repo_handoff_for_unborn_repo_on_mismatched_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            _make_unborn_git_repo(repo_root, branch='other-branch')
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = _make_branch_only_wf_config(main_branch='main')
+            call_count: list[int] = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                cwd = Path(kwargs['cwd'])
+                if call_count[0] == 1:
+                    subprocess.run(['git', 'symbolic-ref', 'HEAD', 'refs/heads/main'], cwd=str(cwd), check=True, capture_output=True)
+                    (cwd / 'README.md').write_text('# Plan\n\nBootstrapped.\n', encoding='utf-8')
+                    subprocess.run(['git', 'add', 'README.md'], cwd=str(cwd), check=True, capture_output=True)
+                    subprocess.run(['git', 'commit', '-m', 'Initial commit'], cwd=str(cwd), check=True, capture_output=True)
+                    return subprocess.CompletedProcess(argv, 0, 'bootstrap ok', '')
+                elif call_count[0] == 2:
+                    _write_plan(plan_path, _COMPLETE_PLAN)
+                    _run_git_in_test(['add', str(plan_path)], cwd=cwd)
+                    _run_git_in_test(['commit', '-m', 'complete'], cwd=cwd)
+                    return subprocess.CompletedProcess(argv, 0, 'ok', '')
+                else:
+                    _git_merge_feature_into_main(cwd, 'main')
+                    return subprocess.CompletedProcess(argv, 0, 'merged', '')
+
+            result = run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                wf_config, 'branch_wf', config_dir=repo_root,
+                adapter=CodexAdapter(), runner=runner,
+            )
+            assert call_count[0] >= 2
+            assert result.final_snapshot.is_complete
+            rc, branch, _ = _run_git_in_test(['rev-parse', '--abbrev-ref', 'HEAD'], cwd=repo_root)
+            assert branch == 'main'
+
+    def test_team_lead_resolved_through_team_override_for_init_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = WorkflowUserConfig(
+                aflow=AflowSection(team_lead='senior_architect'),
+                roles={
+                    'architect': 'codex.default',
+                    'senior_architect': 'codex.default',
+                },
+                teams={
+                    'elite': {'senior_architect': 'codex.override'},
+                },
+                harnesses={'codex': WorkflowHarnessConfig(profiles={
+                    'default': HarnessProfileConfig(model='m'),
+                    'override': HarnessProfileConfig(model='override-model'),
+                })},
+                workflows={'branch_wf': WorkflowConfig(
+                    steps={'impl': WorkflowStepConfig(
+                        role='architect',
+                        prompts=('p',),
+                        go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='impl')),
+                    )},
+                    first_step='impl',
+                    setup=('branch',),
+                    teardown=('merge',),
+                    main_branch='main',
+                    team='elite',
+                )},
+                prompts={'p': 'Work from {ACTIVE_PLAN_PATH}.'},
+            )
+            call_count: list[int] = [0]
+            bootstrap_invocation_model: list[str] = []
+
+            class TrackingAdapter:
+                name = 'codex'
+                supports_effort = True
+
+                def build_invocation(self, *, repo_root, model, system_prompt, user_prompt, effort=None):
+                    if call_count[0] == 0:
+                        bootstrap_invocation_model.append(model or '')
+                    from aflow.harnesses.codex import CodexAdapter as CA
+                    return CA().build_invocation(
+                        repo_root=repo_root, model=model,
+                        system_prompt=system_prompt, user_prompt=user_prompt, effort=effort,
+                    )
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                cwd = Path(kwargs['cwd'])
+                if call_count[0] == 1:
+                    subprocess.run(['git', 'init', '-b', 'main'], cwd=str(cwd), check=True, capture_output=True)
+                    subprocess.run(['git', 'config', 'user.email', 'test@test.com'], cwd=str(cwd), check=True, capture_output=True)
+                    subprocess.run(['git', 'config', 'user.name', 'Test'], cwd=str(cwd), check=True, capture_output=True)
+                    (cwd / 'README.md').write_text('# Plan\n\nBootstrapped.\n', encoding='utf-8')
+                    subprocess.run(['git', 'add', 'README.md'], cwd=str(cwd), check=True, capture_output=True)
+                    subprocess.run(['git', 'commit', '-m', 'Initial commit'], cwd=str(cwd), check=True, capture_output=True)
+                    return subprocess.CompletedProcess(argv, 0, 'bootstrap ok', '')
+                elif call_count[0] == 2:
+                    _write_plan(plan_path, _COMPLETE_PLAN)
+                    _run_git_in_test(['add', str(plan_path)], cwd=cwd)
+                    _run_git_in_test(['commit', '-m', 'complete'], cwd=cwd)
+                    return subprocess.CompletedProcess(argv, 0, 'ok', '')
+                else:
+                    _git_merge_feature_into_main(cwd, 'main')
+                    return subprocess.CompletedProcess(argv, 0, 'merged', '')
+
+            run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                wf_config, 'branch_wf', config_dir=repo_root,
+                adapter=TrackingAdapter(), runner=runner,
+            )
+            assert bootstrap_invocation_model, 'bootstrap agent build_invocation was not called'
+            assert bootstrap_invocation_model[0] == 'override-model'
+
+    def test_init_repo_AFLOW_STOP_fails_without_creating_feature_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = _make_branch_only_wf_config(main_branch='main')
+            call_count: list[int] = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                return subprocess.CompletedProcess(argv, 0, 'AFLOW_STOP: repo init failed', '')
+
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                    wf_config, 'branch_wf', config_dir=repo_root,
+                    adapter=CodexAdapter(), runner=runner,
+                )
+            assert 'AFLOW_STOP' in str(ctx.value) or 'repo init failed' in str(ctx.value)
+            assert call_count[0] == 1, 'only init call should be made; no feature branch creation'
+            rc, branches, _ = _run_git_in_test(['branch', '--list', 'aflow-*'], cwd=repo_root)
+            assert not branches.strip(), 'no feature branch should be created after bootstrap AFLOW_STOP'
+
+    def test_git_missing_lifecycle_fails_with_clear_bootstrap_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = _make_branch_only_wf_config(main_branch='main')
+
+            with patch('aflow.git_status.shutil.which', return_value=None):
+                with pytest.raises(WorkflowError) as ctx:
+                    run_workflow(
+                        ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=1),
+                        wf_config, 'branch_wf', config_dir=repo_root,
+                    )
+            assert 'git' in str(ctx.value).lower()
+            assert 'install' in str(ctx.value).lower() or 'installed' in str(ctx.value).lower() or 'PATH' in str(ctx.value)
+
+    def test_non_lifecycle_workflow_in_no_git_dir_does_not_trigger_bootstrap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _COMPLETE_PLAN)
+            wf_config = WorkflowUserConfig(
+                roles={'architect': 'codex.default'},
+                harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='m')})},
+                workflows={'simple': WorkflowConfig(
+                    steps={'impl': WorkflowStepConfig(
+                        role='architect',
+                        prompts=('p',),
+                        go=(GoTransition(to='END'),),
+                    )},
+                    first_step='impl',
+                )},
+                prompts={'p': 'Work.'},
+            )
+            result = run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=1),
+                wf_config, 'simple', config_dir=repo_root,
+            )
+            assert result.end_reason == 'already_complete'
+            assert not (repo_root / '.git').exists(), 'no git repo should be initialized for non-lifecycle workflows'
 
 
 if __name__ == '__main__':

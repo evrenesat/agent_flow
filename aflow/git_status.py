@@ -1,10 +1,63 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
+
+
+class RepoState(Enum):
+    """Lifecycle-startup classification of the git state at a given path."""
+    NO_GIT_BINARY = "no_git_binary"
+    NOT_A_REPO = "not_a_repo"
+    UNBORN = "unborn"
+    READY = "ready"
+
+
+def probe_repo_state(repo_root: Path) -> RepoState:
+    """Classify git state at repo_root without side effects.
+
+    Returns one of:
+    - NO_GIT_BINARY: git binary not found or not executable
+    - NOT_A_REPO: path exists but is not inside any git repository
+    - UNBORN: git repo exists but has no commits yet (unborn HEAD)
+    - READY: git repo exists and has at least one commit
+    """
+    if shutil.which("git") is None:
+        return RepoState.NO_GIT_BINARY
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (OSError, FileNotFoundError):
+        return RepoState.NO_GIT_BINARY
+
+    if result.returncode != 0:
+        return RepoState.NOT_A_REPO
+
+    try:
+        head_result = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (OSError, FileNotFoundError):
+        return RepoState.NO_GIT_BINARY
+
+    if head_result.returncode != 0:
+        return RepoState.UNBORN
+
+    return RepoState.READY
 
 
 @dataclass(frozen=True)

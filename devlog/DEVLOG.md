@@ -1,3 +1,39 @@
+## 2026-04-06 — Auto-bootstrap empty repos from plan preamble
+
+### What changed
+
+- **Repo-state detection** — `aflow/git_status.py` gained `RepoState` (enum: `NO_GIT_BINARY`, `NOT_A_REPO`, `UNBORN`, `READY`) and `probe_repo_state(repo_root)` to classify the git state at startup without side effects. The lifecycle engine uses this before any preflight to decide whether bootstrap is needed.
+
+- **Team-lead bootstrap handoff** — When a lifecycle workflow starts against a directory with no `.git/` or a repo with no commits, `run_workflow()` now invokes a bootstrap handoff before git-dependent preflight. The handoff reuses the same `[aflow].team_lead` resolution path as merge teardown. The agent is given the built-in `aflow-init-repo` skill instruction plus a derived `README.md` title and body, and runs from the primary checkout.
+
+- **Deterministic README derivation** — `derive_readme_content(plan_text, file_stem)` extracts the README title from the first `# ...` heading (falling back to a humanized file stem) and the body from the `## Summary` section if present, otherwise the first prose paragraph after the title and before any checkpoint heading. Fenced code blocks, `## Git Tracking`, `## Done Means`, `## Critical Invariants`, and `## Forbidden` sections are skipped. If no usable paragraph is found, the fallback body is a single sentence naming the plan title.
+
+- **Post-bootstrap verification** — After the init-repo agent returns, the engine checks: `HEAD` resolves to a commit, `HEAD` is on `main_branch`, `README.md` exists and is git-tracked, and the working tree has no tracked-file dirtiness. Untracked files from the pre-existing directory contents are acceptable. Only after all checks pass does normal lifecycle preflight and branch/worktree setup continue.
+
+- **Removed obsolete unborn-branch guard** — The `_lifecycle_preflight_git` function no longer contains the "no commits yet; create an initial commit" error. That code path is now unreachable because bootstrap handles unborn repos before git-dependent preflight runs.
+
+- **New bundled skill** — `aflow/bundled_skills/aflow-init-repo/SKILL.md` contains the contract for the bootstrap agent: initialize git if needed, repoint HEAD to `main_branch` if on a different unborn branch, write the provided `README.md`, stage only that file, commit with `Initial commit`, and emit `AFLOW_STOP:` on any ambiguity.
+
+- **Documentation** — `README.md` now describes auto-bootstrap in the lifecycle startup section. `ARCHITECTURE.md` describes the new startup order: detect repo state, optionally bootstrap via team lead, then run normal lifecycle preflight and setup.
+
+### Why
+
+- Lifecycle workflows previously required the target repo to already have at least one commit. This was a friction point for new-project bootstrapping from a plan file, since users had to manually `git init` and commit before invoking `aflow`.
+- The bootstrap reuses the team-lead agent rather than generating the initial commit inside engine code, which keeps the commit subject to the same model-driven process and avoids hardcoded README content.
+
+### Gotchas
+
+- **Bootstrap is local-only.** No remotes are added, no `git push` is performed. The initial commit exists only in the local repo.
+- **Only `README.md` is committed.** Pre-existing files in the target directory are not staged or committed as part of bootstrap. The initial commit is minimal.
+- **Committed repos are not affected.** Auto-bootstrap runs only when there are zero commits. A repo with even one commit goes through the normal preflight path without any bootstrap attempt.
+- **Non-lifecycle workflows skip bootstrap.** Workflows with an empty `setup` do not trigger bootstrap and behave exactly as before, even if the working directory has no `.git/`.
+- **If git is missing, lifecycle workflows fail early** with a clear error that does not mention remotes or network setup.
+
+### Limits
+
+- README derivation uses only the plan preamble (title + Summary section or first prose paragraph). Checkpoint content, step lists, and later sections are not parsed.
+- No new configuration keys were introduced. Bootstrap uses the existing `[aflow].team_lead` and `main_branch` settings.
+
 ## 2026-04-05 — Explicit run flags and numeric start-step support
 
 ### What changed
