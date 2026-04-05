@@ -3022,7 +3022,7 @@ class WorkflowArtifactTests(unittest.TestCase):
             assert (turn_dir / 'stdout.txt').read_text(encoding='utf-8') == 'bad'
             assert (turn_dir / 'stderr.txt').read_text(encoding='utf-8') == 'err'
 
-    def test_run_workflow_accepts_completed_plan_moved_to_done(self) -> None:
+    def test_run_workflow_moves_completed_plan_to_done_on_terminal_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = Path(tmpdir)
             config_dir = repo_root
@@ -3045,8 +3045,6 @@ class WorkflowArtifactTests(unittest.TestCase):
 
             def runner(argv, **kwargs):
                 _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n\n### [x] Checkpoint 2: Review\n- [x] reviewer step\n')
-                moved_path = move_completed_plan_to_done(repo_root, plan_path)
-                assert moved_path.resolve() == (repo_root / 'plans' / 'done' / 'plan.md').resolve()
                 return subprocess.CompletedProcess(argv, 0, 'approved', '')
 
             result = run_workflow(
@@ -3066,13 +3064,62 @@ class WorkflowArtifactTests(unittest.TestCase):
             assert result.turns_completed == 1
             assert result.end_reason == 'transition_end'
             assert result.final_snapshot.is_complete is True
+            done_path = repo_root / 'plans' / 'done' / 'plan.md'
+            assert done_path.is_file()
+            assert not plan_path.exists()
             run_json = json.loads((result.run_dir / 'run.json').read_text(encoding='utf-8'))
             assert run_json['status'] == 'completed'
-            assert Path(run_json['original_plan_path']).resolve() == (repo_root / 'plans' / 'done' / 'plan.md').resolve()
+            assert Path(run_json['original_plan_path']).resolve() == done_path.resolve()
             turn_result = json.loads((result.run_dir / 'turns' / 'turn-001' / 'result.json').read_text(encoding='utf-8'))
             assert turn_result['status'] == 'completed'
-            assert Path(turn_result['original_plan_path']).resolve() == (repo_root / 'plans' / 'done' / 'plan.md').resolve()
-            assert Path(turn_result['active_plan_path']).resolve() == (repo_root / 'plans' / 'done' / 'plan.md').resolve()
+            assert Path(turn_result['original_plan_path']).resolve() == plan_path.resolve()
+            assert Path(turn_result['active_plan_path']).resolve() == plan_path.resolve()
+
+    def test_run_workflow_rejects_agent_moving_original_plan_mid_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            config_dir = repo_root
+            plan_path = repo_root / 'plans' / 'in-progress' / 'plan.md'
+            plan_path.parent.mkdir(parents=True, exist_ok=True)
+            _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n\n### [ ] Checkpoint 2: Review\n- [ ] reviewer step\n')
+            wf_config = WorkflowUserConfig(
+                roles={'reviewer': 'codex.default'},
+                harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})},
+                workflows={'simple': WorkflowConfig(
+                    steps={'review_implementation': WorkflowStepConfig(
+                        role='reviewer',
+                        prompts=('p',),
+                        go=(GoTransition(to='END'),),
+                    )},
+                    first_step='review_implementation',
+                )},
+                prompts={'p': 'Review.'},
+            )
+
+            def runner(argv, **kwargs):
+                _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n\n### [x] Checkpoint 2: Review\n- [x] reviewer step\n')
+                move_completed_plan_to_done(repo_root, plan_path)
+                return subprocess.CompletedProcess(argv, 0, 'approved', '')
+
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(
+                    ControllerConfig(
+                        repo_root=repo_root,
+                        plan_path=plan_path,
+                        max_turns=2,
+                        start_step='review_implementation',
+                    ),
+                    wf_config,
+                    'simple',
+                    config_dir=config_dir,
+                    adapter=CodexAdapter(),
+                    runner=runner,
+                )
+
+            assert 'workflow-owned finalization requires agents to keep the original plan under plans/in-progress until terminal success' in str(ctx.value)
+            run_dirs = sorted((repo_root / '.aflow' / 'runs').iterdir())
+            run_json = json.loads((run_dirs[0] / 'run.json').read_text(encoding='utf-8'))
+            assert run_json['status'] == 'failed'
 
     def test_run_json_records_workflow_step_on_active_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3657,6 +3704,15 @@ class SkillDocsTests(unittest.TestCase):
         for step_name, step in wf.steps.items():
             assert step.go[0].to == 'END', f"step {step_name} first transition must be END"
             assert step.go[0].when == 'MAX_TURNS_REACHED', f"step {step_name} first transition must be MAX_TURNS_REACHED"
+        assert wf.steps['implement_plan'].prompts == ('implementation_plans', 'cp_loop_implementation')
+
+    def test_bundled_skills_leave_original_plan_finalization_to_engine(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        review_text = (repo_root / 'aflow' / 'bundled_skills' / 'aflow-review-squash' / 'SKILL.md').read_text(encoding='utf-8')
+        plan_text = (repo_root / 'aflow' / 'bundled_skills' / 'aflow-plan' / 'SKILL.md').read_text(encoding='utf-8')
+        assert 'workflow engine finalizes the original plan location after terminal success' in review_text
+        assert 'move that original plan to `plans/done/`' not in review_text
+        assert 'workflow engine owns the final move to `plans/done/`' in plan_text
 
     def test_bundled_config_review_implement_cp_review_max_turns_transitions(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
@@ -5618,7 +5674,8 @@ class WorkflowLifecycleRuntimeTests(unittest.TestCase):
                 adapter=CodexAdapter(), runner=runner,
             )
 
-            primary_text = plan_path.read_text(encoding='utf-8')
+            done_path = repo_root / 'plans' / 'done' / 'plan.md'
+            primary_text = done_path.read_text(encoding='utf-8')
             assert '- Plan Branch: `main`' not in primary_text
 
     def test_worktree_syncs_original_plan_back_after_successful_turn(self) -> None:
@@ -5658,7 +5715,8 @@ class WorkflowLifecycleRuntimeTests(unittest.TestCase):
             )
 
             assert call_count[0] == 2
-            assert marker in plan_path.read_text(encoding='utf-8')
+            done_path = repo_root / 'plans' / 'done' / 'plan.md'
+            assert marker in done_path.read_text(encoding='utf-8')
 
     def test_worktree_merge_restores_untracked_original_plan_after_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -5701,7 +5759,8 @@ class WorkflowLifecycleRuntimeTests(unittest.TestCase):
             )
 
             assert call_count[0] == 2
-            assert marker in plan_path.read_text(encoding='utf-8')
+            done_path = repo_root / 'plans' / 'done' / 'plan.md'
+            assert marker in done_path.read_text(encoding='utf-8')
 
     def test_worktree_merge_preserves_tracked_original_plan_sync_after_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -5740,7 +5799,8 @@ class WorkflowLifecycleRuntimeTests(unittest.TestCase):
             )
 
             assert call_count[0] == 2
-            assert marker in plan_path.read_text(encoding='utf-8')
+            done_path = repo_root / 'plans' / 'done' / 'plan.md'
+            assert marker in done_path.read_text(encoding='utf-8')
 
     def test_worktree_syncs_plan_back_even_on_harness_failure(self) -> None:
         """Verify plan edits are synced back from worktree even when harness returns non-zero."""

@@ -217,7 +217,6 @@ def render_prompt(
                     f"Work only on Checkpoint #{checkpoint_index}. "
                     "Do not repeat earlier checkpoints, and do not skip ahead."
                 )
-
     prompt_text = prompt_text.replace("{ORIGINAL_PLAN_PATH}", str(original_plan_path))
     prompt_text = prompt_text.replace("{NEW_PLAN_PATH}", str(new_plan_path))
     prompt_text = prompt_text.replace("{ACTIVE_PLAN_PATH}", str(active_plan_path))
@@ -432,6 +431,20 @@ def move_completed_plan_to_done(repo_root: Path, plan_path: Path) -> Path:
     return done_plan_path
 
 
+def _finalize_original_plan_if_complete(
+    repo_root: Path,
+    original_plan_path: Path,
+    *,
+    snapshot: PlanSnapshot,
+) -> Path:
+    if not snapshot.is_complete:
+        return original_plan_path
+    done_plan_path = _done_plan_path(repo_root, original_plan_path)
+    if done_plan_path is None:
+        return original_plan_path
+    return move_completed_plan_to_done(repo_root, original_plan_path)
+
+
 def _resolve_post_turn_original_plan_path(
     repo_root: Path,
     original_plan_path: Path,
@@ -444,10 +457,11 @@ def _resolve_post_turn_original_plan_path(
         raise FileNotFoundError(
             f"{original_plan_path}: plan file does not exist"
         )
-    done_plan_path = _done_plan_path(repo_root, original_plan_path)
-    if done_plan_path is not None and done_plan_path.is_file():
-        return done_plan_path
-    raise FileNotFoundError(f"{original_plan_path}: plan file does not exist")
+    raise FileNotFoundError(
+        f"{original_plan_path}: original plan file is missing after the turn; "
+        "workflow-owned finalization requires agents to keep the original plan "
+        "under plans/in-progress until terminal success"
+    )
 
 
 def _evaluate_condition_token(
@@ -1476,6 +1490,16 @@ def run_workflow(
 
     done = original_snapshot.is_complete
     if done:
+        prior_original_plan_path = original_plan_path
+        finalized_original_plan_path = _finalize_original_plan_if_complete(
+            config.repo_root,
+            original_plan_path,
+            snapshot=original_snapshot,
+        )
+        if finalized_original_plan_path != prior_original_plan_path:
+            original_plan_path = finalized_original_plan_path
+            if active_plan_path == prior_original_plan_path:
+                active_plan_path = original_plan_path
         end_reason = _normalize_end_reason(already_complete=True)
         state.end_reason = end_reason
         state.status_message = "completed"
@@ -2212,6 +2236,17 @@ def run_workflow(
                 prune_old_runs(run_paths.runs_root, config.keep_runs)
                 banner.stop(state)
                 raise WorkflowError(summary, run_dir=run_paths.run_dir)
+
+            prior_original_plan_path = original_plan_path
+            finalized_original_plan_path = _finalize_original_plan_if_complete(
+                config.repo_root,
+                original_plan_path,
+                snapshot=post_snapshot,
+            )
+            if finalized_original_plan_path != prior_original_plan_path:
+                original_plan_path = finalized_original_plan_path
+                if active_plan_path == prior_original_plan_path:
+                    active_plan_path = original_plan_path
 
             state.status_message = "completed"
             result = ControllerRunResult(

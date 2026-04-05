@@ -248,4 +248,4 @@ Rules:
 5. Exception: allow overwrite only when the target file was created by the assistant in the same session.
 6. If a same-name file already exists from a prior session, create a new variant name such as `-v2`, `-v3`, or a date suffix.
 7. Architect or reviewer workflows must delete superseded fix plans whenever a newer fix plan is created, and must delete any remaining fix plans once a checkpoint is accepted so that only the original handoff plan remains in `plans/in-progress/` before the next normal checkpoint starts.
-8. When every checkpoint is complete, move the original handoff plan to `plans/done/`. Create `plans/done/` if it does not exist, and include the moved plan path in the final response.
+8. When every checkpoint is complete, leave the original handoff plan in `plans/in-progress/`. The workflow engine owns the final move to `plans/done/`.

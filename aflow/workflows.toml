@@ -38,7 +38,7 @@ go = [
 
 [workflow.review_implement_review.steps.implement_plan]
 role = "worker"
-prompts = ["cp_loop_implementation"]
+prompts = ["implementation_plans", "cp_loop_implementation"]
 go = [
   { to = "END", when = "MAX_TURNS_REACHED" },
   { to = "review_implementation", when = "DONE" },

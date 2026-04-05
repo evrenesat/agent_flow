@@ -73,7 +73,7 @@ If the accumulated work looks correct:
 5. Use a non-interactive workflow. Prefer `git reset --soft <squash-base>` followed by a new commit over interactive rebase.
 6. Write a fresh final commit message that covers the full accumulated scope of the handoff.
 7. If `DEVLOG.md` exists and multiple handoff-related entries were added or updated during the handoff, compact them to one entry that matches the final squashed change.
-8. If the original plan's checkpoints are all complete, move that original plan to `plans/done/`, include it in the final commit, and mention the moved plan path in the final response. Create `plans/done/` first if it does not exist.
+8. If the original plan's checkpoints are all complete, leave the original plan in `plans/in-progress/`. The workflow engine finalizes the original plan location after terminal success.
 9. Treat dirty changes in plan files that are intentionally part of the final handoff state as part of finalization, not as unrelated worktree noise. Still stop if truly unrelated dirty changes remain and make the squash ambiguous.
 
 ## Rejection Path
@@ -110,7 +110,7 @@ Before finishing, verify:
 - the reported commit counts match git history
 - after approval, the branch contains exactly one accumulated handoff commit after `Pre-Handoff Base HEAD`
 - after approval, no stale fix plans remain in `plans/in-progress/`
-- after final approval, `plans/done/` exists and contains the completed original handoff plan
+- after final approval, the original handoff plan stays intact long enough for the workflow engine to finalize it
 - after rejection, no history rewrite occurred
 - after rejection, `plans/in-progress/` contains only the original handoff plan plus the newest focused fix plan for that handoff
 - after rejection, superseded older fix plans were deleted unless the user asked to keep them
