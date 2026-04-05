@@ -5,6 +5,14 @@ from pathlib import Path
 import subprocess
 import sys
 
+from .api import (
+    PreparedRun,
+    StartupQuestion,
+    StartupQuestionKind,
+    StartupRequest,
+    prepare_startup,
+    prepare_startup_with_answer,
+)
 from .config import (
     ConfigError,
     bootstrap_config,
@@ -597,221 +605,53 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    workflow_name = workflow_arg or workflow_config.aflow.default_workflow
-    if workflow_name is None:
-        print(
-            "No workflow specified and no default_workflow set in config.",
-            file=sys.stderr,
+    startup_workflow_name = workflow_arg
+    startup_start_step = args.start_step
+    resolved_workflow_name = workflow_arg or workflow_config.aflow.default_workflow
+    if startup_start_step is not None and resolved_workflow_name in workflow_config.workflows:
+        resolved_step, error_msg = _resolve_numeric_start_step(
+            startup_start_step,
+            workflow_config.workflows[resolved_workflow_name],
         )
-        return 1
-
-    if workflow_name not in workflow_config.workflows:
-        print(
-            f"Workflow '{workflow_name}' not found in config.",
-            file=sys.stderr,
-        )
-        return 1
-
-    workflow = workflow_config.workflows[workflow_name]
-    effective_team = args.team if args.team is not None else workflow.team
-    if effective_team is not None and effective_team not in workflow_config.teams:
-        known_teams = ", ".join(sorted(workflow_config.teams)) or "none"
-        print(
-            f"error: workflow '{workflow_name}' references unknown team '{effective_team}'. "
-            f"Known teams: {known_teams}",
-            file=sys.stderr,
-        )
-        return 1
-    effective_max_turns = (
-        args.max_turns if args.max_turns is not None else workflow_config.aflow.max_turns
-    )
-
-    selected_start_step = None
-    if args.start_step is not None:
-        resolved_step, error_msg = _resolve_numeric_start_step(args.start_step, workflow)
         if error_msg is not None:
             print(error_msg, file=sys.stderr)
             return 1
-        selected_start_step = resolved_step
-        if selected_start_step not in workflow.steps:
-            print(
-                f"error: step '{selected_start_step}' not found in workflow '{workflow_name}'. "
-                f"Available steps: {', '.join(workflow.steps.keys())}",
-                file=sys.stderr,
-            )
-            return 1
+        startup_workflow_name = resolved_workflow_name
+        startup_start_step = resolved_step
 
-    parsed_plan = None
-    startup_retry: RetryContext | None = None
-    try:
-        parsed_plan = load_plan(plan_path)
-    except PlanParseError as exc:
-        if exc.error_kind != "inconsistent_checkpoint_state":
-            print(exc, file=sys.stderr)
-            return 1
-        if not (sys.stdin.isatty() and sys.stdout.isatty()):
-            print(
-                "error: startup recovery for inconsistent checkpoint state requires an interactive terminal.",
-                file=sys.stderr,
-            )
-            return 1
-        if not _confirm_startup_recovery(str(exc)):
-            print("startup aborted", file=sys.stderr)
-            return 1
-        try:
-            tolerant_result = load_plan_tolerant(plan_path)
-        except FileNotFoundError as exc2:
-            print(exc2, file=sys.stderr)
-            return 1
-        parsed_plan = tolerant_result.parsed_plan
-        startup_retry_error = str(tolerant_result.parse_error or exc)
-    except FileNotFoundError as exc:
-        print(exc, file=sys.stderr)
-        return 1
-    else:
-        startup_retry_error = None
-
-    assert parsed_plan is not None
-    if parsed_plan.snapshot.is_complete:
-        if args.start_step is not None:
-            print("error: plan is already complete, --start-step has no effect", file=sys.stderr)
-            return 1
-    else:
-        has_completed_checkpoint = any(section.heading_checked for section in parsed_plan.sections)
-        if selected_start_step is None:
-            if len(workflow.steps) > 1 and has_completed_checkpoint:
-                if not (sys.stdin.isatty() and sys.stdout.isatty()):
-                    print(
-                        f"error: workflow '{workflow_name}' has multiple steps and interactive startup selection requires a terminal. "
-                        "Re-run with --start-step STEP_NAME.",
-                        file=sys.stderr,
-                    )
-                    return 1
-                selected_start_step = _pick_workflow_step(workflow.steps)
-                if selected_start_step is None:
-                    print("startup aborted", file=sys.stderr)
-                    return 1
-            else:
-                selected_start_step = workflow.first_step
-
-        if startup_retry_error is not None:
-            if selected_start_step is None:
-                print(
-                    f"workflow '{workflow_name}' has no steps",
-                    file=sys.stderr,
-                )
-                return 1
-            step = workflow.steps[selected_start_step]
-            step_path = f"workflow.{workflow_name}.steps.{selected_start_step}"
-            selector = resolve_role_selector(
-                step.role,
-                effective_team,
-                workflow_config,
-                step_path=step_path,
-            )
-            resolved = resolve_profile(selector, workflow_config, step_path=step_path)
-            checkpoint_index = parsed_plan.snapshot.current_checkpoint_index or 1
-            new_plan_path = generate_new_plan_path(plan_path, checkpoint_index=checkpoint_index)
-            base_user_prompt = render_step_prompts(
-                step,
-                workflow_config,
-                config_dir=config_path.parent,
-                working_dir=working_dir,
-                original_plan_path=plan_path,
-                new_plan_path=new_plan_path,
-                active_plan_path=plan_path,
-            )
-            startup_retry = RetryContext(
-                step_name=selected_start_step,
-                step_role=step.role,
-                resolved_selector=selector,
-                resolved_harness_name=resolved.harness_name,
-                resolved_model=resolved.model,
-                resolved_effort=resolved.effort,
-                snapshot_before=parsed_plan.snapshot,
-                active_plan_path=plan_path,
-                new_plan_path=new_plan_path,
-                base_user_prompt=base_user_prompt,
-                parse_error_str=startup_retry_error,
-                attempt=1,
-                retry_limit=_effective_retry_limit(workflow, workflow_config.aflow),
-            )
-
-    probe = probe_worktree(repo_root)
-    if probe is not None and probe.is_dirty:
-        uses_worktree = workflow is not None and workflow.setup and "worktree" in workflow.setup
-
-        if uses_worktree:
-            status_result = subprocess.run(
-                ["git", "status", "--porcelain=v1", "--untracked-files=all"],
-                cwd=str(repo_root),
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if status_result.returncode == 0:
-                _, non_plan_paths = classify_dirtiness_by_prefix(status_result.stdout)
-                if non_plan_paths:
-                    print(
-                        f"error: worktree has non-plan dirtiness that must be cleaned before running a worktree workflow. "
-                        f"Untracked or uncommitted paths outside plans/: {', '.join(non_plan_paths[:3])}{'...' if len(non_plan_paths) > 3 else ''}",
-                        file=sys.stderr,
-                    )
-                    return 1
-            else:
-                is_tty = sys.stdin.isatty() and sys.stdout.isatty()
-                dirty_desc = f"M {probe.modified_count}, A {probe.added_count}, D {probe.removed_count}"
-                if not is_tty:
-                    print(
-                        f"error: worktree is dirty ({dirty_desc}). "
-                        "Interactive confirmation is required to start with a dirty worktree.",
-                        file=sys.stderr,
-                    )
-                    return 1
-                try:
-                    response = input(
-                        f"Worktree is dirty ({dirty_desc}). Start anyway? [y/N]: "
-                    ).strip().lower()
-                except (EOFError, KeyboardInterrupt):
-                    return 1
-                if response not in ("y", "yes"):
-                    return 1
-        else:
-            is_tty = sys.stdin.isatty() and sys.stdout.isatty()
-            dirty_desc = f"M {probe.modified_count}, A {probe.added_count}, D {probe.removed_count}"
-            if not is_tty:
-                print(
-                    f"error: worktree is dirty ({dirty_desc}). "
-                    "Interactive confirmation is required to start with a dirty worktree.",
-                    file=sys.stderr,
-                )
-                return 1
-            try:
-                response = input(
-                    f"Worktree is dirty ({dirty_desc}). Start anyway? [y/N]: "
-                ).strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                return 1
-            if response not in ("y", "yes"):
-                return 1
-
-    config = ControllerConfig(
+    startup_request = StartupRequest(
         repo_root=repo_root,
         plan_path=plan_path,
-        max_turns=effective_max_turns,
-        keep_runs=workflow_config.aflow.keep_runs,
-        team=effective_team,
+        config_path=config_path,
+        workflow_config=workflow_config,
+        workflow_name=startup_workflow_name,
+        start_step=startup_start_step,
+        max_turns=args.max_turns,
+        team=args.team,
         extra_instructions=extra_instructions,
-        start_step=selected_start_step,
+    )
+
+    prepared_run = _handle_startup_questions(startup_request)
+    if prepared_run is None:
+        return 1
+
+    config = ControllerConfig(
+        repo_root=prepared_run.repo_root,
+        plan_path=prepared_run.plan_path,
+        max_turns=prepared_run.max_turns,
+        keep_runs=workflow_config.aflow.keep_runs,
+        team=prepared_run.team,
+        extra_instructions=prepared_run.extra_instructions,
+        start_step=prepared_run.start_step,
     )
 
     try:
         result = run_workflow(
             config,
             workflow_config,
-            workflow_name,
-            parsed_plan=parsed_plan,
-            startup_retry=startup_retry,
+            prepared_run.workflow_name,
+            parsed_plan=prepared_run.parsed_plan,
+            startup_retry=prepared_run.startup_retry,
             config_dir=config_path.parent,
             working_dir=working_dir,
         )
@@ -820,15 +660,120 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     try:
         _maybe_move_completed_plan_to_done(
-            repo_root,
-            plan_path,
-            is_complete=result.final_snapshot.is_complete,
+            prepared_run.repo_root,
+            prepared_run.plan_path,
+            is_complete=prepared_run.move_completed_plan_to_done,
         )
     except WorkflowError as exc:
         print(exc.summary, file=sys.stderr)
         return 1
-    print(_format_success_summary(workflow_name, result.turns_completed, result.end_reason))
+    print(_format_success_summary(prepared_run.workflow_name, result.turns_completed, result.end_reason))
     return 0
+
+
+def _handle_startup_questions(request: StartupRequest) -> PreparedRun | None:
+    """Process startup questions interactively, returning PreparedRun or None on error."""
+    from .api.startup import StartupError
+
+    try:
+        result = prepare_startup(request)
+    except StartupError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return None
+
+    while isinstance(result, StartupQuestion):
+        answer = _answer_startup_question(result)
+        if answer is None or (isinstance(answer, bool) and not answer):
+            print("startup aborted", file=sys.stderr)
+            return None
+
+        try:
+            result = prepare_startup_with_answer(result, request, answer)
+            if isinstance(result, PreparedRun):
+                break
+        except StartupError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return None
+
+    return result
+
+
+def _answer_startup_question(question: StartupQuestion) -> str | int | bool | None:
+    """Interactively answer a startup question."""
+    is_tty = sys.stdin.isatty() and sys.stdout.isatty()
+
+    if question.kind == StartupQuestionKind.CONFIRM_RECOVERY:
+        if not is_tty:
+            print(
+                f"error: {question.message} "
+                "Interactive confirmation is required.",
+                file=sys.stderr,
+            )
+            return None
+        print(question.message, file=sys.stderr)
+        try:
+            response = input("Recover using the existing retry flow? [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return False
+        return response in ("y", "yes")
+
+    if question.kind == StartupQuestionKind.PICK_STEP:
+        if not is_tty:
+            step_names = question.choices
+            print(
+                f"error: {question.message} "
+                f"Re-run with --start-step STEP_NAME. Available steps: {', '.join(step_names)}",
+                file=sys.stderr,
+            )
+            return None
+        step_names = question.choices
+        step_index = _pick_workflow_step_interactive(step_names)
+        if step_index is None:
+            return None
+        return step_index
+
+    if question.kind == StartupQuestionKind.CONFIRM_WORKTREE_DIRTY:
+        if not is_tty:
+            print(
+                f"error: {question.message} "
+                "Interactive confirmation is required.",
+                file=sys.stderr,
+            )
+            return None
+        try:
+            response = input(f"{question.message} [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        return response in ("y", "yes")
+
+    return None
+
+
+def _pick_workflow_step_interactive(step_names: list[str]) -> int | None:
+    """Interactively pick a workflow step by index."""
+    while True:
+        print("Select the workflow step to start from:")
+        for index, step_name in enumerate(step_names, start=1):
+            print(f"  {index}. {step_name}")
+        try:
+            response = input(f"Enter a number between 1 and {len(step_names)}: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        try:
+            choice = int(response)
+        except ValueError:
+            print(
+                f"error: enter a number between 1 and {len(step_names)}",
+                file=sys.stderr,
+            )
+            continue
+        if choice < 1 or choice > len(step_names):
+            print(
+                f"error: enter a number between 1 and {len(step_names)}",
+                file=sys.stderr,
+            )
+            continue
+        return choice - 1
 
 
 if __name__ == "__main__":

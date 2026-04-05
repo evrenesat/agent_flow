@@ -1,0 +1,474 @@
+"""Startup preparation library functions."""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+from typing import Literal
+
+from aflow.config import WorkflowStepConfig
+from aflow.git_status import probe_worktree, classify_dirtiness_by_prefix
+from aflow.plan import PlanParseError, load_plan, load_plan_tolerant
+from aflow.run_state import RetryContext
+from aflow.workflow import (
+    _effective_retry_limit,
+    generate_new_plan_path,
+    render_step_prompts,
+    resolve_role_selector,
+    resolve_profile,
+)
+
+from .models import (
+    PreparedRun,
+    StartupContext,
+    StartupQuestion,
+    StartupQuestionKind,
+    StartupRequest,
+)
+
+
+class StartupError(Exception):
+    """Error during startup preparation."""
+
+    pass
+
+
+def _resolve_workflow_name(request: StartupRequest) -> str:
+    """Resolve workflow name from request or config default.
+
+    Raises StartupError if no workflow can be determined.
+    """
+    workflow_name = request.workflow_name or request.workflow_config.aflow.default_workflow
+    if workflow_name is None:
+        raise StartupError(
+            "No workflow specified and no default_workflow set in config."
+        )
+    if workflow_name not in request.workflow_config.workflows:
+        raise StartupError(f"Workflow '{workflow_name}' not found in config.")
+    return workflow_name
+
+
+def _validate_start_step(workflow_name: str, start_step: str | None, request: StartupRequest) -> None:
+    """Validate that start_step (if provided) exists in the workflow.
+
+    Raises StartupError if start_step is invalid.
+    """
+    if start_step is None:
+        return
+    workflow = request.workflow_config.workflows[workflow_name]
+    if start_step not in workflow.steps:
+        raise StartupError(
+            f"Step '{start_step}' not found in workflow '{workflow_name}'. "
+            f"Available steps: {', '.join(workflow.steps.keys())}"
+        )
+
+
+def _load_plan_with_recovery(
+    plan_path: Path,
+) -> tuple[object, str | None]:
+    """Load plan, returning (parsed_plan, startup_retry_error).
+
+    startup_retry_error is non-None if recovery was attempted for inconsistent state.
+    Raises StartupError if plan cannot be loaded without interactive recovery.
+    """
+    try:
+        parsed_plan = load_plan(plan_path)
+    except PlanParseError as exc:
+        if exc.error_kind != "inconsistent_checkpoint_state":
+            raise StartupError(str(exc))
+        raise StartupError(f"inconsistent_checkpoint_state:{exc}")
+    except FileNotFoundError as exc:
+        raise StartupError(str(exc))
+    return parsed_plan, None
+
+
+def _plan_needs_step_selection(
+    workflow_name: str,
+    parsed_plan: object,
+    request: StartupRequest,
+) -> bool:
+    """Check if the startup flow must prompt for step selection."""
+    workflow = request.workflow_config.workflows[workflow_name]
+    if len(workflow.steps) <= 1:
+        return False
+    if hasattr(parsed_plan, "snapshot") and hasattr(parsed_plan.snapshot, "is_complete"):
+        if parsed_plan.snapshot.is_complete:
+            return False
+    if hasattr(parsed_plan, "sections"):
+        has_completed_checkpoint = any(
+            getattr(section, "heading_checked", False) for section in parsed_plan.sections
+        )
+        return has_completed_checkpoint
+    return False
+
+
+def _resolve_effective_max_turns(request: StartupRequest, workflow_name: str) -> int:
+    """Resolve effective max_turns from request or workflow config."""
+    if request.max_turns is not None:
+        return request.max_turns
+    return request.workflow_config.aflow.max_turns
+
+
+def _resolve_effective_team(request: StartupRequest, workflow_name: str) -> str | None:
+    """Resolve effective team from request or workflow config."""
+    workflow = request.workflow_config.workflows[workflow_name]
+    team = request.team if request.team is not None else workflow.team
+    if team is not None and team not in request.workflow_config.teams:
+        known_teams = ", ".join(sorted(request.workflow_config.teams)) or "none"
+        raise StartupError(
+            f"Workflow '{workflow_name}' references unknown team '{team}'. "
+            f"Known teams: {known_teams}"
+        )
+    return team
+
+
+def _check_plan_completion(parsed_plan: object, request: StartupRequest) -> tuple[bool, bool]:
+    """Check plan completion status.
+
+    Returns (is_complete, has_completed_checkpoint).
+    """
+    is_complete = False
+    has_completed_checkpoint = False
+    if hasattr(parsed_plan, "snapshot"):
+        is_complete = getattr(parsed_plan.snapshot, "is_complete", False)
+    if hasattr(parsed_plan, "sections"):
+        has_completed_checkpoint = any(
+            getattr(section, "heading_checked", False) for section in parsed_plan.sections
+        )
+    return is_complete, has_completed_checkpoint
+
+
+def _build_retry_context(
+    workflow_name: str,
+    selected_start_step: str,
+    startup_retry_error: str,
+    parsed_plan: object,
+    request: StartupRequest,
+    effective_team: str | None,
+    config_path: Path,
+) -> RetryContext:
+    """Build RetryContext for startup recovery."""
+    workflow = request.workflow_config.workflows[workflow_name]
+    step = workflow.steps[selected_start_step]
+    step_path = f"workflow.{workflow_name}.steps.{selected_start_step}"
+
+    selector = resolve_role_selector(
+        step.role,
+        effective_team,
+        request.workflow_config,
+        step_path=step_path,
+    )
+    resolved = resolve_profile(selector, request.workflow_config, step_path=step_path)
+
+    checkpoint_index = getattr(
+        getattr(parsed_plan, "snapshot", None),
+        "current_checkpoint_index",
+        None,
+    ) or 1
+    new_plan_path = generate_new_plan_path(request.plan_path, checkpoint_index=checkpoint_index)
+
+    base_user_prompt = render_step_prompts(
+        step,
+        request.workflow_config,
+        config_dir=config_path.parent,
+        working_dir=Path.cwd(),
+        original_plan_path=request.plan_path,
+        new_plan_path=new_plan_path,
+        active_plan_path=request.plan_path,
+    )
+
+    return RetryContext(
+        step_name=selected_start_step,
+        step_role=step.role,
+        resolved_selector=selector,
+        resolved_harness_name=resolved.harness_name,
+        resolved_model=resolved.model,
+        resolved_effort=resolved.effort,
+        snapshot_before=getattr(parsed_plan, "snapshot"),
+        active_plan_path=request.plan_path,
+        new_plan_path=new_plan_path,
+        base_user_prompt=base_user_prompt,
+        parse_error_str=startup_retry_error,
+        attempt=1,
+        retry_limit=_effective_retry_limit(workflow, request.workflow_config.aflow),
+    )
+
+
+def _check_worktree_dirtiness(
+    request: StartupRequest,
+    workflow_name: str,
+) -> tuple[bool, str | None]:
+    """Check if worktree is dirty and needs confirmation.
+
+    Returns (is_dirty, error_or_confirmation_needed).
+    - If not dirty, returns (False, None)
+    - If dirty but worktree-safe, returns (False, None)
+    - If dirty and needs confirmation, returns (True, dirty_description)
+    """
+    probe = probe_worktree(request.repo_root)
+    if probe is None or not probe.is_dirty:
+        return False, None
+
+    workflow = request.workflow_config.workflows[workflow_name]
+    uses_worktree = workflow is not None and workflow.setup and "worktree" in workflow.setup
+
+    if uses_worktree:
+        status_result = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+            cwd=str(request.repo_root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if status_result.returncode == 0:
+            _, non_plan_paths = classify_dirtiness_by_prefix(status_result.stdout)
+            if non_plan_paths:
+                raise StartupError(
+                    f"Worktree has non-plan dirtiness that must be cleaned before running a worktree workflow. "
+                    f"Untracked or uncommitted paths outside plans/: {', '.join(non_plan_paths[:3])}{'...' if len(non_plan_paths) > 3 else ''}"
+                )
+            return False, None
+
+    dirty_desc = f"M {probe.modified_count}, A {probe.added_count}, D {probe.removed_count}"
+    return True, dirty_desc
+
+
+def prepare_startup(request: StartupRequest) -> PreparedRun | StartupQuestion:
+    """Prepare workflow startup, returning either a prepared run or a question.
+
+    This function processes startup decisions and returns either:
+    - PreparedRun: all startup decisions are made and run is ready to execute
+    - StartupQuestion: a structured question that requires user input
+
+    The caller should answer the question and call prepare_startup_with_answer().
+
+    Raises StartupError if startup cannot proceed due to configuration errors.
+    """
+    workflow_name = _resolve_workflow_name(request)
+    _validate_start_step(workflow_name, request.start_step, request)
+
+    if request.pre_recovered_plan is not None:
+        parsed_plan = request.pre_recovered_plan
+        startup_retry_error = None
+    else:
+        try:
+            parsed_plan, startup_retry_error = _load_plan_with_recovery(request.plan_path)
+        except StartupError as exc:
+            if str(exc).startswith("inconsistent_checkpoint_state:"):
+                is_tty = sys.stdin.isatty() and sys.stdout.isatty()
+                if not is_tty:
+                    raise StartupError(
+                        "startup recovery for inconsistent checkpoint state requires an interactive terminal."
+                    )
+                recovery_msg = str(exc).replace("inconsistent_checkpoint_state:", "")
+                return StartupQuestion(
+                    kind=StartupQuestionKind.CONFIRM_RECOVERY,
+                    message=recovery_msg,
+                )
+            raise
+
+    is_complete, has_completed_checkpoint = _check_plan_completion(parsed_plan, request)
+    effective_max_turns = _resolve_effective_max_turns(request, workflow_name)
+    effective_team = _resolve_effective_team(request, workflow_name)
+
+    if is_complete:
+        if request.start_step is not None:
+            raise StartupError("plan is already complete, --start-step has no effect")
+        selected_start_step = request.workflow_config.workflows[workflow_name].first_step
+    else:
+        if request.start_step is not None:
+            selected_start_step = request.start_step
+        elif _plan_needs_step_selection(workflow_name, parsed_plan, request):
+            is_tty = sys.stdin.isatty() and sys.stdout.isatty()
+            if not is_tty:
+                raise StartupError(
+                    f"Workflow '{workflow_name}' has multiple steps and interactive startup selection requires a terminal. "
+                    "Re-run with --start-step STEP_NAME."
+                )
+            workflow = request.workflow_config.workflows[workflow_name]
+            step_names = list(workflow.steps.keys())
+            return StartupQuestion(
+                kind=StartupQuestionKind.PICK_STEP,
+                message="Select the workflow step to start from:",
+                choices=step_names,
+            )
+        else:
+            selected_start_step = request.workflow_config.workflows[workflow_name].first_step
+
+    startup_retry = None
+    if startup_retry_error is not None:
+        if selected_start_step is None:
+            raise StartupError(
+                f"Workflow '{workflow_name}' has no steps"
+            )
+        startup_retry = _build_retry_context(
+            workflow_name,
+            selected_start_step,
+            startup_retry_error,
+            parsed_plan,
+            request,
+            effective_team,
+            request.config_path,
+        )
+
+    is_dirty, dirty_desc = _check_worktree_dirtiness(request, workflow_name)
+    if is_dirty:
+        return StartupQuestion(
+            kind=StartupQuestionKind.CONFIRM_WORKTREE_DIRTY,
+            message=f"Worktree is dirty ({dirty_desc}). Start anyway?",
+        )
+
+    is_complete_plan = (
+        hasattr(parsed_plan, "snapshot")
+        and getattr(parsed_plan.snapshot, "is_complete", False)
+    )
+
+    return PreparedRun(
+        workflow_name=workflow_name,
+        repo_root=request.repo_root,
+        plan_path=request.plan_path,
+        config_path=request.config_path,
+        max_turns=effective_max_turns,
+        team=effective_team,
+        extra_instructions=request.extra_instructions,
+        start_step=selected_start_step,
+        startup_retry=startup_retry,
+        move_completed_plan_to_done=is_complete_plan,
+        parsed_plan=parsed_plan,
+    )
+
+
+def prepare_startup_with_answer(
+    question: StartupQuestion,
+    request: StartupRequest,
+    answer: str | int | bool,
+) -> PreparedRun | StartupQuestion:
+    """Resume startup after answering a question.
+
+    Takes a previous StartupQuestion and an answer, then returns either:
+    - PreparedRun: ready to execute
+    - StartupQuestion: another question (rare, but possible)
+
+    Raises StartupError if the answer is invalid or startup cannot proceed.
+    """
+    if question.kind == StartupQuestionKind.CONFIRM_RECOVERY:
+        if not isinstance(answer, bool) or not answer:
+            raise StartupError("Startup recovery declined")
+
+        try:
+            tolerant_result = load_plan_tolerant(request.plan_path)
+        except FileNotFoundError as exc:
+            raise StartupError(str(exc))
+
+        parsed_plan = tolerant_result.parsed_plan
+        if tolerant_result.parse_error:
+            startup_retry_error = str(tolerant_result.parse_error)
+        else:
+            startup_retry_error = None
+
+        workflow_name = _resolve_workflow_name(request)
+        _validate_start_step(workflow_name, request.start_step, request)
+
+        is_complete, has_completed_checkpoint = _check_plan_completion(parsed_plan, request)
+        effective_max_turns = _resolve_effective_max_turns(request, workflow_name)
+        effective_team = _resolve_effective_team(request, workflow_name)
+
+        if is_complete:
+            if request.start_step is not None:
+                raise StartupError("plan is already complete, --start-step has no effect")
+            selected_start_step = request.workflow_config.workflows[workflow_name].first_step
+        else:
+            if request.start_step is not None:
+                selected_start_step = request.start_step
+            elif _plan_needs_step_selection(workflow_name, parsed_plan, request):
+                is_tty = sys.stdin.isatty() and sys.stdout.isatty()
+                if not is_tty:
+                    raise StartupError(
+                        f"Workflow '{workflow_name}' has multiple steps and interactive startup selection requires a terminal. "
+                        "Re-run with --start-step STEP_NAME."
+                    )
+                workflow = request.workflow_config.workflows[workflow_name]
+                step_names = list(workflow.steps.keys())
+                return StartupQuestion(
+                    kind=StartupQuestionKind.PICK_STEP,
+                    message="Select the workflow step to start from:",
+                    choices=step_names,
+                )
+            else:
+                selected_start_step = request.workflow_config.workflows[workflow_name].first_step
+
+        startup_retry = None
+        if startup_retry_error is not None:
+            if selected_start_step is None:
+                raise StartupError(
+                    f"Workflow '{workflow_name}' has no steps"
+                )
+            startup_retry = _build_retry_context(
+                workflow_name,
+                selected_start_step,
+                startup_retry_error,
+                parsed_plan,
+                request,
+                effective_team,
+                request.config_path,
+            )
+
+        is_dirty, dirty_desc = _check_worktree_dirtiness(request, workflow_name)
+        if is_dirty:
+            return StartupQuestion(
+                kind=StartupQuestionKind.CONFIRM_WORKTREE_DIRTY,
+                message=f"Worktree is dirty ({dirty_desc}). Start anyway?",
+            )
+
+        is_complete_plan = (
+            hasattr(parsed_plan, "snapshot")
+            and getattr(parsed_plan.snapshot, "is_complete", False)
+        )
+
+        return prepare_startup(request.__class__(
+            repo_root=request.repo_root,
+            plan_path=request.plan_path,
+            config_path=request.config_path,
+            workflow_config=request.workflow_config,
+            workflow_name=workflow_name,
+            start_step=request.start_step,
+            max_turns=request.max_turns,
+            team=request.team,
+            extra_instructions=request.extra_instructions,
+            pre_recovered_plan=parsed_plan,
+        ))
+
+    if question.kind == StartupQuestionKind.PICK_STEP:
+        if isinstance(answer, int):
+            if 0 <= answer < len(question.choices):
+                selected_step = question.choices[answer]
+            else:
+                raise StartupError(f"Invalid step choice: {answer}")
+        elif isinstance(answer, str):
+            if answer in question.choices:
+                selected_step = answer
+            else:
+                raise StartupError(f"Step '{answer}' not in choices: {question.choices}")
+        else:
+            raise StartupError(f"Invalid step answer type: {type(answer)}")
+
+        return prepare_startup(request.__class__(
+            repo_root=request.repo_root,
+            plan_path=request.plan_path,
+            config_path=request.config_path,
+            workflow_config=request.workflow_config,
+            workflow_name=request.workflow_name,
+            start_step=selected_step,
+            max_turns=request.max_turns,
+            team=request.team,
+            extra_instructions=request.extra_instructions,
+            pre_recovered_plan=request.pre_recovered_plan,
+        ))
+
+    if question.kind == StartupQuestionKind.CONFIRM_WORKTREE_DIRTY:
+        if not isinstance(answer, bool) or not answer:
+            raise StartupError("Startup aborted due to dirty worktree")
+        return prepare_startup(request)
+
+    raise StartupError(f"Unknown question kind: {question.kind}")
