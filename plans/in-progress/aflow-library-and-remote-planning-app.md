@@ -57,7 +57,7 @@ This handoff does **not** add plan-creation UX to the `aflow` CLI. Plan creation
 
 ## Checkpoints
 
-### [ ] Checkpoint 1: Extract A Public aflow Library Startup Surface
+### [x] Checkpoint 1: Extract A Public aflow Library Startup Surface
 
 **Goal:**
 
@@ -86,11 +86,11 @@ This handoff does **not** add plan-creation UX to the `aflow` CLI. Plan creation
 
 **Steps:**
 
-- [ ] Step 1: Introduce public library-facing request/result models for startup preparation, startup questions, prepared runs, and post-run completion handling.
-- [ ] Step 2: Move the CLI-owned startup branching logic into reusable library functions that can return deterministic results or structured questions instead of reading from stdin.
-- [ ] Step 3: Expose a minimal public import surface from `aflow.__init__` or `aflow.api.__init__` for the new startup API.
-- [ ] Step 4: Refactor `aflow.cli.main()` to consume the new startup API and preserve current prompt text semantics where practical.
-- [ ] Step 5: Add focused tests for library startup preparation and update existing CLI tests to prove no regression.
+- [x] Step 1: Introduce public library-facing request/result models for startup preparation, startup questions, prepared runs, and post-run completion handling.
+- [x] Step 2: Move the CLI-owned startup branching logic into reusable library functions that can return deterministic results or structured questions instead of reading from stdin.
+- [x] Step 3: Expose a minimal public import surface from `aflow.__init__` or `aflow.api.__init__` for the new startup API.
+- [x] Step 4: Refactor `aflow.cli.main()` to consume the new startup API and preserve current prompt text semantics where practical.
+- [x] Step 5: Add focused tests for library startup preparation and update existing CLI tests to prove no regression.
 
 **Dependencies:**
 
