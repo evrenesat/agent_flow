@@ -256,11 +256,6 @@ def prepare_startup(request: StartupRequest) -> PreparedRun | StartupQuestion:
             parsed_plan, startup_retry_error = _load_plan_with_recovery(request.plan_path)
         except StartupError as exc:
             if str(exc).startswith("inconsistent_checkpoint_state:"):
-                is_tty = sys.stdin.isatty() and sys.stdout.isatty()
-                if not is_tty:
-                    raise StartupError(
-                        "startup recovery for inconsistent checkpoint state requires an interactive terminal."
-                    )
                 recovery_msg = str(exc).replace("inconsistent_checkpoint_state:", "")
                 return StartupQuestion(
                     kind=StartupQuestionKind.CONFIRM_RECOVERY,
@@ -280,12 +275,6 @@ def prepare_startup(request: StartupRequest) -> PreparedRun | StartupQuestion:
         if request.start_step is not None:
             selected_start_step = request.start_step
         elif _plan_needs_step_selection(workflow_name, parsed_plan, request):
-            is_tty = sys.stdin.isatty() and sys.stdout.isatty()
-            if not is_tty:
-                raise StartupError(
-                    f"Workflow '{workflow_name}' has multiple steps and interactive startup selection requires a terminal. "
-                    "Re-run with --start-step STEP_NAME."
-                )
             workflow = request.workflow_config.workflows[workflow_name]
             step_names = list(workflow.steps.keys())
             return StartupQuestion(
@@ -313,7 +302,7 @@ def prepare_startup(request: StartupRequest) -> PreparedRun | StartupQuestion:
         )
 
     is_dirty, dirty_desc = _check_worktree_dirtiness(request, workflow_name)
-    if is_dirty:
+    if is_dirty and not request.dirty_worktree_confirmed:
         return StartupQuestion(
             kind=StartupQuestionKind.CONFIRM_WORKTREE_DIRTY,
             message=f"Worktree is dirty ({dirty_desc}). Start anyway?",
@@ -412,6 +401,19 @@ def prepare_startup_with_answer(
     if question.kind == StartupQuestionKind.CONFIRM_WORKTREE_DIRTY:
         if not isinstance(answer, bool) or not answer:
             raise StartupError("Startup aborted due to dirty worktree")
-        return prepare_startup(request)
+        return prepare_startup(request.__class__(
+            repo_root=request.repo_root,
+            plan_path=request.plan_path,
+            config_path=request.config_path,
+            workflow_config=request.workflow_config,
+            workflow_name=request.workflow_name,
+            start_step=request.start_step,
+            max_turns=request.max_turns,
+            team=request.team,
+            extra_instructions=request.extra_instructions,
+            pre_recovered_plan=request.pre_recovered_plan,
+            startup_retry_error=request.startup_retry_error,
+            dirty_worktree_confirmed=True,
+        ))
 
     raise StartupError(f"Unknown question kind: {question.kind}")

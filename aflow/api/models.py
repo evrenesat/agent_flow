@@ -45,6 +45,7 @@ class StartupRequest:
     extra_instructions: tuple[str, ...] = ()
     pre_recovered_plan: object | None = None
     startup_retry_error: str | None = None
+    dirty_worktree_confirmed: bool = False
 
 
 @dataclass(frozen=True)
