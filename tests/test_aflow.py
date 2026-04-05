@@ -1564,6 +1564,7 @@ class WorkflowConfigTests(unittest.TestCase):
     def test_bundled_config_validates_without_errors(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         config = load_workflow_config(repo_root / 'aflow' / 'aflow.toml')
+        assert config.aflow.default_workflow == 'medium'
         assert config.aflow.max_turns == 15
         assert config.aflow.team_lead == 'senior_architect'
         assert config.roles['architect'] == 'claude.opus'
@@ -3706,13 +3707,22 @@ class SkillDocsTests(unittest.TestCase):
             assert step.go[0].when == 'MAX_TURNS_REACHED', f"step {step_name} first transition must be MAX_TURNS_REACHED"
         assert wf.steps['implement_plan'].prompts == ('implementation_plans', 'cp_loop_implementation')
 
-    def test_bundled_skills_leave_original_plan_finalization_to_engine(self) -> None:
+    def test_bundled_skills_shift_finalization_and_commit_ownership_to_reviewers(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         review_text = (repo_root / 'aflow' / 'bundled_skills' / 'aflow-review-squash' / 'SKILL.md').read_text(encoding='utf-8')
+        review_cp_text = (repo_root / 'aflow' / 'bundled_skills' / 'aflow-review-checkpoint' / 'SKILL.md').read_text(encoding='utf-8')
+        review_final_text = (repo_root / 'aflow' / 'bundled_skills' / 'aflow-review-final' / 'SKILL.md').read_text(encoding='utf-8')
+        exec_cp_text = (repo_root / 'aflow' / 'bundled_skills' / 'aflow-execute-checkpoint' / 'SKILL.md').read_text(encoding='utf-8')
+        exec_plan_text = (repo_root / 'aflow' / 'bundled_skills' / 'aflow-execute-plan' / 'SKILL.md').read_text(encoding='utf-8')
         plan_text = (repo_root / 'aflow' / 'bundled_skills' / 'aflow-plan' / 'SKILL.md').read_text(encoding='utf-8')
         assert 'workflow engine finalizes the original plan location after terminal success' in review_text
         assert 'move that original plan to `plans/done/`' not in review_text
         assert 'workflow engine owns the final move to `plans/done/`' in plan_text
+        assert 'Reviewer workflows own all commit creation and approval-grade git bookkeeping' in exec_cp_text
+        assert 'Reviewer workflows own all commit creation and approval-grade git bookkeeping' in exec_plan_text
+        assert 'Create the checkpoint approval commit for the reviewed work in this review turn.' in review_cp_text
+        assert 'all approval-grade git/tracking chores were completed by the reviewer in the same turn' in review_final_text
+        assert 'all approval-grade git/tracking chores were completed by the reviewer in the same turn' in review_text
 
     def test_bundled_config_review_implement_cp_review_max_turns_transitions(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]

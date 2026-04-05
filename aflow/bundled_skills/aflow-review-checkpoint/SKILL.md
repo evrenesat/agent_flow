@@ -18,6 +18,7 @@ Use this skill only for checkpoint-scoped review of work produced under an aflow
 - If the original plan is already effectively complete, do not repurpose this skill for whole-plan review.
 - If the checkpoint looks correct, approve that checkpoint and advance the original plan's review state.
 - If the checkpoint is not acceptable, do not approve it. Create a focused non-checkpoint fix plan for the failed checkpoint or behaviors instead of a whole-plan redo.
+- If the checkpoint implementation is correct, this review turn owns the checkpoint commit and any reviewer-owned plan bookkeeping needed to approve it.
 - Treat `aflow` as the canonical spelling.
 
 ## Core Rule
@@ -64,12 +65,13 @@ Selection rules:
 
 If the checkpoint looks correct:
 
-1. Advance the original plan's review state for that checkpoint.
-2. Update the original plan's `Git Tracking` and `Review Log` to capture the approved checkpoint review.
-3. Do not squash the whole handoff.
-4. Leave the checkpoint commit structure intact unless a later workflow explicitly asks for a different history action.
-5. If later checkpoints remain unchecked, keep the original plan in progress for the next checkpoint review or execution pass.
-6. Treat dirty changes in plan files that are intentionally part of checkpoint bookkeeping as part of finalization, not as unrelated worktree noise. Still stop if truly unrelated dirty changes remain and make the checkpoint review ambiguous.
+1. Create the checkpoint approval commit for the reviewed work in this review turn.
+2. Advance the original plan's review state for that checkpoint.
+3. Update the original plan's `Git Tracking` and `Review Log` to capture the approved checkpoint review.
+4. Do not squash the whole handoff.
+5. Leave the checkpoint commit structure intact unless a later workflow explicitly asks for a different history action.
+6. If later checkpoints remain unchecked, keep the original plan in progress for the next checkpoint review or execution pass.
+7. Treat dirty changes in plan files that are intentionally part of checkpoint bookkeeping as part of finalization, not as unrelated worktree noise. Still stop if truly unrelated dirty changes remain and make the checkpoint review ambiguous.
 
 ## Rejection Path
 
@@ -105,6 +107,7 @@ Before finishing, verify:
 - the fallback to current worktree state was only used when the checkpoint commit boundary was missing or ambiguous
 - the reported commit counts match git history when a commit boundary is available
 - after approval, the original plan's review state advances only for the reviewed checkpoint
+- after approval, the checkpoint commit was created by the reviewer in the same turn
 - after rejection, no history rewrite occurred
 - after rejection, `plans/in-progress/` contains only the original handoff plan plus the newest focused fix plan for that checkpoint
 - after rejection, superseded older fix plans were deleted unless the user asked to keep them

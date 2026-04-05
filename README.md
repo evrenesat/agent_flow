@@ -148,7 +148,7 @@ Example:
 ```toml
 # aflow.toml
 [aflow]
-default_workflow = "ralph"
+default_workflow = "medium"
 keep_runs = 10
 max_turns = 12
 retry_inconsistent_checkpoint_state = 1
@@ -398,7 +398,7 @@ Older run directories are pruned automatically. The retention count is controlle
 
 The bundled config includes these ready-to-use workflows:
 
-- `ralph` - single-step implementation loop, no review. Uses the worktree+branch lifecycle by default (inherited from `[workflow]` defaults).
+- `ralph` - single-step implementation loop, no review. Useful for implementation-only experiments, but not a good default when reviewer steps own commits and approval bookkeeping.
 - `ralph_jr` - `ralph` with the `7teen` team, branch-only lifecycle, and a custom `merge_prompt`.
 - `review_implement_review` - review, implement, then review again with `aflow-review-squash`. On approval the reviewer squashes all post-handoff commits into one final commit. This squash behavior is specific to this workflow, not an engine-wide invariant.
 - `review_implement_cp_review` - checkpoint-scoped review with `aflow-review-checkpoint` and a final no-squash audit with `aflow-review-final`. Checkpoint commit structure is preserved on approval.

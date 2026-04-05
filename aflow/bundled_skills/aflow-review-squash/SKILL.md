@@ -18,6 +18,7 @@ Use this skill only for the final review pass of work produced under a aflow pla
 - If the original plan still has unchecked checkpoints, do not repurpose this skill for routine checkpoint review. Rerun the autonomous executor unless the user explicitly asks for a different workflow.
 - If the full accumulated work is acceptable, approve and squash once at the whole-plan level.
 - If the full accumulated work is not acceptable, do not squash. Create a focused non-checkpoint fix plan for the failed checkpoints or behaviors instead of a whole-plan redo.
+- If the implementation is behaviorally correct, this review turn owns all approval-grade git/tracking chores needed for squash approval.
 - Treat `aflow` as the canonical spelling.
 - Compact `DEVLOG.md` to one handoff entry only when a squash actually happens and multiple handoff entries exist.
 
@@ -67,14 +68,15 @@ Selection rules:
 If the accumulated work looks correct:
 
 1. Use the original plan's `Pre-Handoff Base HEAD` as the squash anchor for the final accumulated handoff.
-2. Update the original plan's `Git Tracking` and `Review Log` to capture the approved and squashed result.
-3. Delete any remaining fix plans for that handoff unless the user explicitly asked to keep them.
-4. Rewrite history so every commit after the squash anchor becomes one final accumulated commit.
-5. Use a non-interactive workflow. Prefer `git reset --soft <squash-base>` followed by a new commit over interactive rebase.
-6. Write a fresh final commit message that covers the full accumulated scope of the handoff.
-7. If `DEVLOG.md` exists and multiple handoff-related entries were added or updated during the handoff, compact them to one entry that matches the final squashed change.
-8. If the original plan's checkpoints are all complete, leave the original plan in `plans/in-progress/`. The workflow engine finalizes the original plan location after terminal success.
-9. Treat dirty changes in plan files that are intentionally part of the final handoff state as part of finalization, not as unrelated worktree noise. Still stop if truly unrelated dirty changes remain and make the squash ambiguous.
+2. Produce the final accumulated commit, delete stale fix plans, and repair `Git Tracking` / `Review Log` state yourself in this review turn when approving.
+3. Update the original plan's `Git Tracking` and `Review Log` to capture the approved and squashed result.
+4. Delete any remaining fix plans for that handoff unless the user explicitly asked to keep them.
+5. Rewrite history so every commit after the squash anchor becomes one final accumulated commit.
+6. Use a non-interactive workflow. Prefer `git reset --soft <squash-base>` followed by a new commit over interactive rebase.
+7. Write a fresh final commit message that covers the full accumulated scope of the handoff.
+8. If `DEVLOG.md` exists and multiple handoff-related entries were added or updated during the handoff, compact them to one entry that matches the final squashed change.
+9. If the original plan's checkpoints are all complete, leave the original plan in `plans/in-progress/`. The workflow engine finalizes the original plan location after terminal success.
+10. Treat dirty changes in plan files that are intentionally part of the final handoff state as part of finalization, not as unrelated worktree noise. Still stop if truly unrelated dirty changes remain and make the squash ambiguous.
 
 ## Rejection Path
 
@@ -110,6 +112,7 @@ Before finishing, verify:
 - the reported commit counts match git history
 - after approval, the branch contains exactly one accumulated handoff commit after `Pre-Handoff Base HEAD`
 - after approval, no stale fix plans remain in `plans/in-progress/`
+- after approval, all approval-grade git/tracking chores were completed by the reviewer in the same turn
 - after final approval, the original handoff plan stays intact long enough for the workflow engine to finalize it
 - after rejection, no history rewrite occurred
 - after rejection, `plans/in-progress/` contains only the original handoff plan plus the newest focused fix plan for that handoff

@@ -18,6 +18,7 @@ Use this skill only for the final review pass of work produced under an aflow pl
 - If the original plan still has unchecked checkpoints, do not repurpose this skill for routine checkpoint review. Return control to the checkpoint workflow until the original plan is actually complete.
 - If the full accumulated work is acceptable, approve the completed handoff without squashing or rewriting history.
 - If the full accumulated work is not acceptable, do not squash. Create a focused non-checkpoint follow-up fix plan for the failed checkpoints or behaviors.
+- If the implementation is behaviorally correct, this review turn owns all approval-grade git/tracking chores needed for final approval.
 - Treat `aflow` as the canonical spelling.
 
 ## Core Rule
@@ -65,10 +66,11 @@ Selection rules:
 
 If the accumulated work looks correct:
 
-1. Update the original plan's `aflow-review-final` state, `Git Tracking`, and `Review Log` to reflect final approval.
-2. Delete any remaining fix plans for that handoff unless the user explicitly asked to keep them.
-3. Report completion.
-4. Do not squash, rewrite history, or compact unrelated artifacts.
+1. If the final handoff is correct but still dirty, create the final non-squash approval commit in this review turn.
+2. Update the original plan's `aflow-review-final` state, `Git Tracking`, and `Review Log` to reflect final approval.
+3. Delete any remaining fix plans for that handoff unless the user explicitly asked to keep them.
+4. Report completion.
+5. Do not squash, rewrite history, or compact unrelated artifacts.
 
 ## Rejection Path
 
@@ -104,6 +106,7 @@ Before finishing, verify:
 - the reported commit counts match git history
 - after approval, no history rewrite occurred
 - after approval, no stale fix plans remain in `plans/in-progress/`
+- after approval, all approval-grade git/tracking chores were completed by the reviewer in the same turn
 - after final approval, the original plan records final approval cleanly
 - after rejection, no history rewrite occurred
 - after rejection, `plans/in-progress/` contains only the original handoff plan plus the newest focused fix plan for that handoff
