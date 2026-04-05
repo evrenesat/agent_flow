@@ -38,6 +38,7 @@ _REVIEW_SKILL_NAMES = frozenset({
     "aflow-review-checkpoint",
     "aflow-review-final",
 })
+_PLAN_BRANCH_LINE_RE = re.compile(r"^(\s*-\s+Plan Branch:\s+`)([^`]+)(`.*)$", re.MULTILINE)
 
 
 class WorkflowError(RuntimeError):
@@ -53,6 +54,12 @@ class ResolvedProfile:
     profile_name: str
     model: str | None
     effort: str | None
+
+
+@dataclass(frozen=True)
+class _PreparedPrimaryPlanForMerge:
+    plan_path: Path
+    original_text: str | None
 
 
 def _turn_artifact_display_path(repo_root: Path, turn_dir: Path, filename: str) -> str | None:
@@ -246,6 +253,35 @@ def render_step_prompts(
         )
         parts.append(rendered)
     return "\n\n".join(parts)
+
+
+def _update_plan_branch(path: Path, branch_name: str) -> bool:
+    try:
+        if not path.is_file():
+            return False
+        text = path.read_text(encoding="utf-8")
+        updated = _PLAN_BRANCH_LINE_RE.sub(
+            lambda match: f"{match.group(1)}{branch_name}{match.group(3)}",
+            text,
+            count=1,
+        )
+        if updated == text:
+            return False
+        path.write_text(updated, encoding="utf-8")
+        return True
+    except OSError as exc:
+        raise WorkflowError(
+            f"failed to update Plan Branch in original plan '{path}' to '{branch_name}': {exc}"
+        ) from exc
+
+
+def _sync_plan_branch_for_execution(
+    original_plan_path: Path,
+    exec_ctx: ExecutionContext | None,
+) -> None:
+    if exec_ctx is None:
+        return
+    _update_plan_branch(original_plan_path, exec_ctx.feature_branch)
 
 
 def generate_new_plan_path(
@@ -1070,6 +1106,61 @@ def _sync_plan_from_worktree(primary_plan_path: Path, exec_ctx: ExecutionContext
         ) from exc
 
 
+def _prepare_primary_plan_for_merge(
+    primary_root: Path,
+    original_plan_path: Path,
+) -> _PreparedPrimaryPlanForMerge | None:
+    if not original_plan_path.exists():
+        return None
+
+    try:
+        original_text = original_plan_path.read_text(encoding="utf-8")
+        tracked_in_git = _is_git_tracked(primary_root, original_plan_path)
+        if tracked_in_git:
+            try:
+                rel = original_plan_path.resolve().relative_to(primary_root.resolve())
+            except ValueError:
+                return _PreparedPrimaryPlanForMerge(
+                    plan_path=original_plan_path,
+                    original_text=original_text,
+                )
+            rc, _, err = _run_git(["checkout", "--", rel.as_posix()], cwd=primary_root)
+            if rc != 0:
+                raise WorkflowError(
+                    f"lifecycle teardown: failed to reset tracked original plan "
+                    f"'{original_plan_path}' before merge: {err}"
+                )
+        else:
+            original_plan_path.unlink()
+    except OSError as exc:
+        raise WorkflowError(
+            f"lifecycle teardown: failed to prepare original plan '{original_plan_path}' "
+            f"for merge: {exc}"
+        ) from exc
+
+    return _PreparedPrimaryPlanForMerge(
+        plan_path=original_plan_path,
+        original_text=original_text,
+    )
+
+
+def _restore_primary_plan_after_merge(
+    prepared: _PreparedPrimaryPlanForMerge | None,
+) -> None:
+    if prepared is None:
+        return
+    if prepared.original_text is None:
+        return
+    try:
+        prepared.plan_path.parent.mkdir(parents=True, exist_ok=True)
+        prepared.plan_path.write_text(prepared.original_text, encoding="utf-8")
+    except OSError as exc:
+        raise WorkflowError(
+            f"lifecycle teardown: failed to restore original plan "
+            f"'{prepared.plan_path}' after merge: {exc}"
+        ) from exc
+
+
 _MERGE_BUILTIN_INSTRUCTION = "Use the `aflow-merge` skill to merge the feature branch into the target branch."
 
 
@@ -1133,6 +1224,8 @@ def _verify_merge_success(
     primary_root: Path,
     main_branch: str,
     feature_branch: str,
+    *,
+    original_plan_path: Path | None = None,
 ) -> str | None:
     """Returns None on success, or a description of which check failed."""
     rc, out, _ = _run_git(["ls-files", "--unmerged"], cwd=primary_root)
@@ -1147,7 +1240,12 @@ def _verify_merge_success(
         return "working tree is not clean after merge"
     dirty_lines = [
         line for line in out.splitlines()
-        if line.strip() and not _is_ignored_merge_status_line(line)
+        if line.strip()
+        and not _is_ignored_merge_status_line(
+            line,
+            primary_root=primary_root,
+            original_plan_path=original_plan_path,
+        )
     ]
     if dirty_lines:
         return "working tree is not clean after merge"
@@ -1166,19 +1264,34 @@ def _verify_merge_success(
     return None
 
 
-def _is_ignored_merge_status_line(line: str) -> bool:
-    if len(line) < 4:
+def _is_ignored_merge_status_line(
+    line: str,
+    *,
+    primary_root: Path,
+    original_plan_path: Path | None,
+) -> bool:
+    if len(line) < 3:
         return False
     xy = line[:2]
-    path = line[3:]
+    path = line[3:] if len(line) >= 4 and line[2] == " " else line[2:]
+    path = path.strip()
     if " -> " in path:
         path = path.split(" -> ", 1)[1]
-    return xy == "??" and (
+    path = path.strip('"')
+    if xy == "??" and (
         path == ".aflow"
         or path.startswith(".aflow/")
         or path == "plans/backups"
         or path.startswith("plans/backups/")
-    )
+    ):
+        return True
+    if original_plan_path is None:
+        return False
+    try:
+        rel = original_plan_path.resolve().relative_to(primary_root.resolve()).as_posix()
+    except ValueError:
+        return False
+    return path == rel
 
 
 def _rm_worktree_safe(primary_root: Path, worktree_path: Path) -> None:
@@ -1394,6 +1507,7 @@ def run_workflow(
     if lifecycle_plan is not None:
         try:
             exec_ctx = _do_lifecycle_setup(config.repo_root, lifecycle_plan)
+            _sync_plan_branch_for_execution(original_plan_path, exec_ctx)
         except WorkflowError as exc:
             state.status_message = "failed"
             banner.stop(state)
@@ -1746,16 +1860,9 @@ def run_workflow(
             )
             parsed_after = load_plan(resolved_exec_plan_path)
 
-            # Sync plan back from worktree to primary for durability.
-            # Skip for successful merges since the merge will bring in the changes automatically.
-            # Always sync for failed turns so restart state reflects the latest plan edits.
-            skip_sync_for_merge = (
-                exec_ctx is not None
-                and exec_ctx.worktree_path is not None
-                and "merge" in exec_ctx.teardown
-                and completed.returncode == 0
-            )
-            if exec_ctx is not None and exec_ctx.worktree_path is not None and not skip_sync_for_merge:
+            # Sync the original plan back after every worktree turn so the
+            # primary checkout remains the durable source of truth between turns.
+            if exec_ctx is not None and exec_ctx.worktree_path is not None:
                 _sync_plan_from_worktree(original_plan_path, exec_ctx)
 
             if resolved_exec_plan_path != exec_original:
@@ -2031,7 +2138,12 @@ def run_workflow(
             merge_failure_reason: str | None = None
 
             if exec_ctx is not None and "merge" in exec_ctx.teardown:
+                prepared_primary_plan: _PreparedPrimaryPlanForMerge | None = None
                 try:
+                    prepared_primary_plan = _prepare_primary_plan_for_merge(
+                        config.repo_root,
+                        original_plan_path,
+                    )
                     merge_completed = _execute_merge_handoff(
                         exec_ctx, wf, workflow_config,
                         team_name=team_name,
@@ -2046,21 +2158,26 @@ def run_workflow(
                         state=state,
                     )
                 except WorkflowError as exc:
+                    _restore_primary_plan_after_merge(prepared_primary_plan)
                     merge_status = "failed"
                     merge_failure_reason = exc.summary
                 else:
                     stop_reason = _detect_stop_marker(merge_completed.stdout, merge_completed.stderr)
                     if stop_reason is not None:
+                        _restore_primary_plan_after_merge(prepared_primary_plan)
                         merge_status = "failed"
                         merge_failure_reason = f"AFLOW_STOP: {stop_reason}"
                     elif merge_completed.returncode != 0:
+                        _restore_primary_plan_after_merge(prepared_primary_plan)
                         merge_status = "failed"
                         merge_failure_reason = f"merge agent exited with code {merge_completed.returncode}"
                     else:
+                        _restore_primary_plan_after_merge(prepared_primary_plan)
                         check_failure = _verify_merge_success(
                             config.repo_root,
                             exec_ctx.main_branch,
                             exec_ctx.feature_branch,
+                            original_plan_path=original_plan_path,
                         )
                         if check_failure is not None:
                             merge_status = "failed"

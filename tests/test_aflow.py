@@ -4738,6 +4738,22 @@ def _make_simple_wf_config(
 _VALID_PLAN = '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n'
 _COMPLETE_PLAN = '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n'
 _BROKEN_PLAN = '# Plan\n\n### [x] Checkpoint 1: First\n- [ ] step one\n'
+_VALID_GIT_TRACKING_PLAN = textwrap.dedent(
+    '''\
+    # Plan
+
+    ## Git Tracking
+
+    - Plan Branch: `main`
+    - Pre-Handoff Base HEAD: `base`
+    - Last Reviewed HEAD: `none`
+    - Review Log:
+      - None yet.
+
+    ### [ ] Checkpoint 1: First
+    - [ ] step one
+    '''
+)
 
 
 class RetryInconsistentCheckpointWorkflowTests(unittest.TestCase):
@@ -5447,6 +5463,34 @@ def _make_worktree_wf_config(main_branch: str = 'main', worktree_root: str = '/t
     )
 
 
+def _make_worktree_no_merge_wf_config(
+    *,
+    main_branch: str = 'main',
+    worktree_root: str = '/tmp/worktrees',
+    prompts: tuple[str, ...] = ('p',),
+) -> WorkflowUserConfig:
+    return WorkflowUserConfig(
+        aflow=AflowSection(team_lead='senior_architect', worktree_root=worktree_root),
+        roles={
+            'architect': 'codex.default',
+            'senior_architect': 'codex.default',
+        },
+        harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='m')})},
+        workflows={'wt_wf': WorkflowConfig(
+            steps={'impl': WorkflowStepConfig(
+                role='architect',
+                prompts=prompts,
+                go=(GoTransition(to='END', when='DONE || MAX_TURNS_REACHED'), GoTransition(to='impl')),
+            )},
+            first_step='impl',
+            setup=('worktree', 'branch'),
+            teardown=(),
+            main_branch=main_branch,
+        )},
+        prompts={'p': 'Work from {ACTIVE_PLAN_PATH}.'},
+    )
+
+
 class WorkflowLifecycleRuntimeTests(unittest.TestCase):
 
     def test_preflight_fails_when_not_on_main_branch(self) -> None:
@@ -5541,6 +5585,162 @@ class WorkflowLifecycleRuntimeTests(unittest.TestCase):
             )
             # Worktree workflow succeeded with untracked plan, proving the new sync support works
             assert call_count[0] >= 1
+
+    def test_worktree_rewrites_plan_branch_to_feature_branch_before_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_root = root / 'repo'
+            repo_root.mkdir()
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            worktree_root = root / 'worktrees'
+            worktree_root.mkdir()
+            plan_path = repo_root / 'plans' / 'in-progress' / 'plan.md'
+            plan_path.parent.mkdir(parents=True, exist_ok=True)
+            _write_plan(plan_path, _VALID_GIT_TRACKING_PLAN)
+            wf_config = _make_worktree_no_merge_wf_config(worktree_root=str(worktree_root))
+
+            def runner(argv, **kwargs):
+                cwd = Path(kwargs['cwd'])
+                exec_plan = cwd / plan_path.relative_to(repo_root)
+                rc, branch_name, _ = _run_git_in_test(['branch', '--show-current'], cwd=cwd)
+                assert rc == 0
+                text = exec_plan.read_text(encoding='utf-8')
+                assert f'- Plan Branch: `{branch_name}`' in text
+                assert '- Plan Branch: `main`' not in text
+                updated = text.replace('### [ ] Checkpoint 1: First', '### [x] Checkpoint 1: First')
+                updated = updated.replace('- [ ] step one', '- [x] step one')
+                _write_plan(exec_plan, updated)
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=2),
+                wf_config, 'wt_wf', config_dir=repo_root,
+                adapter=CodexAdapter(), runner=runner,
+            )
+
+            primary_text = plan_path.read_text(encoding='utf-8')
+            assert '- Plan Branch: `main`' not in primary_text
+
+    def test_worktree_syncs_original_plan_back_after_successful_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_root = root / 'repo'
+            repo_root.mkdir()
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            worktree_root = root / 'worktrees'
+            worktree_root.mkdir()
+            plan_path = repo_root / 'plans' / 'in-progress' / 'plan.md'
+            plan_path.parent.mkdir(parents=True, exist_ok=True)
+            _write_plan(plan_path, _VALID_GIT_TRACKING_PLAN)
+            wf_config = _make_worktree_no_merge_wf_config(worktree_root=str(worktree_root))
+            call_count = [0]
+            marker = '  - synced marker\n'
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                cwd = Path(kwargs['cwd'])
+                exec_plan = cwd / plan_path.relative_to(repo_root)
+                text = exec_plan.read_text(encoding='utf-8')
+                if call_count[0] == 1:
+                    updated = text.replace('  - None yet.\n', '  - None yet.\n' + marker)
+                    _write_plan(exec_plan, updated)
+                else:
+                    assert marker in text
+                    updated = text.replace('### [ ] Checkpoint 1: First', '### [x] Checkpoint 1: First')
+                    updated = updated.replace('- [ ] step one', '- [x] step one')
+                    _write_plan(exec_plan, updated)
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                wf_config, 'wt_wf', config_dir=repo_root,
+                adapter=CodexAdapter(), runner=runner,
+            )
+
+            assert call_count[0] == 2
+            assert marker in plan_path.read_text(encoding='utf-8')
+
+    def test_worktree_merge_restores_untracked_original_plan_after_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_root = root / 'repo'
+            repo_root.mkdir()
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            worktree_root = root / 'worktrees'
+            worktree_root.mkdir()
+            exclude_path = repo_root / '.git' / 'info' / 'exclude'
+            exclude_path.write_text(
+                exclude_path.read_text(encoding='utf-8') + '\n/plans\n',
+                encoding='utf-8',
+            )
+            plan_path = repo_root / 'plans' / 'in-progress' / 'plan.md'
+            plan_path.parent.mkdir(parents=True, exist_ok=True)
+            _write_plan(plan_path, _VALID_GIT_TRACKING_PLAN)
+            wf_config = _make_worktree_wf_config(worktree_root=str(worktree_root))
+            call_count = [0]
+            marker = '  - merged marker\n'
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                cwd = Path(kwargs['cwd'])
+                if call_count[0] == 1:
+                    exec_plan = cwd / plan_path.relative_to(repo_root)
+                    text = exec_plan.read_text(encoding='utf-8')
+                    updated = text.replace('  - None yet.\n', '  - None yet.\n' + marker)
+                    updated = updated.replace('### [ ] Checkpoint 1: First', '### [x] Checkpoint 1: First')
+                    updated = updated.replace('- [ ] step one', '- [x] step one')
+                    _write_plan(exec_plan, updated)
+                else:
+                    _git_merge_feature_into_main(cwd, 'main')
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                wf_config, 'wt_wf', config_dir=repo_root,
+                adapter=CodexAdapter(), runner=runner,
+            )
+
+            assert call_count[0] == 2
+            assert marker in plan_path.read_text(encoding='utf-8')
+
+    def test_worktree_merge_preserves_tracked_original_plan_sync_after_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_root = root / 'repo'
+            repo_root.mkdir()
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            worktree_root = root / 'worktrees'
+            worktree_root.mkdir()
+            plan_path = repo_root / 'plans' / 'in-progress' / 'plan.md'
+            plan_path.parent.mkdir(parents=True, exist_ok=True)
+            _write_plan(plan_path, _VALID_GIT_TRACKING_PLAN)
+            _git_commit_file(repo_root, plan_path)
+            wf_config = _make_worktree_wf_config(worktree_root=str(worktree_root))
+            call_count = [0]
+            marker = '  - tracked merge marker\n'
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                cwd = Path(kwargs['cwd'])
+                if call_count[0] == 1:
+                    exec_plan = cwd / plan_path.relative_to(repo_root)
+                    text = exec_plan.read_text(encoding='utf-8')
+                    updated = text.replace('  - None yet.\n', '  - None yet.\n' + marker)
+                    updated = updated.replace('### [ ] Checkpoint 1: First', '### [x] Checkpoint 1: First')
+                    updated = updated.replace('- [ ] step one', '- [x] step one')
+                    _write_plan(exec_plan, updated)
+                else:
+                    _git_merge_feature_into_main(cwd, 'main')
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                wf_config, 'wt_wf', config_dir=repo_root,
+                adapter=CodexAdapter(), runner=runner,
+            )
+
+            assert call_count[0] == 2
+            assert marker in plan_path.read_text(encoding='utf-8')
 
     def test_worktree_syncs_plan_back_even_on_harness_failure(self) -> None:
         """Verify plan edits are synced back from worktree even when harness returns non-zero."""
