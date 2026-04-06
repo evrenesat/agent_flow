@@ -18,6 +18,7 @@ class CheckpointSection:
     name: str
     heading_checked: bool
     unchecked_step_count: int
+    checked_step_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,15 @@ class ParsedPlan:
 class TolerantPlanLoadResult:
     parsed_plan: ParsedPlan
     parse_error: PlanParseError | None
+
+
+@dataclass(frozen=True)
+class GitTrackingMetadata:
+    """Parsed Git Tracking section metadata."""
+    plan_branch: str | None
+    pre_handoff_base_head: str | None
+    last_reviewed_head: str | None
+    review_log_entries: tuple[str, ...]
 
 
 class PlanParseError(ValueError):
@@ -96,6 +106,218 @@ def plan_has_git_tracking(text: str) -> bool:
     return False
 
 
+def _live_git_tracking_heading_line_numbers(text: str) -> tuple[int, ...]:
+    line_numbers: list[int] = []
+    in_fence = False
+    fence_char: str | None = None
+    fence_len = 0
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        fence_match = FENCE_RE.match(line)
+        if fence_match:
+            marker = fence_match.group(1)
+            if not in_fence:
+                in_fence = True
+                fence_char = marker[0]
+                fence_len = len(marker)
+            elif marker[0] == fence_char and len(marker) >= fence_len:
+                in_fence = False
+                fence_char = None
+                fence_len = 0
+            continue
+        if in_fence:
+            continue
+        if GIT_TRACKING_RE.match(line):
+            line_numbers.append(line_number)
+    return tuple(line_numbers)
+
+
+def parse_git_tracking_metadata(text: str) -> GitTrackingMetadata | None:
+    """Parse Git Tracking metadata from plan text, ignoring content inside fenced blocks.
+    
+    Returns None if no ## Git Tracking section is found outside fences.
+    """
+    heading_line_numbers = _live_git_tracking_heading_line_numbers(text)
+    if not heading_line_numbers:
+        return None
+    if len(heading_line_numbers) > 1:
+        raise ValueError("AFLOW_STOP: git tracking metadata is ambiguous across multiple live sections")
+
+    in_fence = False
+    fence_char: str | None = None
+    fence_len = 0
+    lines_after_heading: list[str] = []
+    found_heading = False
+
+    for line in text.splitlines():
+        fence_match = FENCE_RE.match(line)
+        if fence_match:
+            marker = fence_match.group(1)
+            if not in_fence:
+                in_fence = True
+                fence_char = marker[0]
+                fence_len = len(marker)
+            elif marker[0] == fence_char and len(marker) >= fence_len:
+                in_fence = False
+                fence_char = None
+                fence_len = 0
+            continue
+        
+        if in_fence:
+            continue
+
+        if not found_heading:
+            if GIT_TRACKING_RE.match(line):
+                found_heading = True
+            continue
+
+        if NON_CHECKPOINT_HEADING_RE.match(line):
+            break
+
+        lines_after_heading.append(line)
+
+    plan_branch: str | None = None
+    pre_handoff_base_head: str | None = None
+    last_reviewed_head: str | None = None
+    review_log_entries: list[str] = []
+    in_review_log = False
+
+    for line in lines_after_heading:
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        if stripped.startswith('- Plan Branch:'):
+            match = re.search(r'`([^`]*)`', stripped)
+            if match:
+                plan_branch = match.group(1)
+            continue
+
+        if stripped.startswith('- Pre-Handoff Base HEAD:'):
+            match = re.search(r'`([^`]*)`', stripped)
+            if match:
+                pre_handoff_base_head = match.group(1)
+            continue
+
+        if stripped.startswith('- Last Reviewed HEAD:'):
+            match = re.search(r'`([^`]*)`', stripped)
+            if match:
+                last_reviewed_head = match.group(1)
+            continue
+
+        if stripped.startswith('- Review Log:'):
+            in_review_log = True
+            continue
+
+        if in_review_log:
+            if stripped.startswith('- '):
+                review_log_entries.append(stripped[2:])
+            elif stripped.startswith('  '):
+                review_log_entries.append(stripped)
+            else:
+                break
+    
+    return GitTrackingMetadata(
+        plan_branch=plan_branch,
+        pre_handoff_base_head=pre_handoff_base_head,
+        last_reviewed_head=last_reviewed_head,
+        review_log_entries=tuple(review_log_entries),
+    )
+
+
+def is_handoff_pristine_for_base_refresh(metadata: GitTrackingMetadata, sections: tuple[CheckpointSection, ...]) -> bool:
+    """Determine if a handoff is pristine enough for a startup base-HEAD refresh.
+    
+    A handoff is considered pristine if:
+    - No checkpoint headings are checked
+    - No checkpoint steps are checked
+    - Last Reviewed HEAD is exactly 'none'
+    - Review Log contains only the single sentinel 'None yet.' entry
+    """
+    for section in sections:
+        if section.heading_checked:
+            return False
+        if section.checked_step_count > 0:
+            return False
+
+    if metadata.last_reviewed_head != 'none':
+        return False
+
+    if len(metadata.review_log_entries) != 1:
+        return False
+    if metadata.review_log_entries[0].strip() != 'None yet.':
+        return False
+
+    return True
+
+
+def rewrite_git_tracking_field(text: str, field: str, new_value: str) -> str:
+    """Rewrite only the specified Git Tracking field outside fenced blocks.
+    
+    Args:
+        text: The full plan text
+        field: The field to rewrite ('Pre-Handoff Base HEAD', 'Plan Branch', etc.)
+        new_value: The new value (without backticks)
+    
+    Returns:
+        The updated text with only the specified field modified
+    """
+    heading_line_numbers = _live_git_tracking_heading_line_numbers(text)
+    if len(heading_line_numbers) > 1:
+        raise ValueError("AFLOW_STOP: git tracking metadata is ambiguous across multiple live sections")
+    if not heading_line_numbers:
+        return text
+
+    lines = text.splitlines(keepends=True)
+    result_lines: list[str] = []
+    in_fence = False
+    fence_char: str | None = None
+    fence_len = 0
+    found_heading = False
+    field_rewritten = False
+    field_prefix = f'- {field}:'
+
+    for line in lines:
+        fence_match = FENCE_RE.match(line)
+        if fence_match:
+            marker = fence_match.group(1)
+            if not in_fence:
+                in_fence = True
+                fence_char = marker[0]
+                fence_len = len(marker)
+            elif marker[0] == fence_char and len(marker) >= fence_len:
+                in_fence = False
+                fence_char = None
+                fence_len = 0
+            result_lines.append(line)
+            continue
+        
+        if in_fence:
+            result_lines.append(line)
+            continue
+
+        if not found_heading:
+            if GIT_TRACKING_RE.match(line):
+                found_heading = True
+            result_lines.append(line)
+            continue
+
+        if NON_CHECKPOINT_HEADING_RE.match(line):
+            result_lines.append(line)
+            continue
+
+        if not field_rewritten and line.strip().startswith(field_prefix):
+            match = re.match(r'^(\s*-\s+' + re.escape(field) + r':\s+`)([^`]*)(`\r?\n?)$', line)
+            if match:
+                new_line = f"{match.group(1)}{new_value}{match.group(3)}"
+                result_lines.append(new_line)
+                field_rewritten = True
+                continue
+        
+        result_lines.append(line)
+    
+    return ''.join(result_lines)
+
+
 def _collect_sections(text: str, *, source_path: Path) -> tuple[CheckpointSection, ...]:
     sections: list[CheckpointSection] = []
     current_section: dict[str, object] | None = None
@@ -130,6 +352,7 @@ def _collect_sections(text: str, *, source_path: Path) -> tuple[CheckpointSectio
                         name=str(current_section["name"]),
                         heading_checked=bool(current_section["heading_checked"]),
                         unchecked_step_count=int(current_section["unchecked_step_count"]),
+                        checked_step_count=int(current_section["checked_step_count"]),
                     )
                 )
             current_section = {
@@ -137,6 +360,7 @@ def _collect_sections(text: str, *, source_path: Path) -> tuple[CheckpointSectio
                 "name": section_match.group(2).strip(),
                 "heading_checked": section_match.group(1).lower() == "x",
                 "unchecked_step_count": 0,
+                "checked_step_count": 0,
             }
             in_checkpoint_scope = True
             continue
@@ -149,8 +373,12 @@ def _collect_sections(text: str, *, source_path: Path) -> tuple[CheckpointSectio
             continue
 
         step_match = STEP_RE.match(line)
-        if step_match and step_match.group(1).lower() == " ":
+        if not step_match:
+            continue
+        if step_match.group(1).lower() == " ":
             current_section["unchecked_step_count"] = int(current_section["unchecked_step_count"]) + 1
+        else:
+            current_section["checked_step_count"] = int(current_section["checked_step_count"]) + 1
 
     if current_section is not None:
         sections.append(
@@ -159,6 +387,7 @@ def _collect_sections(text: str, *, source_path: Path) -> tuple[CheckpointSectio
                 name=str(current_section["name"]),
                 heading_checked=bool(current_section["heading_checked"]),
                 unchecked_step_count=int(current_section["unchecked_step_count"]),
+                checked_step_count=int(current_section["checked_step_count"]),
             )
         )
 

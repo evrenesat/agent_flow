@@ -10,6 +10,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Callable
 
@@ -24,7 +25,18 @@ from .config import (
 from .git_status import classify_dirtiness_by_prefix, RepoState, probe_repo_state
 from .harnesses import get_adapter
 from .harnesses.base import HarnessAdapter, HarnessInvocation
-from .plan import FENCE_RE, ParsedPlan, PlanParseError, PlanSnapshot, load_plan, load_plan_tolerant, plan_has_git_tracking
+from .plan import (
+    FENCE_RE,
+    ParsedPlan,
+    PlanParseError,
+    PlanSnapshot,
+    is_handoff_pristine_for_base_refresh,
+    load_plan,
+    load_plan_tolerant,
+    parse_git_tracking_metadata,
+    plan_has_git_tracking,
+    rewrite_git_tracking_field,
+)
 from .run_state import ControllerConfig, ControllerRunResult, ControllerState, ExecutionContext, RetryContext, ResumeContext, TurnRecord, WorkflowEndReason, format_harness_model_display
 from .runlog import create_run_paths, finalize_turn_artifacts, prune_old_runs, write_run_metadata, write_turn_artifacts_start
 from .status import BannerRenderer
@@ -39,6 +51,25 @@ _REVIEW_SKILL_NAMES = frozenset({
     "aflow-review-final",
 })
 _PLAN_BRANCH_LINE_RE = re.compile(r"^(\s*-\s+Plan Branch:\s+`)([^`]+)(`.*)$", re.MULTILINE)
+
+
+class StartupBaseHeadRefreshStatus(str, Enum):
+    NO_GIT_TRACKING = "no_git_tracking"
+    NO_RESOLVABLE_HEAD = "no_resolvable_head"
+    MATCH = "match"
+    MALFORMED = "malformed"
+    EMPTY_BASE_STARTED = "empty_base_started"
+    EMPTY_BASE_PRISTINE = "empty_base_pristine"
+    MISMATCH_STARTED = "mismatch_started"
+    MISMATCH_PRISTINE = "mismatch_pristine"
+
+
+@dataclass(frozen=True)
+class StartupBaseHeadRefreshResult:
+    status: StartupBaseHeadRefreshStatus
+    current_head: str | None = None
+    recorded_base_head: str | None = None
+    is_pristine: bool | None = None
 
 
 class WorkflowError(RuntimeError):
@@ -254,16 +285,20 @@ def render_step_prompts(
     return "\n\n".join(parts)
 
 
+def _rewrite_plan_branch_text(text: str, branch_name: str) -> str:
+    return _PLAN_BRANCH_LINE_RE.sub(
+        lambda match: f"{match.group(1)}{branch_name}{match.group(3)}",
+        text,
+        count=1,
+    )
+
+
 def _update_plan_branch(path: Path, branch_name: str) -> bool:
     try:
         if not path.is_file():
             return False
         text = path.read_text(encoding="utf-8")
-        updated = _PLAN_BRANCH_LINE_RE.sub(
-            lambda match: f"{match.group(1)}{branch_name}{match.group(3)}",
-            text,
-            count=1,
-        )
+        updated = _rewrite_plan_branch_text(text, branch_name)
         if updated == text:
             return False
         path.write_text(updated, encoding="utf-8")
@@ -281,6 +316,98 @@ def _sync_plan_branch_for_execution(
     if exec_ctx is None:
         return
     _update_plan_branch(original_plan_path, exec_ctx.feature_branch)
+
+
+def _sync_startup_plan_metadata_for_execution(
+    original_plan_path: Path,
+    exec_ctx: ExecutionContext | None,
+    *,
+    startup_base_head_refresh_sha: str | None,
+) -> None:
+    if exec_ctx is None and startup_base_head_refresh_sha is None:
+        return
+    if not original_plan_path.is_file():
+        raise WorkflowError(f"startup metadata sync: original plan file does not exist: {original_plan_path}")
+
+    text = original_plan_path.read_text(encoding="utf-8")
+    updated = text
+    try:
+        if exec_ctx is not None:
+            updated = _rewrite_plan_branch_text(updated, exec_ctx.feature_branch)
+        if startup_base_head_refresh_sha is not None:
+            before_refresh = updated
+            updated = rewrite_git_tracking_field(
+                updated,
+                "Pre-Handoff Base HEAD",
+                startup_base_head_refresh_sha,
+            )
+            if updated == before_refresh:
+                raise WorkflowError(
+                    "startup metadata sync did not update Pre-Handoff Base HEAD in the original plan"
+                )
+    except ValueError as exc:
+        raise WorkflowError(str(exc)) from exc
+
+    if updated != text:
+        original_plan_path.write_text(updated, encoding="utf-8")
+
+
+def preflight_pre_handoff_base_head_refresh(
+    repo_root: Path,
+    plan_text: str,
+    parsed_plan: ParsedPlan,
+) -> StartupBaseHeadRefreshResult:
+    metadata = parse_git_tracking_metadata(plan_text)
+    if metadata is None:
+        return StartupBaseHeadRefreshResult(
+            status=StartupBaseHeadRefreshStatus.NO_GIT_TRACKING,
+        )
+
+    rc, current_head, _ = _run_git(["rev-parse", "HEAD"], cwd=repo_root)
+    if rc != 0 or not current_head.strip():
+        return StartupBaseHeadRefreshResult(
+            status=StartupBaseHeadRefreshStatus.NO_RESOLVABLE_HEAD,
+        )
+
+    if metadata.pre_handoff_base_head is None:
+        return StartupBaseHeadRefreshResult(
+            status=StartupBaseHeadRefreshStatus.MALFORMED,
+            current_head=current_head,
+        )
+
+    is_pristine = is_handoff_pristine_for_base_refresh(metadata, parsed_plan.sections)
+    recorded_base_head = metadata.pre_handoff_base_head
+
+    if recorded_base_head == "":
+        return StartupBaseHeadRefreshResult(
+            status=(
+                StartupBaseHeadRefreshStatus.EMPTY_BASE_PRISTINE
+                if is_pristine
+                else StartupBaseHeadRefreshStatus.EMPTY_BASE_STARTED
+            ),
+            current_head=current_head,
+            recorded_base_head=recorded_base_head,
+            is_pristine=is_pristine,
+        )
+
+    if recorded_base_head == current_head:
+        return StartupBaseHeadRefreshResult(
+            status=StartupBaseHeadRefreshStatus.MATCH,
+            current_head=current_head,
+            recorded_base_head=recorded_base_head,
+            is_pristine=is_pristine,
+        )
+
+    return StartupBaseHeadRefreshResult(
+        status=(
+            StartupBaseHeadRefreshStatus.MISMATCH_PRISTINE
+            if is_pristine
+            else StartupBaseHeadRefreshStatus.MISMATCH_STARTED
+        ),
+        current_head=current_head,
+        recorded_base_head=recorded_base_head,
+        is_pristine=is_pristine,
+    )
 
 
 def generate_new_plan_path(
@@ -1847,6 +1974,7 @@ def run_workflow(
     *,
     parsed_plan: ParsedPlan | None = None,
     startup_retry: RetryContext | None = None,
+    startup_base_head_refresh_sha: str | None = None,
     config_dir: Path,
     working_dir: Path | None = None,
     adapter: HarnessAdapter | None = None,
@@ -1949,10 +2077,71 @@ def run_workflow(
             workflow_name=workflow_name, original_plan_path=original_plan_path,
             active_plan_path=active_plan_path,
             resumed_from_run_id=resumed_from_run_id,
-        )
+            )
             raise WorkflowError(summary, run_dir=run_paths.run_dir)
 
     original_snapshot = parsed_plan.snapshot
+
+    def _abort_startup_base_head_refresh(reason: str) -> None:
+        state.status_message = "failed"
+        banner.stop(state)
+        summary = _format_failure(
+            reason=reason,
+            run_dir=run_paths.run_dir,
+            snapshot=original_snapshot,
+        )
+        write_run_metadata(
+            run_paths, config, state, status="failed", failure_reason=summary,
+            workflow_name=workflow_name, original_plan_path=original_plan_path,
+            active_plan_path=active_plan_path,
+            resumed_from_run_id=resumed_from_run_id,
+        )
+        raise WorkflowError(summary, run_dir=run_paths.run_dir)
+
+    try:
+        startup_base_head_refresh_check = preflight_pre_handoff_base_head_refresh(
+            config.repo_root,
+            original_plan_path.read_text(encoding="utf-8"),
+            parsed_plan,
+        )
+    except ValueError as exc:
+        _abort_startup_base_head_refresh(str(exc))
+    if startup_base_head_refresh_check.status in {
+        StartupBaseHeadRefreshStatus.NO_GIT_TRACKING,
+        StartupBaseHeadRefreshStatus.NO_RESOLVABLE_HEAD,
+        StartupBaseHeadRefreshStatus.MATCH,
+    }:
+        pass
+    elif startup_base_head_refresh_check.status in {
+        StartupBaseHeadRefreshStatus.MALFORMED,
+        StartupBaseHeadRefreshStatus.EMPTY_BASE_STARTED,
+        StartupBaseHeadRefreshStatus.MISMATCH_STARTED,
+    }:
+        _abort_startup_base_head_refresh(
+            f"startup preflight rejected Pre-Handoff Base HEAD state: "
+            f"{startup_base_head_refresh_check.status.value}"
+        )
+    else:
+        if startup_base_head_refresh_sha is None:
+            _abort_startup_base_head_refresh(
+                f"startup preflight requires approval to refresh Pre-Handoff Base HEAD "
+                f"({startup_base_head_refresh_check.status.value})"
+            )
+        elif startup_base_head_refresh_check.current_head != startup_base_head_refresh_sha:
+            _abort_startup_base_head_refresh(
+                "startup preflight approval does not match current HEAD for "
+                "Pre-Handoff Base HEAD refresh"
+            )
+
+    should_refresh_pre_handoff_base_head = (
+        startup_base_head_refresh_check.status
+        in {
+            StartupBaseHeadRefreshStatus.EMPTY_BASE_PRISTINE,
+            StartupBaseHeadRefreshStatus.MISMATCH_PRISTINE,
+        }
+        and startup_base_head_refresh_sha is not None
+    )
+
     state.last_snapshot = original_snapshot
     if startup_retry is not None:
         state.pending_retry = startup_retry
@@ -2017,7 +2206,13 @@ def run_workflow(
                 setup=resume.setup,
                 teardown=resume.teardown,
             )
-            _sync_plan_branch_for_execution(original_plan_path, exec_ctx)
+            _sync_startup_plan_metadata_for_execution(
+                original_plan_path,
+                exec_ctx,
+                startup_base_head_refresh_sha=(
+                    startup_base_head_refresh_sha if should_refresh_pre_handoff_base_head else None
+                ),
+            )
         except WorkflowError as exc:
             state.status_message = "failed"
             banner.stop(state)
@@ -2086,7 +2281,13 @@ def run_workflow(
                     allow_untracked=True,
                 )
             exec_ctx = _do_lifecycle_setup(config.repo_root, lifecycle_plan)
-            _sync_plan_branch_for_execution(original_plan_path, exec_ctx)
+            _sync_startup_plan_metadata_for_execution(
+                original_plan_path,
+                exec_ctx,
+                startup_base_head_refresh_sha=(
+                    startup_base_head_refresh_sha if should_refresh_pre_handoff_base_head else None
+                ),
+            )
         except WorkflowError as exc:
             state.status_message = "failed"
             banner.stop(state)
@@ -2103,6 +2304,15 @@ def run_workflow(
                 resumed_from_run_id=resumed_from_run_id,
             )
             raise WorkflowError(summary, run_dir=run_paths.run_dir) from exc
+
+    if exec_ctx is None:
+        _sync_startup_plan_metadata_for_execution(
+            original_plan_path,
+            None,
+            startup_base_head_refresh_sha=(
+                startup_base_head_refresh_sha if should_refresh_pre_handoff_base_head else None
+            ),
+        )
 
     execution_repo_root = exec_ctx.execution_repo_root if exec_ctx else config.repo_root
 

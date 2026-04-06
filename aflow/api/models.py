@@ -17,6 +17,7 @@ class StartupQuestionKind(str, Enum):
 
     CONFIRM_RECOVERY = "confirm_recovery"
     PICK_STEP = "pick_step"
+    CONFIRM_BASE_HEAD_REFRESH = "confirm_base_head_refresh"
     CONFIRM_WORKTREE_DIRTY = "confirm_worktree_dirty"
 
 
@@ -46,6 +47,7 @@ class StartupRequest:
     extra_instructions: tuple[str, ...] = ()
     pre_recovered_plan: object | None = None
     startup_retry_error: str | None = None
+    startup_base_head_refresh_sha: str | None = None
     dirty_worktree_confirmed: bool = False
 
 
@@ -64,6 +66,7 @@ class StartupContext:
     extra_instructions: tuple[str, ...]
     parsed_plan: object
     startup_retry_error: str | None = None
+    startup_base_head_refresh_sha: str | None = None
     selected_start_step: str | None = None
 
 
@@ -80,5 +83,6 @@ class PreparedRun:
     extra_instructions: tuple[str, ...]
     start_step: str
     startup_retry: RetryContext | None = None
+    startup_base_head_refresh_sha: str | None = None
     move_completed_plan_to_done: bool = False
     parsed_plan: object | None = None

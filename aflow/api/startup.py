@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from pathlib import Path
+from dataclasses import replace
 from typing import Literal
 
 from aflow.config import WorkflowStepConfig
@@ -14,9 +15,11 @@ from aflow.run_state import RetryContext
 from aflow.workflow import (
     _effective_retry_limit,
     generate_new_plan_path,
+    preflight_pre_handoff_base_head_refresh,
     render_step_prompts,
     resolve_role_selector,
     resolve_profile,
+    StartupBaseHeadRefreshStatus,
 )
 
 from .models import (
@@ -234,6 +237,21 @@ def _check_worktree_dirtiness(
     return True, dirty_desc
 
 
+def _preflight_startup_base_head_refresh(
+    request: StartupRequest,
+    parsed_plan: object,
+) -> object:
+    plan_text = request.plan_path.read_text(encoding="utf-8")
+    try:
+        return preflight_pre_handoff_base_head_refresh(
+            request.repo_root,
+            plan_text,
+            parsed_plan,
+        )
+    except ValueError as exc:
+        raise StartupError(str(exc)) from exc
+
+
 def prepare_startup(request: StartupRequest) -> PreparedRun | StartupQuestion:
     """Prepare workflow startup, returning either a prepared run or a question.
 
@@ -303,6 +321,46 @@ def prepare_startup(request: StartupRequest) -> PreparedRun | StartupQuestion:
             request.config_path,
         )
 
+    startup_base_head_refresh = _preflight_startup_base_head_refresh(request, parsed_plan)
+    if startup_base_head_refresh.status in {
+        StartupBaseHeadRefreshStatus.MALFORMED,
+        StartupBaseHeadRefreshStatus.EMPTY_BASE_STARTED,
+        StartupBaseHeadRefreshStatus.MISMATCH_STARTED,
+    }:
+        raise StartupError(
+            f"startup preflight rejected Pre-Handoff Base HEAD state: "
+            f"{startup_base_head_refresh.status.value}"
+        )
+
+    if startup_base_head_refresh.status in {
+        StartupBaseHeadRefreshStatus.EMPTY_BASE_PRISTINE,
+        StartupBaseHeadRefreshStatus.MISMATCH_PRISTINE,
+    } and request.startup_base_head_refresh_sha is None:
+        return StartupQuestion(
+            kind=StartupQuestionKind.CONFIRM_BASE_HEAD_REFRESH,
+            message=(
+                "Pre-Handoff Base HEAD does not match the current HEAD. "
+                "Continue and refresh it before the run starts?"
+            ),
+            options={"yes": "refresh", "no": "abort"},
+            continuation_request=replace(
+                request,
+                startup_base_head_refresh_sha=startup_base_head_refresh.current_head,
+            ),
+        )
+    if (
+        startup_base_head_refresh.status
+        in {
+            StartupBaseHeadRefreshStatus.EMPTY_BASE_PRISTINE,
+            StartupBaseHeadRefreshStatus.MISMATCH_PRISTINE,
+        }
+        and request.startup_base_head_refresh_sha is not None
+        and startup_base_head_refresh.current_head != request.startup_base_head_refresh_sha
+    ):
+        raise StartupError(
+            "startup approval does not match current HEAD for Pre-Handoff Base HEAD refresh"
+        )
+
     is_dirty, dirty_desc = _check_worktree_dirtiness(request, workflow_name)
     if is_dirty and not request.dirty_worktree_confirmed:
         return StartupQuestion(
@@ -326,6 +384,7 @@ def prepare_startup(request: StartupRequest) -> PreparedRun | StartupQuestion:
         extra_instructions=request.extra_instructions,
         start_step=selected_start_step,
         startup_retry=startup_retry,
+        startup_base_head_refresh_sha=request.startup_base_head_refresh_sha,
         move_completed_plan_to_done=is_complete_plan,
         parsed_plan=parsed_plan,
     )
@@ -363,16 +422,8 @@ def prepare_startup_with_answer(
         else:
             startup_retry_error = None
 
-        new_request = effective_request.__class__(
-            repo_root=effective_request.repo_root,
-            plan_path=effective_request.plan_path,
-            config_path=effective_request.config_path,
-            workflow_config=effective_request.workflow_config,
-            workflow_name=effective_request.workflow_name,
-            start_step=effective_request.start_step,
-            max_turns=effective_request.max_turns,
-            team=effective_request.team,
-            extra_instructions=effective_request.extra_instructions,
+        new_request = replace(
+            effective_request,
             pre_recovered_plan=parsed_plan,
             startup_retry_error=startup_retry_error,
         )
@@ -401,19 +452,9 @@ def prepare_startup_with_answer(
         else:
             raise StartupError(f"Invalid step answer type: {type(answer)}")
 
-        new_request = effective_request.__class__(
-            repo_root=effective_request.repo_root,
-            plan_path=effective_request.plan_path,
-            config_path=effective_request.config_path,
-            workflow_config=effective_request.workflow_config,
-            workflow_name=effective_request.workflow_name,
+        new_request = replace(
+            effective_request,
             start_step=selected_step,
-            max_turns=effective_request.max_turns,
-            team=effective_request.team,
-            extra_instructions=effective_request.extra_instructions,
-            pre_recovered_plan=effective_request.pre_recovered_plan,
-            startup_retry_error=effective_request.startup_retry_error,
-            dirty_worktree_confirmed=effective_request.dirty_worktree_confirmed,
         )
         result = prepare_startup(new_request)
         if isinstance(result, StartupQuestion):
@@ -426,21 +467,25 @@ def prepare_startup_with_answer(
             )
         return result
 
+    if question.kind == StartupQuestionKind.CONFIRM_BASE_HEAD_REFRESH:
+        if not isinstance(answer, bool) or not answer:
+            raise StartupError("Startup aborted due to Pre-Handoff Base HEAD mismatch")
+        result = prepare_startup(effective_request)
+        if isinstance(result, StartupQuestion):
+            return result.__class__(
+                kind=result.kind,
+                message=result.message,
+                options=result.options,
+                choices=result.choices,
+                continuation_request=effective_request,
+            )
+        return result
+
     if question.kind == StartupQuestionKind.CONFIRM_WORKTREE_DIRTY:
         if not isinstance(answer, bool) or not answer:
             raise StartupError("Startup aborted due to dirty worktree")
-        new_request = effective_request.__class__(
-            repo_root=effective_request.repo_root,
-            plan_path=effective_request.plan_path,
-            config_path=effective_request.config_path,
-            workflow_config=effective_request.workflow_config,
-            workflow_name=effective_request.workflow_name,
-            start_step=effective_request.start_step,
-            max_turns=effective_request.max_turns,
-            team=effective_request.team,
-            extra_instructions=effective_request.extra_instructions,
-            pre_recovered_plan=effective_request.pre_recovered_plan,
-            startup_retry_error=effective_request.startup_retry_error,
+        new_request = replace(
+            effective_request,
             dirty_worktree_confirmed=True,
         )
         result = prepare_startup(new_request)

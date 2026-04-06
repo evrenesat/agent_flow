@@ -6134,6 +6134,12 @@ def _git_commit_file(repo_root: Path, file_path: Path) -> None:
     subprocess.run(['git', 'commit', '-m', 'add file'], cwd=str(repo_root), check=True, capture_output=True)
 
 
+def _git_force_commit_file(repo_root: Path, file_path: Path) -> None:
+    """Force-stage and commit a file, even if the path is gitignored."""
+    subprocess.run(['git', 'add', '-f', str(file_path)], cwd=str(repo_root), check=True, capture_output=True)
+    subprocess.run(['git', 'commit', '-m', 'add file'], cwd=str(repo_root), check=True, capture_output=True)
+
+
 def _make_branch_only_wf_config(main_branch: str = 'main') -> WorkflowUserConfig:
     """Build a minimal branch-only lifecycle workflow config."""
     return WorkflowUserConfig(
