@@ -1967,6 +1967,42 @@ class WorkflowLifecycleRuntimeTests(unittest.TestCase):
             # Worktree workflow succeeded with untracked plan, proving the new sync support works
             assert call_count[0] >= 1
 
+    def test_worktree_accepts_tracked_modified_original_plan(self) -> None:
+        """Tracked plan edits in the primary checkout must not be misclassified as non-plan dirtiness."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_root = root / 'repo'
+            repo_root.mkdir()
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            worktree_root = root / 'worktrees'
+            worktree_root.mkdir()
+            plan_path = repo_root / 'plans' / 'in-progress' / 'plan.md'
+            plan_path.parent.mkdir(parents=True, exist_ok=True)
+            _write_plan(plan_path, _VALID_PLAN)
+            _git_commit_file(repo_root, plan_path)
+            _write_plan(plan_path, _VALID_GIT_TRACKING_PLAN)
+            wf_config = _make_worktree_no_merge_wf_config(worktree_root=str(worktree_root))
+            call_count: list[int] = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                cwd = Path(kwargs['cwd'])
+                exec_plan = cwd / plan_path.relative_to(repo_root)
+                text = exec_plan.read_text(encoding='utf-8')
+                assert '- Plan Branch: `main`' not in text
+                updated = text.replace('### [ ] Checkpoint 1: First', '### [x] Checkpoint 1: First')
+                updated = updated.replace('- [ ] step one', '- [x] step one')
+                _write_plan(exec_plan, updated)
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=2),
+                wf_config, 'wt_wf', config_dir=repo_root,
+                adapter=CodexAdapter(), runner=runner,
+            )
+
+            assert call_count[0] == 1
+
     def test_worktree_rewrites_plan_branch_to_feature_branch_before_turn(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

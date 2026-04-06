@@ -848,7 +848,11 @@ def _run_git(args: list[str], *, cwd: Path) -> tuple[int, str, str]:
         text=True,
         check=False,
     )
-    return result.returncode, result.stdout.strip(), result.stderr.strip()
+    return (
+        result.returncode,
+        result.stdout.rstrip("\r\n"),
+        result.stderr.rstrip("\r\n"),
+    )
 
 
 def _is_git_tracked(repo_root: Path, path: Path) -> bool:
