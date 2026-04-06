@@ -421,13 +421,11 @@ p = "do it"
             plan_path = Path(tmpdir) / 'plan.md'
             _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n')
             original_home = os.environ.get('HOME')
-            original_probe = cli_module.probe_worktree
             try:
                 os.environ['HOME'] = str(home_dir)
-                cli_module.probe_worktree = lambda _: None
-                result = main(['run', 'other', str(plan_path)])
+                with patch('aflow.api.startup.probe_worktree', return_value=None):
+                    result = main(['run', 'other', str(plan_path)])
             finally:
-                cli_module.probe_worktree = original_probe
                 if original_home is None:
                     os.environ.pop('HOME', None)
                 else:
@@ -1107,7 +1105,9 @@ class WorkflowStartupFlowTests(unittest.TestCase):
                 os.chdir(original_cwd)
                 cli_module.probe_worktree = original_probe
             assert result == 1
-            assert 'interactive startup selection requires a terminal' in stderr_capture.getvalue().lower()
+            stderr_output = stderr_capture.getvalue().lower()
+            assert 're-run with --start-step' in stderr_output
+            assert 'available steps' in stderr_output
 
     def test_cli_requires_tty_for_startup_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1144,7 +1144,9 @@ class WorkflowStartupFlowTests(unittest.TestCase):
                 os.chdir(original_cwd)
                 cli_module.probe_worktree = original_probe
             assert result == 1
-            assert 'startup recovery for inconsistent checkpoint state requires an interactive terminal' in stderr_capture.getvalue().lower()
+            stderr_output = stderr_capture.getvalue().lower()
+            assert 'interactive confirmation is required' in stderr_output
+            assert 'inconsistent checkpoint state' in stderr_output
 
     def test_cli_one_step_workflow_skips_picker(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1345,7 +1347,6 @@ class DirtyWorktreeCliTests(unittest.TestCase):
         import aflow.cli as cli_module
         from aflow.git_status import WorktreeProbe
         dirty_probe = WorktreeProbe(is_dirty=True, modified_count=1, added_count=0, removed_count=0, sample_paths=())
-        original_probe = cli_module.probe_worktree
         original_resolve = cli_module._resolve_repo_root
         with tempfile.TemporaryDirectory() as tmpdir:
             home_dir = Path(tmpdir)
@@ -1355,14 +1356,13 @@ class DirtyWorktreeCliTests(unittest.TestCase):
             original_home = os.environ.get("HOME")
             try:
                 os.environ["HOME"] = str(home_dir)
-                cli_module.probe_worktree = lambda _: dirty_probe
                 cli_module._resolve_repo_root = lambda: home_dir
-                with patch("builtins.input", return_value=""), \
+                with patch("aflow.api.startup.probe_worktree", return_value=dirty_probe), \
+                     patch("builtins.input", return_value=""), \
                      patch("sys.stdin.isatty", return_value=True), \
                      patch("sys.stdout.isatty", return_value=True):
                     result = cli_module.main(["run", str(plan_path)])
             finally:
-                cli_module.probe_worktree = original_probe
                 cli_module._resolve_repo_root = original_resolve
                 if original_home is None:
                     os.environ.pop("HOME", None)
@@ -1374,7 +1374,6 @@ class DirtyWorktreeCliTests(unittest.TestCase):
         import aflow.cli as cli_module
         from aflow.git_status import WorktreeProbe
         dirty_probe = WorktreeProbe(is_dirty=True, modified_count=1, added_count=0, removed_count=0, sample_paths=())
-        original_probe = cli_module.probe_worktree
         original_resolve = cli_module._resolve_repo_root
         with tempfile.TemporaryDirectory() as tmpdir:
             home_dir = Path(tmpdir)
@@ -1386,14 +1385,13 @@ class DirtyWorktreeCliTests(unittest.TestCase):
             stderr_capture = io.StringIO()
             try:
                 os.environ["HOME"] = str(home_dir)
-                cli_module.probe_worktree = lambda _: dirty_probe
                 cli_module._resolve_repo_root = lambda: home_dir
-                with patch("sys.stdin.isatty", return_value=False), \
+                with patch("aflow.api.startup.probe_worktree", return_value=dirty_probe), \
+                     patch("sys.stdin.isatty", return_value=False), \
                      patch("sys.stdout.isatty", return_value=False), \
                      patch("sys.stderr", stderr_capture):
                     result = cli_module.main(["run", str(plan_path)])
             finally:
-                cli_module.probe_worktree = original_probe
                 cli_module._resolve_repo_root = original_resolve
                 if original_home is None:
                     os.environ.pop("HOME", None)
