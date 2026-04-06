@@ -190,13 +190,14 @@ Interpretation:
 
 ## How To Use This Reference
 
-1. Start with the bundled analyzer script for one run:
-   - `python scripts/analyze_runs.py --run .aflow/runs/<run-id>`
-   - or `python scripts/analyze_runs.py --repo-root <repo> --run-id <run-id>`
-2. If the user only gives a repo, the analyzer defaults to the latest substantive run:
-   - `python scripts/analyze_runs.py --repo-root <repo>`
+1. Start with the `aflow analyze` command for one run:
+   - `aflow analyze <run-id>`
+   - or `aflow analyze --repo-root <repo> <run-id>`
+2. If the user only gives a repo and no run ID, the analyzer defaults to the latest substantive run:
+   - `aflow analyze`
+   - or `aflow analyze --repo-root <repo>`
 3. Use `--all` only when you actually want repeated patterns across several runs:
-   - `python scripts/analyze_runs.py --repo-root <repo> --all`
+   - `aflow analyze --all`
 4. Read `run.json`.
 5. Read the most relevant turn `result.json`.
 6. Only then open raw stdout/stderr and prompts.

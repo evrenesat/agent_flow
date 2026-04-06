@@ -9,8 +9,8 @@ Use this skill when helping a user understand, debug, or recover an aflow run. T
 
 ## Bundled Resources
 
-- `scripts/analyze_runs.py`
-  - Deterministically extracts a single-run report by default and can also summarize a corpus when asked. It pulls out high-signal patterns such as merge failures, missing original plans, blocked review preconditions, interrupted runs, and alternating no-progress loops.
+- `aflow analyze`
+  - CLI command that deterministically extracts a single-run report by default and can also summarize a corpus when asked. It pulls out high-signal patterns such as merge failures, missing original plans, blocked review preconditions, interrupted runs, and alternating no-progress loops.
 - `references/engine-map.md`
   - High-level engine and artifact map for installed-skill scenarios where the original `aflow` source checkout is not present.
 
@@ -19,7 +19,7 @@ Use these bundled resources first. They are part of the shipped skill and remain
 ## Core Rules
 
 - Start from the most relevant run directory. If the user does not name one, inspect the latest run first.
-- If the user names a run or wants fast triage, run `python scripts/analyze_runs.py` for that one run before opening raw turn artifacts.
+- If the user names a run or wants fast triage, run `aflow analyze <run-id>` for that one run before opening raw turn artifacts.
 - Use corpus mode only when the user wants repeated patterns across several runs.
 - Read `run.json` before reading raw `stdout.txt` or `stderr.txt`.
 - Read `turns/turn-NNN/result.json` before opening full prompt or transcript artifacts.
@@ -34,19 +34,23 @@ Use these bundled resources first. They are part of the shipped skill and remain
 
 1. For a specific run, prefer:
    ```bash
-   python scripts/analyze_runs.py --run .aflow/runs/<run-id>
+   aflow analyze <run-id>
    ```
    or:
    ```bash
-   python scripts/analyze_runs.py --repo-root <repo> --run-id <run-id>
+   aflow analyze --repo-root <repo> <run-id>
    ```
-2. If the user only gives a repo, the analyzer defaults to the latest substantive run:
+2. If the user only gives a repo and no run ID, the analyzer defaults to the latest substantive run:
    ```bash
-   python scripts/analyze_runs.py --repo-root <repo>
+   aflow analyze
+   ```
+   or with explicit repo root:
+   ```bash
+   aflow analyze --repo-root <repo>
    ```
 3. Use corpus mode only for repeated-pattern hunting:
    ```bash
-   python scripts/analyze_runs.py --repo-root <repo> --all
+   aflow analyze --all
    ```
 4. Read `references/engine-map.md` before assuming you need direct source-code access.
 5. Use repo source files only when a source checkout is actually present and you need deeper implementation detail than the bundled reference provides.
@@ -70,8 +74,8 @@ Use these bundled resources first. They are part of the shipped skill and remain
   - Relevant only when investigating plan sync or backup behavior.
 - `references/engine-map.md`
   - Installed bundled architecture summary. Use this first when the skill is installed outside the original repo.
-- `scripts/analyze_runs.py`
-  - Installed bundled deterministic analyzer for single-run extraction first, with optional corpus mode.
+- `aflow analyze`
+  - CLI command for deterministic single-run extraction first, with optional corpus mode.
 - `README.md`
 - `ARCHITECTURE.md`
   - User-facing and architectural contract for lifecycle, run artifacts, retry behavior, banner behavior, and bundled skills.
@@ -177,7 +181,7 @@ Use these bundled resources first. They are part of the shipped skill and remain
 When the skill is installed into a harness directory, the original repo files such as `README.md`, `ARCHITECTURE.md`, `aflow/workflow.py`, and `tests/test_aflow.py` may not exist at all. In that case:
 
 1. Read `references/engine-map.md`.
-2. Use `scripts/analyze_runs.py` plus `run.json` and turn `result.json` as the primary evidence path.
+2. Use `aflow analyze` plus `run.json` and turn `result.json` as the primary evidence path.
 3. Escalate to source-code lookup only if the user is working inside an actual `aflow` source checkout.
 
 Do not tell the user to inspect source files that are not present in their environment.
@@ -214,7 +218,7 @@ rg -n "inconsistent checkpoint state|startup aborted|max_turns_reached" aflow te
 When reporting findings to the user:
 
 - Name the exact run directory and turn(s) used as evidence.
-- If you used `scripts/analyze_runs.py`, say so and cite the extracted signals, focus turns, and artifact paths rather than pasting full raw output.
+- If you used `aflow analyze`, say so and cite the extracted signals, focus turns, and artifact paths rather than pasting full raw output.
 - Separate:
   - confirmed facts from artifact files
   - inferences about likely cause

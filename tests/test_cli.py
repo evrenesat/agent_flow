@@ -435,18 +435,24 @@ p = "do it"
     def test_cli_install_skills_runs_without_config_bootstrap(self) -> None:
         import aflow.cli as cli_module
 
-        calls: list[tuple[str | None, bool]] = []
+        calls: list[tuple[str | None, bool, tuple[str, ...] | None, bool]] = []
         original = cli_module.install_skills
         try:
-            def fake_install_skills(destination: str | None = None, *, yes: bool = False) -> None:
-                calls.append((destination, yes))
+            def fake_install_skills(
+                destination: str | None = None,
+                *,
+                yes: bool = False,
+                only_skills: tuple[str, ...] | None = None,
+                include_optional: bool = False,
+            ) -> None:
+                calls.append((destination, yes, only_skills, include_optional))
 
             cli_module.install_skills = fake_install_skills
             result = main(['install-skills', '/tmp/dest', '--yes'])
         finally:
             cli_module.install_skills = original
         assert result == 0
-        assert calls == [('/tmp/dest', True)]
+        assert calls == [('/tmp/dest', True, None, False)]
 
     def test_cli_rejects_unknown_workflow(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

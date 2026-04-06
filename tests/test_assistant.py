@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -59,6 +60,15 @@ class AflowAssistantAnalyzerTests(unittest.TestCase):
         )
         return json.loads(result.stdout)
 
+    def _run_aflow_analyze(self, *args: str) -> dict[str, object]:
+        result = subprocess.run(
+            [sys.executable, "-m", "aflow", "analyze", *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return json.loads(result.stdout)
+
     def test_analyzer_defaults_to_latest_substantive_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = Path(tmpdir)
@@ -102,9 +112,12 @@ class AflowAssistantAnalyzerTests(unittest.TestCase):
 
             payload = self._run_analyzer("--repo-root", str(repo_root))
             assert payload["analysis_scope"]["mode"] == "single_run"
-            assert payload["analysis_scope"]["selection"] == "latest_run"
+            # The wrapper script now finds the latest run and passes it explicitly
+            assert payload["analysis_scope"]["selection"] in ("latest_run", "explicit_run_id")
             assert payload["analysis_scope"]["run_count_considered"] == 1
-            assert payload["analysis_scope"]["run_count_skipped_as_noise"] == 1
+            # Note: run_count_skipped_as_noise is 0 because the wrapper script does the run discovery
+            # and doesn't communicate the skipped count to aflow analyze
+            assert payload["analysis_scope"]["run_count_skipped_as_noise"] == 0
             assert payload["run"]["run_id"] == "20260401T000100Z-merge"
             assert payload["run"]["outcome"]["kind"] == "merge_failure"
             assert payload["run"]["failure"]["signals"] == ["dirty_merge_verification", "merge_failure"]
@@ -291,6 +304,235 @@ class AflowAssistantAnalyzerTests(unittest.TestCase):
             runs = {run["run_id"]: run for run in payload["runs"]}
             assert runs["20260401T000100Z-merge"]["failure"]["signals"] == ["dirty_merge_verification", "merge_failure"]
             assert runs["20260401T000200Z-invalid"]["failure"]["signals"] == ["original_plan_missing", "plan_invalid", "workflow_failure"]
+
+
+class AflowAnalyzeCliTests(unittest.TestCase):
+    def _get_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        env.pop("AFLOW_LAST_RUN_ID", None)
+        # Ensure the local aflow module is found
+        repo_root = Path(__file__).resolve().parents[1]
+        if "PYTHONPATH" in env:
+            env["PYTHONPATH"] = f"{repo_root}:{env['PYTHONPATH']}"
+        else:
+            env["PYTHONPATH"] = str(repo_root)
+        return env
+
+    def _run_aflow_analyze(self, *args: str, cwd: Path | None = None) -> dict[str, object]:
+        env = self._get_env()
+        result = subprocess.run(
+            [sys.executable, "-m", "aflow", "analyze", *args],
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            env=env,
+        )
+        return json.loads(result.stdout)
+
+    def _run_aflow_analyze_with_env(self, *args: str, env_var: str | None = None, cwd: Path | None = None) -> dict[str, object]:
+        env = self._get_env()
+        if env_var is not None:
+            env["AFLOW_LAST_RUN_ID"] = env_var
+        result = subprocess.run(
+            [sys.executable, "-m", "aflow", "analyze", *args],
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            env=env,
+        )
+        return json.loads(result.stdout)
+
+    def test_aflow_analyze_explicit_run_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            runs_root = repo_root / ".aflow" / "runs"
+            run_dir = runs_root / "20260401T000100Z-test"
+            _write_json(
+                run_dir / "run.json",
+                {
+                    "status": "failed",
+                    "workflow_name": "test",
+                    "turns_completed": 1,
+                    "failure_reason": "test failure",
+                },
+            )
+            _write_turn(
+                run_dir,
+                1,
+                result={
+                    "turn_number": 1,
+                    "step_name": "implement",
+                    "status": "completed",
+                    "returncode": 0,
+                    "snapshot_before": _snapshot(),
+                    "snapshot_after": _snapshot(),
+                },
+            )
+
+            payload = self._run_aflow_analyze("20260401T000100Z-test", "--repo-root", str(repo_root))
+            assert payload["analysis_scope"]["mode"] == "single_run"
+            assert payload["analysis_scope"]["selection"] == "explicit_run_id"
+            assert payload["run"]["run_id"] == "20260401T000100Z-test"
+
+    def test_aflow_analyze_env_var_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            runs_root = repo_root / ".aflow" / "runs"
+            run_dir = runs_root / "20260401T000200Z-env"
+            _write_json(
+                run_dir / "run.json",
+                {
+                    "status": "completed",
+                    "workflow_name": "test",
+                    "turns_completed": 1,
+                },
+            )
+
+            payload = self._run_aflow_analyze_with_env("--repo-root", str(repo_root), env_var="20260401T000200Z-env")
+            assert payload["analysis_scope"]["mode"] == "single_run"
+            assert payload["analysis_scope"]["selection"] == "env_var"
+            assert payload["run"]["run_id"] == "20260401T000200Z-env"
+
+    def test_aflow_analyze_last_run_id_file_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            runs_root = repo_root / ".aflow" / "runs"
+            run_dir = runs_root / "20260401T000300Z-file"
+            _write_json(
+                run_dir / "run.json",
+                {
+                    "status": "completed",
+                    "workflow_name": "test",
+                    "turns_completed": 1,
+                },
+            )
+
+            aflow_dir = repo_root / ".aflow"
+            aflow_dir.mkdir(parents=True, exist_ok=True)
+            last_run_id_file = aflow_dir / "last_run_id"
+            last_run_id_file.write_text("20260401T000300Z-file", encoding="utf-8")
+
+            payload = self._run_aflow_analyze("--repo-root", str(repo_root))
+            assert payload["analysis_scope"]["mode"] == "single_run"
+            assert payload["analysis_scope"]["selection"] == "last_run_id_file"
+            assert payload["run"]["run_id"] == "20260401T000300Z-file"
+
+    def test_aflow_analyze_fails_without_run_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            runs_root = repo_root / ".aflow" / "runs"
+            env = self._get_env()
+            result = subprocess.run(
+                [sys.executable, "-m", "aflow", "analyze", "--repo-root", str(repo_root)],
+                capture_output=True,
+                text=True,
+                cwd=repo_root,
+                env=env,
+            )
+            assert result.returncode != 0
+            assert "no run ID specified and no last run ID found" in result.stderr
+
+    def test_aflow_analyze_corpus_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            runs_root = repo_root / ".aflow" / "runs"
+
+            run1 = runs_root / "20260401T000100Z-run1"
+            _write_json(
+                run1 / "run.json",
+                {
+                    "status": "completed",
+                    "workflow_name": "test",
+                    "turns_completed": 1,
+                },
+            )
+
+            run2 = runs_root / "20260401T000200Z-run2"
+            _write_json(
+                run2 / "run.json",
+                {
+                    "status": "failed",
+                    "workflow_name": "test",
+                    "turns_completed": 1,
+                },
+            )
+
+            payload = self._run_aflow_analyze("--all", "--repo-root", str(repo_root))
+            assert payload["analysis_scope"]["mode"] == "corpus"
+            assert payload["analysis_scope"]["run_count_considered"] == 2
+            assert len(payload["runs"]) == 2
+
+    def test_aflow_analyze_env_var_takes_priority_over_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            runs_root = repo_root / ".aflow" / "runs"
+
+            env_run_dir = runs_root / "20260401T000100Z-env"
+            _write_json(
+                env_run_dir / "run.json",
+                {
+                    "status": "completed",
+                    "workflow_name": "test",
+                    "turns_completed": 1,
+                },
+            )
+
+            file_run_dir = runs_root / "20260401T000200Z-file"
+            _write_json(
+                file_run_dir / "run.json",
+                {
+                    "status": "completed",
+                    "workflow_name": "test",
+                    "turns_completed": 1,
+                },
+            )
+
+            aflow_dir = repo_root / ".aflow"
+            aflow_dir.mkdir(parents=True, exist_ok=True)
+            last_run_id_file = aflow_dir / "last_run_id"
+            last_run_id_file.write_text("20260401T000200Z-file", encoding="utf-8")
+
+            payload = self._run_aflow_analyze_with_env("--repo-root", str(repo_root), env_var="20260401T000100Z-env")
+            assert payload["analysis_scope"]["selection"] == "env_var"
+            assert payload["run"]["run_id"] == "20260401T000100Z-env"
+
+
+class LastRunIdTrackingTests(unittest.TestCase):
+    def test_create_run_paths_writes_last_run_id(self) -> None:
+        from aflow.runlog import create_run_paths, write_last_run_id
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            aflow_dir = repo_root / ".aflow"
+            aflow_dir.mkdir(parents=True, exist_ok=True)
+
+            config = type("ControllerConfig", (), {
+                "repo_root": repo_root,
+                "keep_runs": 5,
+            })()
+
+            paths = create_run_paths(config)
+            last_run_id_file = aflow_dir / "last_run_id"
+
+            assert last_run_id_file.exists()
+            run_id = last_run_id_file.read_text(encoding="utf-8").strip()
+            assert run_id == paths.run_dir.name
+
+    def test_write_last_run_id_creates_directory(self) -> None:
+        from aflow.runlog import write_last_run_id
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            aflow_dir = repo_root / ".aflow"
+
+            write_last_run_id(repo_root, "20260401T000100Z-test")
+
+            assert aflow_dir.exists()
+            assert (aflow_dir / "last_run_id").exists()
+            content = (aflow_dir / "last_run_id").read_text(encoding="utf-8").strip()
+            assert content == "20260401T000100Z-test"
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ import sys
 from typing import Callable
 
 
-BUNDLED_SKILL_NAMES = (
+DEFAULT_BUNDLED_SKILL_NAMES = (
     "aflow-plan",
     "aflow-execute-plan",
     "aflow-execute-checkpoint",
@@ -18,6 +18,25 @@ BUNDLED_SKILL_NAMES = (
     "aflow-review-final",
     "aflow-merge",
     "aflow-init-repo",
+)
+
+OPTIONAL_BUNDLED_SKILL_NAMES = (
+    "aflow-assistant",
+)
+
+BUNDLED_SKILL_NAMES = DEFAULT_BUNDLED_SKILL_NAMES + OPTIONAL_BUNDLED_SKILL_NAMES
+
+
+@dataclass(frozen=True)
+class BundledSkillMetadata:
+    name: str
+    default: bool
+
+
+BUNDLED_SKILL_METADATA = tuple(
+    BundledSkillMetadata(name=name, default=True) for name in DEFAULT_BUNDLED_SKILL_NAMES
+) + tuple(
+    BundledSkillMetadata(name=name, default=False) for name in OPTIONAL_BUNDLED_SKILL_NAMES
 )
 
 
@@ -75,11 +94,23 @@ def bundled_skills_root() -> Traversable:
     return resources.files("aflow").joinpath("bundled_skills")
 
 
-def discover_bundled_skills() -> tuple[BundledSkill, ...]:
+def discover_bundled_skills(
+    only_skills: tuple[str, ...] | None = None,
+    include_optional: bool = False,
+) -> tuple[BundledSkill, ...]:
     root = bundled_skills_root()
     skills: list[BundledSkill] = []
     missing: list[str] = []
-    for skill_name in BUNDLED_SKILL_NAMES:
+    
+    skill_names_to_discover: tuple[str, ...]
+    if only_skills is not None:
+        skill_names_to_discover = only_skills
+    else:
+        skill_names_to_discover = DEFAULT_BUNDLED_SKILL_NAMES
+        if include_optional:
+            skill_names_to_discover = skill_names_to_discover + OPTIONAL_BUNDLED_SKILL_NAMES
+    
+    for skill_name in skill_names_to_discover:
         skill_dir = root.joinpath(skill_name)
         skill_md = skill_dir.joinpath("SKILL.md")
         if not skill_dir.is_dir() or not skill_md.is_file():
@@ -112,8 +143,13 @@ def detect_auto_targets() -> tuple[InstallTarget, ...]:
     return tuple(targets)
 
 
-def build_install_plan(destination: str | Path | None = None) -> InstallPlan:
-    skills = discover_bundled_skills()
+def build_install_plan(
+    destination: str | Path | None = None,
+    *,
+    only_skills: tuple[str, ...] | None = None,
+    include_optional: bool = False,
+) -> InstallPlan:
+    skills = discover_bundled_skills(only_skills=only_skills, include_optional=include_optional)
     if destination is None:
         targets = detect_auto_targets()
         mode = "auto"
@@ -218,19 +254,48 @@ def _copy_plan(plan: InstallPlan) -> int:
     return copied
 
 
+def _validate_selection(
+    only_skills: tuple[str, ...] | None,
+    include_optional: bool,
+) -> None:
+    if only_skills is not None and include_optional:
+        raise InstallerError("Cannot combine --only with --include-optional.")
+    if only_skills is not None and len(only_skills) == 0:
+        raise InstallerError("--only requires at least one skill name.")
+    if only_skills is not None:
+        valid_names = {meta.name for meta in BUNDLED_SKILL_METADATA}
+        for skill_name in only_skills:
+            if skill_name not in valid_names:
+                raise InstallerError(
+                    f"Unknown bundled skill: {skill_name}. "
+                    f"Valid skills are: {', '.join(sorted(valid_names))}"
+                )
+
+
 def install_skills(
     destination: str | Path | None = None,
     *,
     yes: bool = False,
+    only_skills: tuple[str, ...] | None = None,
+    include_optional: bool = False,
     stdin=None,
     input_fn: Callable[[str], str] = input,
     stdout=None,
 ) -> int:
+    if only_skills is not None:
+        seen: set[str] = set()
+        deduplicated: list[str] = []
+        for skill in only_skills:
+            if skill not in seen:
+                seen.add(skill)
+                deduplicated.append(skill)
+        only_skills = tuple(deduplicated)
+    _validate_selection(only_skills, include_optional)
     if stdin is None:
         stdin = sys.stdin
     if stdout is None:
         stdout = sys.stdout
-    plan = build_install_plan(destination)
+    plan = build_install_plan(destination, only_skills=only_skills, include_optional=include_optional)
     _ensure_valid_targets(plan)
     print(render_preview(plan), file=stdout)
     if not yes:

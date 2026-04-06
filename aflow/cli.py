@@ -26,6 +26,15 @@ from .git_status import probe_worktree, classify_dirtiness_by_prefix
 from .plan import PlanParseError, load_plan, load_plan_tolerant
 from .skill_installer import InstallerError, install_skills
 from .run_state import ControllerConfig, RetryContext, WorkflowEndReason, describe_end_reason
+from .analyzer import (
+    analyze_corpus,
+    analyze_single_run,
+    collect_run_dirs,
+    find_latest_run_dir,
+    is_noise_run,
+    load_json,
+    resolve_run_id,
+)
 from .workflow import (
     WorkflowError,
     _effective_retry_limit,
@@ -65,11 +74,16 @@ Examples:
 """
 
 INSTALL_SKILLS_HELP = """\
-Auto mode: omit DESTINATION to install the bundled skills into each supported harness skill directory
-for the harness CLIs found on PATH.
+Auto mode: omit DESTINATION to install the default bundled skills into each supported harness skill
+directory for the harness CLIs found on PATH.
 
-Manual mode: provide DESTINATION to install the eight bundled skills into that root, one subdirectory
-per skill.
+Manual mode: provide DESTINATION to install the eight default bundled skills into that root, one
+subdirectory per skill.
+
+Selection flags:
+  --include-optional    Include optional bundled skills in the installation.
+  --only SKILL          Install only the named skill(s). Can be repeated. Cannot be combined
+                        with --include-optional.
 
 Supported auto targets:
   claude -> ~/.claude/skills
@@ -137,6 +151,16 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _deduplicate_preserve_order(seq: tuple[str, ...]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in seq:
+        if item not in seen:
+            seen.add(item)
+            result.append(item)
+    return tuple(result)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="aflow",
@@ -198,12 +222,56 @@ def build_parser() -> argparse.ArgumentParser:
         "destination",
         nargs="?",
         help=(
-            "Root directory that will receive the six bundled skill subdirectories. "
+            "Root directory that will receive the eight default bundled skill subdirectories. "
             "Omit it to auto-detect supported harness CLIs on PATH and install into each harness's "
             "global skill directory."
         ),
     )
     install_parser.add_argument("--yes", action="store_true", help="Skip the confirmation prompt.")
+    install_parser.add_argument(
+        "--include-optional",
+        action="store_true",
+        help="Include optional bundled skills in the installation.",
+    )
+    install_parser.add_argument(
+        "--only",
+        action="append",
+        metavar="SKILL",
+        help="Install only the named skill(s). Can be repeated. Cannot be combined with --include-optional.",
+    )
+
+    analyze_parser = subparsers.add_parser(
+        "analyze",
+        description="Analyze aflow run logs and extract high-signal debugging information.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    analyze_parser.add_argument(
+        "run_id",
+        nargs="?",
+        help="Run ID to analyze. If not provided, uses AFLOW_LAST_RUN_ID environment variable or .aflow/last_run_id file.",
+    )
+    analyze_parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Analyze a corpus of runs instead of a single run.",
+    )
+    analyze_parser.add_argument(
+        "--repo-root",
+        type=Path,
+        default=None,
+        help="Repository root containing .aflow/runs. Defaults to current directory.",
+    )
+    analyze_parser.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="Maximum number of run directories to include in corpus mode (default: 20).",
+    )
+    analyze_parser.add_argument(
+        "--include-noise",
+        action="store_true",
+        help="Include low-signal test noise runs instead of filtering them out.",
+    )
 
     return parser
 
@@ -528,7 +596,13 @@ def run_install_skills(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(["install-skills"] + ([] if argv is None else argv))
     try:
-        install_skills(destination=args.destination, yes=args.yes)
+        only_skills = _deduplicate_preserve_order(tuple(args.only)) if args.only else None
+        install_skills(
+            destination=args.destination,
+            yes=args.yes,
+            only_skills=only_skills,
+            include_optional=args.include_optional,
+        )
     except InstallerError as exc:
         print(exc, file=sys.stderr)
         return 1
@@ -542,10 +616,74 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "install-skills":
         try:
-            install_skills(destination=args.destination, yes=args.yes)
+            only_skills = _deduplicate_preserve_order(tuple(args.only)) if args.only else None
+            install_skills(
+                destination=args.destination,
+                yes=args.yes,
+                only_skills=only_skills,
+                include_optional=args.include_optional,
+            )
         except InstallerError as exc:
             print(exc, file=sys.stderr)
             return 1
+        return 0
+
+    if args.command == "analyze":
+        import json
+
+        if args.all:
+            repo_root = (args.repo_root or Path.cwd()).resolve()
+            runs_root = repo_root / ".aflow" / "runs"
+            if not runs_root.is_dir():
+                print(f"error: runs root does not exist: {runs_root}", file=sys.stderr)
+                return 1
+            run_dirs = collect_run_dirs(runs_root)
+            if args.limit is not None and args.limit > 0:
+                run_dirs = run_dirs[-args.limit :]
+            payload = analyze_corpus(
+                run_dirs=run_dirs,
+                runs_root=runs_root,
+                selection="corpus",
+                include_noise=args.include_noise,
+            )
+        else:
+            repo_root = (args.repo_root or Path.cwd()).resolve()
+            runs_root = repo_root / ".aflow" / "runs"
+
+            if args.run_id is not None:
+                run_dir = runs_root / args.run_id
+                selection = "explicit_run_id"
+            else:
+                resolved_run_id, source = resolve_run_id(None, repo_root)
+                if resolved_run_id is None:
+                    print(
+                        "error: no run ID specified and no last run ID found. "
+                        "Provide a run ID as an argument, set AFLOW_LAST_RUN_ID environment variable, "
+                        "or ensure .aflow/last_run_id file exists.",
+                        file=sys.stderr,
+                    )
+                    return 1
+                if source == "env_var":
+                    selection = "env_var"
+                elif source == "last_run_id_file":
+                    selection = "last_run_id_file"
+                else:
+                    selection = "unknown"
+                run_dir = runs_root / resolved_run_id.name
+
+            if not (run_dir / "run.json").is_file():
+                print(f"error: run directory does not contain run.json: {run_dir}", file=sys.stderr)
+                return 1
+
+            payload = analyze_single_run(
+                run_dir=run_dir,
+                runs_root=runs_root,
+                selection=selection,
+                include_noise=args.include_noise,
+            )
+
+        json.dump(payload, sys.stdout, indent=2, sort_keys=True)
+        sys.stdout.write("\n")
         return 0
 
     config_path: Path | None = None

@@ -37,8 +37,7 @@ class SkillDocsTests(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[1]
         text = (repo_root / 'aflow' / 'bundled_skills' / 'aflow-assistant' / 'SKILL.md').read_text(encoding='utf-8')
         assert 'references/engine-map.md' in text
-        assert 'scripts/analyze_runs.py' in text
-        assert '--run-id <run-id>' in text
+        assert 'aflow analyze' in text
         assert '--all' in text
         assert 'Do not assume the original `aflow` repo checkout exists' in text
         assert '## Bundled Engine Map First' in text

@@ -34,6 +34,18 @@ def _write_json(path: Path, payload: dict[str, object]) -> None:
     path.write_text(_json_dump(payload), encoding="utf-8")
 
 
+def write_last_run_id(repo_root: Path, run_id: str) -> None:
+    """Write the last run ID to .aflow/last_run_id.
+
+    This should be called immediately after run paths are created so that
+    even if the run fails or is interrupted, the ID is available for analysis.
+    """
+    aflow_dir = repo_root / ".aflow"
+    aflow_dir.mkdir(parents=True, exist_ok=True)
+    last_run_id_file = aflow_dir / "last_run_id"
+    last_run_id_file.write_text(run_id, encoding="utf-8")
+
+
 def create_run_paths(config: ControllerConfig) -> RunPaths:
     runs_root = config.repo_root / ".aflow" / "runs"
     runs_root.mkdir(parents=True, exist_ok=True)
@@ -49,6 +61,7 @@ def create_run_paths(config: ControllerConfig) -> RunPaths:
         run_json=run_json,
     )
     prune_old_runs(runs_root, config.keep_runs)
+    write_last_run_id(config.repo_root, run_dir.name)
     return paths
 
 

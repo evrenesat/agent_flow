@@ -8,6 +8,8 @@ from importlib import resources
 
 from aflow.skill_installer import (
     BUNDLED_SKILL_NAMES,
+    DEFAULT_BUNDLED_SKILL_NAMES,
+    OPTIONAL_BUNDLED_SKILL_NAMES,
     InstallerError,
     build_install_plan,
     detect_auto_targets,
@@ -31,7 +33,7 @@ def _write_executable(path: Path) -> None:
 
 def test_discover_bundled_skills_uses_package_resources() -> None:
     skills = discover_bundled_skills()
-    assert tuple(skill.name for skill in skills) == BUNDLED_SKILL_NAMES
+    assert tuple(skill.name for skill in skills) == DEFAULT_BUNDLED_SKILL_NAMES
     bundled_root = resources.files("aflow").joinpath("bundled_skills")
     for skill in skills:
         skill_dir = bundled_root.joinpath(skill.name)
@@ -64,10 +66,13 @@ def test_manual_destination_installs_eight_child_directories(tmp_path: Path) -> 
     copied = install_skills(destination=destination, yes=True, stdin=_FakeStdin(True), stdout=stdout)
 
     assert copied == 8
-    for skill_name in BUNDLED_SKILL_NAMES:
+    for skill_name in DEFAULT_BUNDLED_SKILL_NAMES:
         skill_dir = destination / skill_name
         assert skill_dir.is_dir()
         assert skill_dir.joinpath("SKILL.md").is_file()
+    for skill_name in OPTIONAL_BUNDLED_SKILL_NAMES:
+        skill_dir = destination / skill_name
+        assert not skill_dir.exists()
     assert "Manual install mode" in stdout.getvalue()
     assert "Total copy operations: 8" in stdout.getvalue()
 
@@ -86,7 +91,7 @@ def test_yes_skips_prompt(tmp_path: Path) -> None:
         stdout=io.StringIO(),
     )
 
-    assert copied == 8
+    assert copied == len(DEFAULT_BUNDLED_SKILL_NAMES)
 
 
 def test_confirmation_decline_performs_no_copies(tmp_path: Path) -> None:
@@ -132,7 +137,7 @@ def test_overwrite_in_place_updates_existing_skill_files_without_pruning_extras(
 
     copied = install_skills(destination=destination, yes=True, stdin=_FakeStdin(True), stdout=io.StringIO())
 
-    assert copied == 8
+    assert copied == len(DEFAULT_BUNDLED_SKILL_NAMES)
     packaged_skill = resources.files("aflow").joinpath("bundled_skills", "aflow-plan", "SKILL.md").read_text(encoding="utf-8")
     assert existing_skill_file.read_text(encoding="utf-8") == packaged_skill
     assert unrelated_file.read_text(encoding="utf-8") == "keep me\n"
@@ -186,6 +191,229 @@ def test_auto_install_codex_copilot_gemini_and_pi_copies_only_once(tmp_path: Pat
 
     assert copied == 8
     shared_dest = Path("~/.agents/skills").expanduser()
-    for skill_name in BUNDLED_SKILL_NAMES:
+    for skill_name in DEFAULT_BUNDLED_SKILL_NAMES:
         assert (shared_dest / skill_name).is_dir()
         assert (shared_dest / skill_name / "SKILL.md").is_file()
+    for skill_name in OPTIONAL_BUNDLED_SKILL_NAMES:
+        assert not (shared_dest / skill_name).exists()
+
+
+def test_default_install_excludes_optional_skills(tmp_path: Path) -> None:
+    destination = tmp_path / "skills"
+    stdout = io.StringIO()
+
+    copied = install_skills(destination=destination, yes=True, stdin=_FakeStdin(True), stdout=stdout)
+
+    assert copied == 8
+    for skill_name in DEFAULT_BUNDLED_SKILL_NAMES:
+        skill_dir = destination / skill_name
+        assert skill_dir.is_dir()
+        assert skill_dir.joinpath("SKILL.md").is_file()
+    for skill_name in OPTIONAL_BUNDLED_SKILL_NAMES:
+        skill_dir = destination / skill_name
+        assert not skill_dir.exists()
+
+
+def test_include_optional_includes_optional_skills(tmp_path: Path) -> None:
+    destination = tmp_path / "skills"
+    stdout = io.StringIO()
+
+    copied = install_skills(
+        destination=destination,
+        yes=True,
+        include_optional=True,
+        stdin=_FakeStdin(True),
+        stdout=stdout,
+    )
+
+    assert copied == 9
+    for skill_name in BUNDLED_SKILL_NAMES:
+        skill_dir = destination / skill_name
+        assert skill_dir.is_dir()
+        assert skill_dir.joinpath("SKILL.md").is_file()
+
+
+def test_only_installs_named_skill(tmp_path: Path) -> None:
+    destination = tmp_path / "skills"
+    stdout = io.StringIO()
+
+    copied = install_skills(
+        destination=destination,
+        yes=True,
+        only_skills=("aflow-plan",),
+        stdin=_FakeStdin(True),
+        stdout=stdout,
+    )
+
+    assert copied == 1
+    assert (destination / "aflow-plan").is_dir()
+    assert (destination / "aflow-plan" / "SKILL.md").is_file()
+    for skill_name in BUNDLED_SKILL_NAMES:
+        if skill_name != "aflow-plan":
+            assert not (destination / skill_name).exists()
+
+
+def test_only_accepts_multiple_skills(tmp_path: Path) -> None:
+    destination = tmp_path / "skills"
+    stdout = io.StringIO()
+
+    copied = install_skills(
+        destination=destination,
+        yes=True,
+        only_skills=("aflow-plan", "aflow-merge"),
+        stdin=_FakeStdin(True),
+        stdout=stdout,
+    )
+
+    assert copied == 2
+    assert (destination / "aflow-plan").is_dir()
+    assert (destination / "aflow-merge").is_dir()
+    for skill_name in BUNDLED_SKILL_NAMES:
+        if skill_name not in ("aflow-plan", "aflow-merge"):
+            assert not (destination / skill_name).exists()
+
+
+def test_only_deduplicates_preserving_order(tmp_path: Path) -> None:
+    destination = tmp_path / "skills"
+    stdout = io.StringIO()
+
+    copied = install_skills(
+        destination=destination,
+        yes=True,
+        only_skills=("aflow-plan", "aflow-merge", "aflow-plan"),
+        stdin=_FakeStdin(True),
+        stdout=stdout,
+    )
+
+    assert copied == 2
+    assert (destination / "aflow-plan").is_dir()
+    assert (destination / "aflow-merge").is_dir()
+
+
+def test_only_rejects_unknown_skill(tmp_path: Path) -> None:
+    destination = tmp_path / "skills"
+
+    with pytest.raises(InstallerError, match="Unknown bundled skill: not-a-skill"):
+        install_skills(
+            destination=destination,
+            yes=True,
+            only_skills=("not-a-skill",),
+            stdin=_FakeStdin(True),
+            stdout=io.StringIO(),
+        )
+
+
+def test_only_rejects_include_optional_combination(tmp_path: Path) -> None:
+    destination = tmp_path / "skills"
+
+    with pytest.raises(InstallerError, match="Cannot combine --only with --include-optional"):
+        install_skills(
+            destination=destination,
+            yes=True,
+            only_skills=("aflow-plan",),
+            include_optional=True,
+            stdin=_FakeStdin(True),
+            stdout=io.StringIO(),
+        )
+
+
+def test_only_rejects_empty_list(tmp_path: Path) -> None:
+    destination = tmp_path / "skills"
+
+    with pytest.raises(InstallerError, match="--only requires at least one skill name"):
+        install_skills(
+            destination=destination,
+            yes=True,
+            only_skills=(),
+            stdin=_FakeStdin(True),
+            stdout=io.StringIO(),
+        )
+
+
+def test_discover_bundled_skills_respects_selection(tmp_path: Path) -> None:
+    skills = discover_bundled_skills()
+    assert tuple(skill.name for skill in skills) == DEFAULT_BUNDLED_SKILL_NAMES
+
+    skills_with_optional = discover_bundled_skills(include_optional=True)
+    assert tuple(skill.name for skill in skills_with_optional) == BUNDLED_SKILL_NAMES
+
+    only_one = discover_bundled_skills(only_skills=("aflow-plan",))
+    assert tuple(skill.name for skill in only_one) == ("aflow-plan",)
+
+
+def test_build_install_plan_respects_selection(tmp_path: Path) -> None:
+    default_plan = build_install_plan(tmp_path / "dest")
+    assert len(default_plan.skills) == 8
+    assert tuple(skill.name for skill in default_plan.skills) == DEFAULT_BUNDLED_SKILL_NAMES
+
+    optional_plan = build_install_plan(tmp_path / "dest2", include_optional=True)
+    assert len(optional_plan.skills) == 9
+    assert tuple(skill.name for skill in optional_plan.skills) == BUNDLED_SKILL_NAMES
+
+    only_plan = build_install_plan(tmp_path / "dest3", only_skills=("aflow-merge",))
+    assert len(only_plan.skills) == 1
+    assert only_plan.skills[0].name == "aflow-merge"
+
+
+def test_only_aflow_assistant_copies_bundled_resources(tmp_path: Path) -> None:
+    destination = tmp_path / "skills"
+    stdout = io.StringIO()
+
+    copied = install_skills(
+        destination=destination,
+        yes=True,
+        only_skills=("aflow-assistant",),
+        stdin=_FakeStdin(True),
+        stdout=stdout,
+    )
+
+    assert copied == 1
+    assistant_dir = destination / "aflow-assistant"
+    assert assistant_dir.is_dir()
+    assert (assistant_dir / "SKILL.md").is_file()
+    assert (assistant_dir / "references" / "engine-map.md").is_file()
+    assert (assistant_dir / "scripts" / "analyze_runs.py").is_file()
+    assert (assistant_dir / "references").is_dir()
+    assert (assistant_dir / "scripts").is_dir()
+
+
+def test_include_optional_copies_aflow_assistant_bundled_resources(tmp_path: Path) -> None:
+    destination = tmp_path / "skills"
+    stdout = io.StringIO()
+
+    copied = install_skills(
+        destination=destination,
+        yes=True,
+        include_optional=True,
+        stdin=_FakeStdin(True),
+        stdout=stdout,
+    )
+
+    assert copied == 9
+    assistant_dir = destination / "aflow-assistant"
+    assert assistant_dir.is_dir()
+    assert (assistant_dir / "SKILL.md").is_file()
+    assert (assistant_dir / "references" / "engine-map.md").is_file()
+    assert (assistant_dir / "scripts" / "analyze_runs.py").is_file()
+
+
+def test_recursive_copy_preserves_subdirectories_for_all_skills(tmp_path: Path) -> None:
+    destination = tmp_path / "skills"
+    stdout = io.StringIO()
+
+    copied = install_skills(
+        destination=destination,
+        yes=True,
+        only_skills=("aflow-assistant", "aflow-plan"),
+        stdin=_FakeStdin(True),
+        stdout=stdout,
+    )
+
+    assert copied == 2
+    assistant_dir = destination / "aflow-assistant"
+    assert (assistant_dir / "references").is_dir()
+    assert (assistant_dir / "scripts").is_dir()
+    assert (assistant_dir / "references" / "engine-map.md").is_file()
+    assert (assistant_dir / "scripts" / "analyze_runs.py").is_file()
+    plan_dir = destination / "aflow-plan"
+    assert (plan_dir / "SKILL.md").is_file()
