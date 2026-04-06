@@ -2,14 +2,39 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
+import os
+import re
 import shutil
+import subprocess
 from pathlib import Path
 from uuid import uuid4
 
 from .plan import PlanSnapshot
 from .run_state import ControllerConfig, ControllerState, ExecutionContext, RetryContext, WorkflowEndReason
 from .harnesses.base import HarnessInvocation
+
+SHELL_ID_ENV_VARS: tuple[str, ...] = (
+    "AFLOW_SHELL_ID",
+    "TERM_SESSION_ID",
+    "LC_TERMINAL_SESSION_ID",
+    "ITERM_SESSION_ID",
+    "KITTY_WINDOW_ID",
+    "KITTY_PID",
+    "WEZTERM_PANE",
+    "TMUX_PANE",
+    "ZELLIJ_SESSION_NAME",
+)
+SHELL_PROCESS_NAMES = frozenset({
+    "bash",
+    "dash",
+    "fish",
+    "ksh",
+    "sh",
+    "zsh",
+})
+_SHELL_ID_UNSAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 @dataclass(frozen=True)
@@ -34,16 +59,135 @@ def _write_json(path: Path, payload: dict[str, object]) -> None:
     path.write_text(_json_dump(payload), encoding="utf-8")
 
 
+def _aflow_dir(repo_root: Path) -> Path:
+    return repo_root / ".aflow"
+
+
+def _global_last_run_id_path(repo_root: Path) -> Path:
+    return _aflow_dir(repo_root) / "last_run_id"
+
+
+def _shell_last_run_ids_dir(repo_root: Path) -> Path:
+    return _aflow_dir(repo_root) / "last_run_ids"
+
+
+def _sanitize_shell_id(raw: str) -> str | None:
+    trimmed = raw.strip()
+    if not trimmed:
+        return None
+    sanitized = _SHELL_ID_UNSAFE_RE.sub("_", trimmed).strip("._-")
+    if not sanitized:
+        digest = hashlib.sha1(trimmed.encode("utf-8")).hexdigest()[:12]
+        return f"shell-{digest}"
+    if len(sanitized) > 80:
+        digest = hashlib.sha1(trimmed.encode("utf-8")).hexdigest()[:12]
+        sanitized = f"{sanitized[:48]}-{digest}"
+    return sanitized
+
+
+def _ps_field(pid: int, field: str) -> str | None:
+    result = subprocess.run(
+        ["ps", "-o", f"{field}=", "-p", str(pid)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
+def _detect_shell_pid() -> int | None:
+    pid = os.getppid()
+    seen: set[int] = set()
+    while pid > 1 and pid not in seen:
+        seen.add(pid)
+        command = _ps_field(pid, "comm")
+        if command is not None and Path(command).name in SHELL_PROCESS_NAMES:
+            return pid
+        ppid_value = _ps_field(pid, "ppid")
+        if ppid_value is None:
+            return None
+        try:
+            pid = int(ppid_value)
+        except ValueError:
+            return None
+    return None
+
+
+def resolve_shell_id() -> str | None:
+    """Return a stable shell/session identifier when one can be detected."""
+    for env_var in SHELL_ID_ENV_VARS:
+        value = os.environ.get(env_var)
+        if value:
+            shell_id = _sanitize_shell_id(f"{env_var.lower()}-{value}")
+            if shell_id is not None:
+                return shell_id
+    shell_pid = _detect_shell_pid()
+    if shell_pid is None:
+        return None
+    return f"shell-pid-{shell_pid}"
+
+
+def shell_last_run_id_path(repo_root: Path, shell_id: str | None = None) -> Path | None:
+    resolved_shell_id = shell_id or resolve_shell_id()
+    if resolved_shell_id is None:
+        return None
+    return _shell_last_run_ids_dir(repo_root) / resolved_shell_id
+
+
+def _read_run_id_file(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    try:
+        run_id = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return run_id or None
+
+
+def resolve_last_run_id(
+    explicit_run_id: str | None,
+    repo_root: Path | None,
+) -> tuple[Path | None, str | None]:
+    """Resolve a run id from explicit args, shell-scoped state, env, or repo fallback."""
+    if explicit_run_id is not None:
+        return Path(explicit_run_id), "explicit_run_id"
+
+    if repo_root is not None:
+        shell_file = shell_last_run_id_path(repo_root)
+        if shell_file is not None:
+            shell_run_id = _read_run_id_file(shell_file)
+            if shell_run_id is not None:
+                return Path(shell_run_id), "shell_last_run_id_file"
+
+    env_run_id = os.environ.get("AFLOW_LAST_RUN_ID")
+    if env_run_id is not None:
+        return Path(env_run_id), "env_var"
+
+    if repo_root is not None:
+        run_id = _read_run_id_file(_global_last_run_id_path(repo_root))
+        if run_id is not None:
+            return Path(run_id), "last_run_id_file"
+
+    return None, None
+
+
 def write_last_run_id(repo_root: Path, run_id: str) -> None:
-    """Write the last run ID to .aflow/last_run_id.
+    """Write the last run ID to repo-global and shell-scoped state when possible.
 
     This should be called immediately after run paths are created so that
     even if the run fails or is interrupted, the ID is available for analysis.
     """
-    aflow_dir = repo_root / ".aflow"
+    aflow_dir = _aflow_dir(repo_root)
     aflow_dir.mkdir(parents=True, exist_ok=True)
-    last_run_id_file = aflow_dir / "last_run_id"
-    last_run_id_file.write_text(run_id, encoding="utf-8")
+    _global_last_run_id_path(repo_root).write_text(run_id, encoding="utf-8")
+    shell_file = shell_last_run_id_path(repo_root)
+    if shell_file is None:
+        return
+    shell_file.parent.mkdir(parents=True, exist_ok=True)
+    shell_file.write_text(run_id, encoding="utf-8")
 
 
 def create_run_paths(config: ControllerConfig) -> RunPaths:

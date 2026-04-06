@@ -74,7 +74,7 @@ aflow analyze --repo-root path/to/repo
 aflow analyze --all
 ```
 
-Resolution order for a single run is explicit `RUN_ID`, then `AFLOW_LAST_RUN_ID`, then `.aflow/last_run_id`.
+Resolution order for a single run is explicit `RUN_ID`, then the current shell's `.aflow/last_run_ids/<shell-id>` entry when available, then `AFLOW_LAST_RUN_ID`, then `.aflow/last_run_id`.
 `--all` switches to corpus mode instead of a single run.
 
 ## Usage
@@ -125,7 +125,7 @@ If that prompt or the startup recovery prompt would be needed and stdin/stdout a
 
 If startup hits an `inconsistent_checkpoint_state` parse error, `aflow` asks whether to recover and resume from the affected checkpoint using the same retry path it uses for in-run retries. That recovery prompt is interactive only too.
 
-For worktree workflows, `aflow` also checks the last run id through `AFLOW_LAST_RUN_ID` first, then `.aflow/last_run_id`. If that previous run was an unfinished worktree run for the same resolved invocation, and stdin/stdout are TTYs, `aflow` asks whether to resume it before creating a fresh worktree. Matching means the same repo root, workflow name, absolute plan path, effective team, selected start step, max turns, extra instructions, and lifecycle setup. Answering yes reuses the recorded feature branch and worktree path; answering no keeps the normal fresh-run path. Non-TTY runs never prompt.
+For worktree workflows, `aflow` first checks the current shell's `.aflow/last_run_ids/<shell-id>` entry when it can detect a stable shell/session id, then falls back to `AFLOW_LAST_RUN_ID`, then `.aflow/last_run_id`. If that previous run was an unfinished worktree run for the same resolved invocation, and stdin/stdout are TTYs, `aflow` asks whether to resume it before creating a fresh worktree. Matching means the same repo root, workflow name, absolute plan path, effective team, selected start step, max turns, extra instructions, and lifecycle setup. Answering yes reuses the recorded feature branch and worktree path; answering no keeps the normal fresh-run path. Non-TTY runs never prompt.
 
 If you pass `--start-step` on a plan that is already complete, `aflow` exits with a clear error instead of ignoring the flag.
 

@@ -415,7 +415,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument(
         "run_id",
         nargs="?",
-        help="Run ID to analyze. If not provided, uses AFLOW_LAST_RUN_ID environment variable or .aflow/last_run_id file.",
+        help="Run ID to analyze. If not provided, uses the current shell's last run, AFLOW_LAST_RUN_ID, or .aflow/last_run_id.",
     )
     analyze_parser.add_argument(
         "--all",
@@ -825,17 +825,12 @@ def main(argv: list[str] | None = None) -> int:
                 if resolved_run_id is None:
                     print(
                         "error: no run ID specified and no last run ID found. "
-                        "Provide a run ID as an argument, set AFLOW_LAST_RUN_ID environment variable, "
-                        "or ensure .aflow/last_run_id file exists.",
+                        "Provide a run ID as an argument, use the current shell's last run, "
+                        "set AFLOW_LAST_RUN_ID environment variable, or ensure .aflow/last_run_id file exists.",
                         file=sys.stderr,
                     )
                     return 1
-                if source == "env_var":
-                    selection = "env_var"
-                elif source == "last_run_id_file":
-                    selection = "last_run_id_file"
-                else:
-                    selection = "unknown"
+                selection = source or "unknown"
                 run_dir = runs_root / resolved_run_id.name
 
             if not (run_dir / "run.json").is_file():

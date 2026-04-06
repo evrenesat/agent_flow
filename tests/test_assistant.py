@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:
@@ -310,6 +311,7 @@ class AflowAnalyzeCliTests(unittest.TestCase):
     def _get_env(self) -> dict[str, str]:
         env = os.environ.copy()
         env.pop("AFLOW_LAST_RUN_ID", None)
+        env.pop("AFLOW_SHELL_ID", None)
         # Ensure the local aflow module is found
         repo_root = Path(__file__).resolve().parents[1]
         if "PYTHONPATH" in env:
@@ -330,10 +332,18 @@ class AflowAnalyzeCliTests(unittest.TestCase):
         )
         return json.loads(result.stdout)
 
-    def _run_aflow_analyze_with_env(self, *args: str, env_var: str | None = None, cwd: Path | None = None) -> dict[str, object]:
+    def _run_aflow_analyze_with_env(
+        self,
+        *args: str,
+        env_var: str | None = None,
+        shell_id: str | None = None,
+        cwd: Path | None = None,
+    ) -> dict[str, object]:
         env = self._get_env()
         if env_var is not None:
             env["AFLOW_LAST_RUN_ID"] = env_var
+        if shell_id is not None:
+            env["AFLOW_SHELL_ID"] = shell_id
         result = subprocess.run(
             [sys.executable, "-m", "aflow", "analyze", *args],
             check=True,
@@ -394,6 +404,33 @@ class AflowAnalyzeCliTests(unittest.TestCase):
             assert payload["analysis_scope"]["mode"] == "single_run"
             assert payload["analysis_scope"]["selection"] == "env_var"
             assert payload["run"]["run_id"] == "20260401T000200Z-env"
+
+    def test_aflow_analyze_shell_last_run_id_fallback(self) -> None:
+        from aflow.runlog import shell_last_run_id_path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            runs_root = repo_root / ".aflow" / "runs"
+            run_dir = runs_root / "20260401T000250Z-shell"
+            _write_json(
+                run_dir / "run.json",
+                {
+                    "status": "completed",
+                    "workflow_name": "test",
+                    "turns_completed": 1,
+                },
+            )
+
+            with patch.dict(os.environ, {"AFLOW_SHELL_ID": "shell-1"}):
+                shell_file = shell_last_run_id_path(repo_root)
+            assert shell_file is not None
+            shell_file.parent.mkdir(parents=True, exist_ok=True)
+            shell_file.write_text("20260401T000250Z-shell", encoding="utf-8")
+
+            payload = self._run_aflow_analyze_with_env("--repo-root", str(repo_root), shell_id="shell-1")
+            assert payload["analysis_scope"]["mode"] == "single_run"
+            assert payload["analysis_scope"]["selection"] == "shell_last_run_id_file"
+            assert payload["run"]["run_id"] == "20260401T000250Z-shell"
 
     def test_aflow_analyze_last_run_id_file_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -498,10 +535,66 @@ class AflowAnalyzeCliTests(unittest.TestCase):
             assert payload["analysis_scope"]["selection"] == "env_var"
             assert payload["run"]["run_id"] == "20260401T000100Z-env"
 
+    def test_aflow_analyze_shell_last_run_id_takes_priority_over_env_and_global_file(self) -> None:
+        from aflow.runlog import shell_last_run_id_path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            runs_root = repo_root / ".aflow" / "runs"
+
+            shell_run_dir = runs_root / "20260401T000050Z-shell"
+            _write_json(
+                shell_run_dir / "run.json",
+                {
+                    "status": "completed",
+                    "workflow_name": "test",
+                    "turns_completed": 1,
+                },
+            )
+
+            env_run_dir = runs_root / "20260401T000100Z-env"
+            _write_json(
+                env_run_dir / "run.json",
+                {
+                    "status": "completed",
+                    "workflow_name": "test",
+                    "turns_completed": 1,
+                },
+            )
+
+            file_run_dir = runs_root / "20260401T000200Z-file"
+            _write_json(
+                file_run_dir / "run.json",
+                {
+                    "status": "completed",
+                    "workflow_name": "test",
+                    "turns_completed": 1,
+                },
+            )
+
+            with patch.dict(os.environ, {"AFLOW_SHELL_ID": "shell-2"}):
+                shell_file = shell_last_run_id_path(repo_root)
+            assert shell_file is not None
+            shell_file.parent.mkdir(parents=True, exist_ok=True)
+            shell_file.write_text("20260401T000050Z-shell", encoding="utf-8")
+
+            aflow_dir = repo_root / ".aflow"
+            aflow_dir.mkdir(parents=True, exist_ok=True)
+            (aflow_dir / "last_run_id").write_text("20260401T000200Z-file", encoding="utf-8")
+
+            payload = self._run_aflow_analyze_with_env(
+                "--repo-root",
+                str(repo_root),
+                env_var="20260401T000100Z-env",
+                shell_id="shell-2",
+            )
+            assert payload["analysis_scope"]["selection"] == "shell_last_run_id_file"
+            assert payload["run"]["run_id"] == "20260401T000050Z-shell"
+
 
 class LastRunIdTrackingTests(unittest.TestCase):
     def test_create_run_paths_writes_last_run_id(self) -> None:
-        from aflow.runlog import create_run_paths, write_last_run_id
+        from aflow.runlog import create_run_paths, shell_last_run_id_path
 
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = Path(tmpdir)
@@ -513,26 +606,36 @@ class LastRunIdTrackingTests(unittest.TestCase):
                 "keep_runs": 5,
             })()
 
-            paths = create_run_paths(config)
+            with patch.dict(os.environ, {"AFLOW_SHELL_ID": "shell-a"}):
+                paths = create_run_paths(config)
+                shell_file = shell_last_run_id_path(repo_root)
             last_run_id_file = aflow_dir / "last_run_id"
 
             assert last_run_id_file.exists()
             run_id = last_run_id_file.read_text(encoding="utf-8").strip()
             assert run_id == paths.run_dir.name
+            assert shell_file is not None
+            assert shell_file.exists()
+            assert shell_file.read_text(encoding="utf-8").strip() == paths.run_dir.name
 
     def test_write_last_run_id_creates_directory(self) -> None:
-        from aflow.runlog import write_last_run_id
+        from aflow.runlog import shell_last_run_id_path, write_last_run_id
 
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = Path(tmpdir)
             aflow_dir = repo_root / ".aflow"
 
-            write_last_run_id(repo_root, "20260401T000100Z-test")
+            with patch.dict(os.environ, {"AFLOW_SHELL_ID": "shell-b"}):
+                write_last_run_id(repo_root, "20260401T000100Z-test")
+                shell_file = shell_last_run_id_path(repo_root)
 
             assert aflow_dir.exists()
             assert (aflow_dir / "last_run_id").exists()
             content = (aflow_dir / "last_run_id").read_text(encoding="utf-8").strip()
             assert content == "20260401T000100Z-test"
+            assert shell_file is not None
+            assert shell_file.exists()
+            assert shell_file.read_text(encoding="utf-8").strip() == "20260401T000100Z-test"
 
 
 if __name__ == "__main__":

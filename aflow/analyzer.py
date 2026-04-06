@@ -6,6 +6,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from .runlog import resolve_last_run_id
+
 
 AFLOW_STOP_RE = re.compile(r"^AFLOW_STOP:\s*(.+?)\s*$", re.MULTILINE)
 
@@ -518,28 +520,13 @@ def resolve_run_id(
     explicit_run_id: str | None,
     repo_root: Path | None,
 ) -> tuple[Path | None, str | None]:
-    """Resolve run_id from explicit argument, environment variable, or last_run_id file.
+    """Resolve run_id from explicit argument, shell-scoped state, env, or repo fallback.
 
     Returns (resolved_run_dir, selection_source) where selection_source is one of:
     - "explicit_run_id": from the explicit RUN_ID argument
+    - "shell_last_run_id_file": from .aflow/last_run_ids/<shell-id>
     - "env_var": from AFLOW_LAST_RUN_ID environment variable
     - "last_run_id_file": from .aflow/last_run_id file
     - None: could not resolve a run_id
     """
-    import os
-
-    if explicit_run_id is not None:
-        return Path(explicit_run_id), "explicit_run_id"
-
-    env_run_id = os.environ.get("AFLOW_LAST_RUN_ID")
-    if env_run_id is not None:
-        return Path(env_run_id), "env_var"
-
-    if repo_root is not None:
-        last_run_id_file = repo_root / ".aflow" / "last_run_id"
-        if last_run_id_file.is_file():
-            run_id = last_run_id_file.read_text(encoding="utf-8").strip()
-            if run_id:
-                return Path(run_id), "last_run_id_file"
-
-    return None, None
+    return resolve_last_run_id(explicit_run_id, repo_root)

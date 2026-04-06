@@ -1,6 +1,6 @@
 ## 2026-04-06 — Interactive worktree resume
 
-- `aflow run` now offers to resume the last unfinished matching worktree run when the same resolved invocation is rerun in a TTY. It resolves the prior run through `AFLOW_LAST_RUN_ID` first, then `.aflow/last_run_id`, and reuses the recorded feature branch and worktree path only when the workflow, plan path, team, step, turn limit, extra instructions, and lifecycle setup all match.
+- `aflow run` now offers to resume the last unfinished matching worktree run when the same resolved invocation is rerun in a TTY. It resolves the prior run through the current shell's `.aflow/last_run_ids/<shell-id>` entry when available, then `AFLOW_LAST_RUN_ID`, then `.aflow/last_run_id`, and reuses the recorded feature branch and worktree path only when the workflow, plan path, team, step, turn limit, extra instructions, and lifecycle setup all match.
 
 ## 2026-04-06 — Optional bundled skill selection and analyzer docs parity
 
@@ -10,9 +10,9 @@
 
 - `aflow-assistant` is now documented as an optional bundled skill for setup help, aflow concepts, and evidence-first run debugging instead of being implied as part of the default install.
 
-- `aflow analyze [RUN_ID] [--all]` is now documented in the top-level README and architecture reference as the supported analyzer entrypoint, and the run-id fallback chain is spelled out as explicit `RUN_ID`, `AFLOW_LAST_RUN_ID`, then `.aflow/last_run_id`.
+- `aflow analyze [RUN_ID] [--all]` is now documented in the top-level README and architecture reference as the supported analyzer entrypoint, and the run-id fallback chain is spelled out as explicit `RUN_ID`, current shell entry in `.aflow/last_run_ids/`, `AFLOW_LAST_RUN_ID`, then `.aflow/last_run_id`.
 
-- `runlog.py` persists `.aflow/last_run_id` immediately when run paths are created, so the latest run remains discoverable even if the workflow later fails.
+- `runlog.py` persists `.aflow/last_run_id` immediately when run paths are created, and also writes `.aflow/last_run_ids/<shell-id>` when a stable shell/session id is available, so the latest run remains discoverable even if the workflow later fails.
 
 ## 2026-04-06 — Auto-bootstrap empty repos from plan preamble
 

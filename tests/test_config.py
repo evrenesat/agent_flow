@@ -294,6 +294,7 @@ class WorkflowConfigTests(unittest.TestCase):
         assert '--only' in readme
         assert 'aflow analyze' in readme
         assert 'AFLOW_LAST_RUN_ID' in readme
+        assert 'last_run_ids' in readme
         assert 'resume' in readme
         assert 'reuses the recorded feature branch and worktree path' in readme
 
@@ -305,12 +306,14 @@ class WorkflowConfigTests(unittest.TestCase):
         assert 'aflow analyze' in architecture
         assert 'AFLOW_LAST_RUN_ID' in architecture
         assert '.aflow/last_run_id' in architecture
+        assert 'last_run_ids' in architecture
         assert 'resume' in architecture
         assert 'reused execution context' in architecture
         assert 'optional bundled' in architecture
 
         assert 'resume' in devlog
         assert 'AFLOW_LAST_RUN_ID' in devlog
+        assert 'last_run_ids' in devlog
 
         # lifecycle defaults table is documented in workflows.toml
         assert '[workflow]' in workflows_text

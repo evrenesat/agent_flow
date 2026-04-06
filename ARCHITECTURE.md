@@ -75,7 +75,7 @@ Entry point. Exposes three subcommands:
 
 ### `analyzer.py`
 Analyzes `.aflow/runs/` artifacts and powers `aflow analyze`.
-- Single-run mode resolves the run in this order: explicit `RUN_ID` argument, `AFLOW_LAST_RUN_ID` environment variable, then `.aflow/last_run_id`.
+- Single-run mode resolves the run in this order: explicit `RUN_ID` argument, the current shell's `.aflow/last_run_ids/<shell-id>` entry when available, `AFLOW_LAST_RUN_ID` environment variable, then `.aflow/last_run_id`.
 - `--all` switches to corpus mode, which summarizes multiple runs instead of one.
 - The bundled assistant skill uses this command as its primary evidence-first entrypoint.
 
@@ -124,7 +124,7 @@ The core engine. `run_workflow()` executes the turn loop:
    k. Log turn artifacts and update run metadata.
    l. If transition target is `END`, return. For multi-step workflows, check the same-step cap: if the same step has been selected consecutively `max_same_step_turns` times, fail the run before starting the next turn. Otherwise, advance to the next step.
 5. After normal workflow completion, if `teardown` includes `merge`, execute the merge handoff: resolve `[aflow].team_lead` through the effective team, build a merge prompt (built-in `aflow-merge` instruction plus rendered `merge_prompt` entries), and run the `team_lead` agent from the primary checkout. After the agent returns, verify: no unmerged index entries, clean working tree, HEAD on `main_branch`, and feature branch is an ancestor of the target. Only after all checks pass does `rm_worktree` (if configured) remove the linked worktree. Any verification failure leaves the feature branch and worktree intact and fails the run with the specific failed check.
-6. If the workflow uses the worktree+branch lifecycle, `aflow` resolves the previous run id through `AFLOW_LAST_RUN_ID` first, then `.aflow/last_run_id`, and loads the recorded `run.json`. When that run is unfinished, the resolved invocation matches on repo root, workflow name, absolute plan path, effective team, selected start step, max turns, extra instructions, and lifecycle setup, and stdin/stdout are TTYs, `aflow` asks whether to resume. Accepted resume builds a `ResumeContext` from the recorded branch and worktree, validates that worktree before execution, and starts `run_workflow()` directly in the reused execution context instead of provisioning a fresh one. Declining the prompt, or running non-interactively, falls back to the existing fresh-run path. The plan file on disk still remains the durable checkpoint state.
+6. If the workflow uses the worktree+branch lifecycle, `aflow` resolves the previous run id through the current shell's `.aflow/last_run_ids/<shell-id>` entry when it can detect one, then `AFLOW_LAST_RUN_ID`, then `.aflow/last_run_id`, and loads the recorded `run.json`. When that run is unfinished, the resolved invocation matches on repo root, workflow name, absolute plan path, effective team, selected start step, max turns, extra instructions, and lifecycle setup, and stdin/stdout are TTYs, `aflow` asks whether to resume. Accepted resume builds a `ResumeContext` from the recorded branch and worktree, validates that worktree before execution, and starts `run_workflow()` directly in the reused execution context instead of provisioning a fresh one. Declining the prompt, or running non-interactively, falls back to the existing fresh-run path. The plan file on disk still remains the durable checkpoint state.
 
 A scheduled retry skips the pre-turn plan reload and reuses the last valid snapshot and saved prompt context. The same `ACTIVE_PLAN_PATH`, `NEW_PLAN_PATH`, and resolved step selector are reused; the retry appendix (containing the exact parse error) is added to the prompt. Startup recovery seeds that same retry machinery by passing a `RetryContext` into `run_workflow()`, which stores the step name, role, resolved selector, and prompt context in `state.pending_retry` before turn 1. Retry turns still count toward `max_turns`.
 
@@ -161,7 +161,7 @@ Data classes for runtime state:
 Persists run data under `.aflow/runs/<timestamp>-<uuid>/`:
 - `run.json` -- run-level metadata, updated after each turn.
 - `turns/turn-NNN/` -- per-turn artifacts: `system-prompt.txt`, `user-prompt.txt`, `effective-prompt.txt`, `argv.json`, `env.json`, `stdout.txt`, `stderr.txt`, `result.json`.
-- `create_run_paths()` also writes `.aflow/last_run_id` immediately after the run directory is created so later `aflow analyze` invocations can find the latest run even if the workflow fails mid-run.
+- `create_run_paths()` also writes `.aflow/last_run_id` immediately after the run directory is created, and writes `.aflow/last_run_ids/<shell-id>` when a stable shell/session id is available, so later `aflow analyze` invocations can prefer shell-local state without losing the repo-wide fallback if the workflow fails mid-run.
 
 Prunes old run directories to respect `keep_runs`.
 
