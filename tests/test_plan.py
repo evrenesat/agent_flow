@@ -166,6 +166,355 @@ class PlanParserFenceTests(unittest.TestCase):
         text = '# Plan\n\n### [ ] Checkpoint 1\n\n```\n## Git Tracking\n```\n'
         assert not plan_has_git_tracking(text)
 
+    def test_parse_git_tracking_metadata_extract_fields_outside_fence(self) -> None:
+        from aflow.plan import parse_git_tracking_metadata, GitTrackingMetadata
+        text = textwrap.dedent('''\
+            # Plan
+
+            ## Git Tracking
+
+            - Plan Branch: `main`
+            - Pre-Handoff Base HEAD: `abc123`
+            - Last Reviewed HEAD: `none`
+            - Review Log:
+              - None yet.
+
+            ### [ ] Checkpoint 1
+            - [ ] step
+        ''')
+        metadata = parse_git_tracking_metadata(text)
+        assert metadata is not None
+        assert metadata.plan_branch == 'main'
+        assert metadata.pre_handoff_base_head == 'abc123'
+        assert metadata.last_reviewed_head == 'none'
+        assert metadata.review_log_entries == ('None yet.',)
+
+    def test_parse_git_tracking_metadata_ignores_content_inside_fence(self) -> None:
+        from aflow.plan import parse_git_tracking_metadata
+        text = textwrap.dedent('''\
+            # Plan
+
+            ## Git Tracking
+
+            - Plan Branch: `main`
+            - Pre-Handoff Base HEAD: `abc123`
+
+            ```
+            ## Git Tracking
+            - Plan Branch: `fake`
+            - Pre-Handoff Base HEAD: `fake123`
+            ```
+
+            ### [ ] Checkpoint 1
+            - [ ] step
+        ''')
+        metadata = parse_git_tracking_metadata(text)
+        assert metadata is not None
+        assert metadata.plan_branch == 'main'
+        assert metadata.pre_handoff_base_head == 'abc123'
+
+    def test_parse_git_tracking_metadata_returns_none_when_no_section(self) -> None:
+        from aflow.plan import parse_git_tracking_metadata
+        text = '# Plan\n\n### [ ] Checkpoint 1\n- [ ] step\n'
+        metadata = parse_git_tracking_metadata(text)
+        assert metadata is None
+
+    def test_parse_git_tracking_metadata_handles_empty_values(self) -> None:
+        from aflow.plan import parse_git_tracking_metadata
+        text = textwrap.dedent('''\
+            # Plan
+
+            ## Git Tracking
+
+            - Plan Branch: ``
+            - Pre-Handoff Base HEAD: ``
+            - Last Reviewed HEAD: ``
+            - Review Log:
+              - None yet.
+
+            ### [ ] Checkpoint 1
+            - [ ] step
+        ''')
+        metadata = parse_git_tracking_metadata(text)
+        assert metadata is not None
+        assert metadata.plan_branch == ''
+        assert metadata.pre_handoff_base_head == ''
+        assert metadata.last_reviewed_head == ''
+
+    def test_is_handoff_pristine_for_base_refresh_detects_pristine_handoff(self) -> None:
+        from aflow.plan import parse_git_tracking_metadata, is_handoff_pristine_for_base_refresh
+        from aflow.plan import _collect_sections
+        text = textwrap.dedent('''\
+            # Plan
+
+            ## Git Tracking
+
+            - Plan Branch: `main`
+            - Pre-Handoff Base HEAD: `old`
+            - Last Reviewed HEAD: `none`
+            - Review Log:
+              - None yet.
+
+            ### [ ] Checkpoint 1
+            - [ ] step one
+            - [ ] step two
+
+            ### [ ] Checkpoint 2
+            - [ ] step three
+        ''')
+        metadata = parse_git_tracking_metadata(text)
+        assert metadata is not None
+        sections = _collect_sections(text, source_path=Path('plan.md'))
+        assert is_handoff_pristine_for_base_refresh(metadata, sections) is True
+
+    def test_is_handoff_pristine_for_base_refresh_detects_started_handoff_by_reviewed_head(self) -> None:
+        from aflow.plan import parse_git_tracking_metadata, is_handoff_pristine_for_base_refresh
+        from aflow.plan import _collect_sections
+        text = textwrap.dedent('''\
+            # Plan
+
+            ## Git Tracking
+
+            - Plan Branch: `main`
+            - Pre-Handoff Base HEAD: `old`
+            - Last Reviewed HEAD: `abc123`
+            - Review Log:
+              - None yet.
+
+            ### [ ] Checkpoint 1
+            - [ ] step
+        ''')
+        metadata = parse_git_tracking_metadata(text)
+        assert metadata is not None
+        sections = _collect_sections(text, source_path=Path('plan.md'))
+        assert is_handoff_pristine_for_base_refresh(metadata, sections) is False
+
+    def test_is_handoff_pristine_for_base_refresh_detects_started_handoff_by_review_log(self) -> None:
+        from aflow.plan import parse_git_tracking_metadata, is_handoff_pristine_for_base_refresh
+        from aflow.plan import _collect_sections
+        text = textwrap.dedent('''\
+            # Plan
+
+            ## Git Tracking
+
+            - Plan Branch: `main`
+            - Pre-Handoff Base HEAD: `old`
+            - Last Reviewed HEAD: `none`
+            - Review Log:
+              - Some entry
+
+            ### [ ] Checkpoint 1
+            - [ ] step
+        ''')
+        metadata = parse_git_tracking_metadata(text)
+        assert metadata is not None
+        sections = _collect_sections(text, source_path=Path('plan.md'))
+        assert is_handoff_pristine_for_base_refresh(metadata, sections) is False
+
+    def test_is_handoff_pristine_for_base_refresh_detects_checked_checkpoint(self) -> None:
+        from aflow.plan import parse_git_tracking_metadata, is_handoff_pristine_for_base_refresh
+        from aflow.plan import _collect_sections
+        text = textwrap.dedent('''\
+            # Plan
+
+            ## Git Tracking
+
+            - Plan Branch: `main`
+            - Pre-Handoff Base HEAD: `old`
+            - Last Reviewed HEAD: `none`
+            - Review Log:
+              - None yet.
+
+            ### [x] Checkpoint 1
+            - [x] step
+
+            ### [ ] Checkpoint 2
+            - [ ] step
+        ''')
+        metadata = parse_git_tracking_metadata(text)
+        assert metadata is not None
+        sections = _collect_sections(text, source_path=Path('plan.md'))
+        assert is_handoff_pristine_for_base_refresh(metadata, sections) is False
+
+    def test_is_handoff_pristine_for_base_refresh_detects_checked_step(self) -> None:
+        from aflow.plan import parse_git_tracking_metadata, is_handoff_pristine_for_base_refresh
+        from aflow.plan import _collect_sections
+        text = textwrap.dedent('''\
+            # Plan
+
+            ## Git Tracking
+
+            - Plan Branch: `main`
+            - Pre-Handoff Base HEAD: `old`
+            - Last Reviewed HEAD: `none`
+            - Review Log:
+              - None yet.
+
+            ### [ ] Checkpoint 1
+            - [x] step one
+            - [ ] step two
+        ''')
+        metadata = parse_git_tracking_metadata(text)
+        assert metadata is not None
+        sections = _collect_sections(text, source_path=Path('plan.md'))
+        assert is_handoff_pristine_for_base_refresh(metadata, sections) is False
+
+    def test_is_handoff_pristine_for_base_refresh_detects_empty_base_as_refreshable(self) -> None:
+        from aflow.plan import parse_git_tracking_metadata, is_handoff_pristine_for_base_refresh
+        from aflow.plan import _collect_sections
+        text = textwrap.dedent('''\
+            # Plan
+
+            ## Git Tracking
+
+            - Plan Branch: `main`
+            - Pre-Handoff Base HEAD: ``
+            - Last Reviewed HEAD: `none`
+            - Review Log:
+              - None yet.
+
+            ### [ ] Checkpoint 1
+            - [ ] step
+        ''')
+        metadata = parse_git_tracking_metadata(text)
+        assert metadata is not None
+        assert metadata.pre_handoff_base_head == ''
+        sections = _collect_sections(text, source_path=Path('plan.md'))
+        assert is_handoff_pristine_for_base_refresh(metadata, sections) is True
+
+    def test_parse_git_tracking_metadata_rejects_multiple_live_sections(self) -> None:
+        from aflow.plan import parse_git_tracking_metadata
+        text = textwrap.dedent('''\
+            # Plan
+
+            ## Git Tracking
+
+            - Plan Branch: `main`
+            - Pre-Handoff Base HEAD: `old`
+            - Last Reviewed HEAD: `none`
+            - Review Log:
+              - None yet.
+
+            ### [ ] Checkpoint 1
+            - [ ] step
+
+            ## Git Tracking
+
+            - Plan Branch: `main`
+            - Pre-Handoff Base HEAD: `other`
+        ''')
+        with pytest.raises(ValueError, match='git tracking metadata is ambiguous'):
+            parse_git_tracking_metadata(text)
+
+    def test_rewrite_git_tracking_field_updates_only_target_field(self) -> None:
+        from aflow.plan import rewrite_git_tracking_field
+        text = textwrap.dedent('''\
+            # Plan
+
+            ## Git Tracking
+
+            - Plan Branch: `main`
+            - Pre-Handoff Base HEAD: `oldsha`
+            - Last Reviewed HEAD: `none`
+            - Review Log:
+              - None yet.
+
+            ### [ ] Checkpoint 1
+            - [ ] step
+        ''')
+        updated = rewrite_git_tracking_field(text, 'Pre-Handoff Base HEAD', 'newsha123')
+        assert 'Pre-Handoff Base HEAD: `newsha123`' in updated
+        assert 'Plan Branch: `main`' in updated
+        assert 'Last Reviewed HEAD: `none`' in updated
+        assert 'oldsha' not in updated
+
+    def test_rewrite_git_tracking_field_ignores_fence_content(self) -> None:
+        from aflow.plan import rewrite_git_tracking_field
+        text = textwrap.dedent('''\
+            # Plan
+
+            ## Git Tracking
+
+            - Plan Branch: `main`
+            - Pre-Handoff Base HEAD: `oldsha`
+
+            ```
+            ## Git Tracking
+            - Pre-Handoff Base HEAD: `fakesha`
+            ```
+
+            ### [ ] Checkpoint 1
+            - [ ] step
+        ''')
+        updated = rewrite_git_tracking_field(text, 'Pre-Handoff Base HEAD', 'newsha')
+        assert 'Pre-Handoff Base HEAD: `newsha`' in updated
+        assert 'fakesha' in updated  # Should still be there inside fence
+
+    def test_rewrite_git_tracking_field_rejects_multiple_live_sections(self) -> None:
+        from aflow.plan import rewrite_git_tracking_field
+        text = textwrap.dedent('''\
+            # Plan
+
+            ## Git Tracking
+
+            - Plan Branch: `main`
+            - Pre-Handoff Base HEAD: `oldsha`
+
+            ### [ ] Checkpoint 1
+            - [ ] step
+
+            ## Git Tracking
+
+            - Plan Branch: `alt`
+            - Pre-Handoff Base HEAD: `othersha`
+        ''')
+        with pytest.raises(ValueError, match='git tracking metadata is ambiguous'):
+            rewrite_git_tracking_field(text, 'Pre-Handoff Base HEAD', 'newsha')
+
+    def test_rewrite_git_tracking_field_noop_when_field_not_found(self) -> None:
+        from aflow.plan import rewrite_git_tracking_field
+        text = textwrap.dedent('''\
+            # Plan
+
+            ## Git Tracking
+
+            - Plan Branch: `main`
+            - Pre-Handoff Base HEAD: `oldsha`
+
+            ### [ ] Checkpoint 1
+            - [ ] step
+        ''')
+        updated = rewrite_git_tracking_field(text, 'NonExistent Field', 'value')
+        assert updated == text
+
+    def test_rewrite_git_tracking_field_updates_empty_value(self) -> None:
+        from aflow.plan import rewrite_git_tracking_field
+        text = textwrap.dedent('''\
+            # Plan
+
+            ## Git Tracking
+
+            - Plan Branch: `main`
+            - Pre-Handoff Base HEAD: ``
+            - Last Reviewed HEAD: `none`
+            - Review Log:
+              - None yet.
+
+            ### [ ] Checkpoint 1
+            - [ ] step
+        ''')
+        updated = rewrite_git_tracking_field(text, 'Pre-Handoff Base HEAD', 'newsha123')
+        assert 'Pre-Handoff Base HEAD: `newsha123`' in updated
+        assert 'oldsha' not in updated
+        # Verify newline is preserved
+        lines = updated.split('\n')
+        for i, line in enumerate(lines):
+            if 'Pre-Handoff Base HEAD: `newsha123`' in line:
+                # The next line should be '- Last Reviewed HEAD: `none`'
+                assert i + 1 < len(lines)
+                assert 'Last Reviewed HEAD: `none`' in lines[i + 1]
+                break
+
     def test_generate_new_plan_path_none_checkpoint_uses_cp01(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             original = Path(tmpdir) / 'plan.md'

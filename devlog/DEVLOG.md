@@ -1,3 +1,8 @@
+## 2026-04-06 — Startup refresh guard for stale pre-handoff base HEAD
+
+- `aflow` now checks live `## Git Tracking` metadata before startup prompts when the original plan contains it. A pristine plan with an empty or stale `Pre-Handoff Base HEAD` can ask for confirmation and refresh that field to the current `git rev-parse HEAD` value.
+- The approved rewrite is deferred until after lifecycle setup creates the execution context, then applied before the first prompt is rendered. Started handoffs do not auto-refresh, and non-TTY startup still fails instead of guessing.
+
 ## 2026-04-06 — Interactive worktree resume
 
 - `aflow run` now offers to resume the last unfinished matching worktree run when the same resolved invocation is rerun in a TTY. It resolves the prior run through the current shell's `.aflow/last_run_ids/<shell-id>` entry when available, then `AFLOW_LAST_RUN_ID`, then `.aflow/last_run_id`, and reuses the recorded feature branch and worktree path only when the workflow, plan path, team, step, turn limit, extra instructions, and lifecycle setup all match.

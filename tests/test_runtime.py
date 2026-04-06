@@ -1835,6 +1835,147 @@ class WorkflowPreflightTests(unittest.TestCase):
                 run_workflow(config, wf_config, 'review_wf', config_dir=repo_root, runner=lambda *a, **k: None)
             assert 'Git Tracking' in str(ctx.value)
 
+    def test_preflight_blocks_direct_run_without_base_head_refresh_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            rc, initial_head, _ = _run_git_in_test(['rev-parse', 'HEAD'], cwd=repo_root)
+            assert rc == 0
+            plan_path = repo_root / 'plan.md'
+            _write_plan(
+                plan_path,
+                _VALID_GIT_TRACKING_PLAN.replace('`base`', f'`{initial_head}`'),
+            )
+            _git_commit_file(repo_root, plan_path)
+            _write_plan(repo_root / 'notes.txt', 'advance head\n')
+            _git_commit_file(repo_root, repo_root / 'notes.txt')
+
+            wf_config = _make_simple_wf_config()
+            call_count = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=1),
+                    wf_config, 'simple', config_dir=repo_root,
+                    runner=runner,
+                )
+            assert call_count[0] == 0
+            assert 'Pre-Handoff Base HEAD' in str(ctx.value)
+
+    def test_preflight_blocks_started_handoff_base_head_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            rc, initial_head, _ = _run_git_in_test(['rev-parse', 'HEAD'], cwd=repo_root)
+            assert rc == 0
+            plan_path = repo_root / 'plan.md'
+            started_plan = _VALID_GIT_TRACKING_PLAN.replace('`base`', f'`{initial_head}`').replace(
+                'Last Reviewed HEAD: `none`',
+                'Last Reviewed HEAD: `abc123`',
+            ).replace(
+                '  - None yet.\n',
+                '  - Reviewed checkpoint 1.\n',
+            )
+            _write_plan(plan_path, started_plan)
+            _git_commit_file(repo_root, plan_path)
+            _write_plan(repo_root / 'notes.txt', 'advance head\n')
+            _git_commit_file(repo_root, repo_root / 'notes.txt')
+
+            wf_config = _make_simple_wf_config()
+            call_count = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=1),
+                    wf_config, 'simple', config_dir=repo_root,
+                    runner=runner,
+                )
+            assert call_count[0] == 0
+            assert 'startup preflight rejected Pre-Handoff Base HEAD state' in str(ctx.value)
+
+    def test_preflight_blocks_started_handoff_with_empty_base_head(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            rc, _initial_head, _ = _run_git_in_test(['rev-parse', 'HEAD'], cwd=repo_root)
+            assert rc == 0
+            plan_path = repo_root / 'plan.md'
+            started_plan = _VALID_GIT_TRACKING_PLAN.replace('`base`', '``').replace(
+                'Last Reviewed HEAD: `none`',
+                'Last Reviewed HEAD: `abc123`',
+            ).replace(
+                '  - None yet.\n',
+                '  - Reviewed checkpoint 1.\n',
+            )
+            _write_plan(plan_path, started_plan)
+            _git_commit_file(repo_root, plan_path)
+            _write_plan(repo_root / 'notes.txt', 'advance head\n')
+            _git_commit_file(repo_root, repo_root / 'notes.txt')
+
+            wf_config = _make_simple_wf_config()
+            call_count = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=1),
+                    wf_config, 'simple', config_dir=repo_root,
+                    runner=runner,
+                )
+            assert call_count[0] == 0
+            assert 'startup preflight rejected Pre-Handoff Base HEAD state' in str(ctx.value)
+
+    def test_preflight_applies_base_head_refresh_before_first_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            rc, initial_head, _ = _run_git_in_test(['rev-parse', 'HEAD'], cwd=repo_root)
+            assert rc == 0
+            plan_path = repo_root / 'plan.md'
+            _write_plan(
+                plan_path,
+                _VALID_GIT_TRACKING_PLAN.replace('`base`', f'`{initial_head}`'),
+            )
+            _git_commit_file(repo_root, plan_path)
+            _write_plan(repo_root / 'notes.txt', 'advance head\n')
+            _git_commit_file(repo_root, repo_root / 'notes.txt')
+            rc, current_head, _ = _run_git_in_test(['rev-parse', 'HEAD'], cwd=repo_root)
+            assert rc == 0
+
+            wf_config = _make_simple_wf_config()
+            call_count = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                cwd = Path(kwargs['cwd'])
+                text = (cwd / 'plan.md').read_text(encoding='utf-8')
+                assert f'`{current_head}`' in text
+                updated = text.replace('### [ ] Checkpoint 1: First', '### [x] Checkpoint 1: First')
+                updated = updated.replace('- [ ] step one', '- [x] step one')
+                (cwd / 'plan.md').write_text(updated, encoding='utf-8')
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            result = run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=1),
+                wf_config, 'simple', config_dir=repo_root,
+                runner=runner,
+                startup_base_head_refresh_sha=current_head,
+            )
+            assert call_count[0] == 1
+            assert result.turns_completed == 1
+            assert f'`{current_head}`' in plan_path.read_text(encoding='utf-8')
+
 
 class WorkflowLifecycleRuntimeTests(unittest.TestCase):
 
@@ -1974,13 +2115,20 @@ class WorkflowLifecycleRuntimeTests(unittest.TestCase):
             repo_root = root / 'repo'
             repo_root.mkdir()
             _make_lifecycle_git_repo(repo_root, branch='main')
+            rc, current_head, _ = _run_git_in_test(['rev-parse', 'HEAD'], cwd=repo_root)
+            assert rc == 0
             worktree_root = root / 'worktrees'
             worktree_root.mkdir()
             plan_path = repo_root / 'plans' / 'in-progress' / 'plan.md'
             plan_path.parent.mkdir(parents=True, exist_ok=True)
             _write_plan(plan_path, _VALID_PLAN)
-            _git_commit_file(repo_root, plan_path)
-            _write_plan(plan_path, _VALID_GIT_TRACKING_PLAN)
+            _git_force_commit_file(repo_root, plan_path)
+            rc, committed_head, _ = _run_git_in_test(['rev-parse', 'HEAD'], cwd=repo_root)
+            assert rc == 0
+            _write_plan(
+                plan_path,
+                _VALID_GIT_TRACKING_PLAN.replace('`base`', f'`{committed_head}`'),
+            )
             wf_config = _make_worktree_no_merge_wf_config(worktree_root=str(worktree_root))
             call_count: list[int] = [0]
 
@@ -2003,12 +2151,113 @@ class WorkflowLifecycleRuntimeTests(unittest.TestCase):
 
             assert call_count[0] == 1
 
+    def test_preflight_branch_only_refreshes_base_head_after_branch_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_root = root / 'repo'
+            repo_root.mkdir()
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            rc, initial_head, _ = _run_git_in_test(['rev-parse', 'HEAD'], cwd=repo_root)
+            assert rc == 0
+            plan_path = repo_root / 'plan.md'
+            _write_plan(
+                plan_path,
+                _VALID_GIT_TRACKING_PLAN.replace('`base`', f'`{initial_head}`'),
+            )
+            _git_commit_file(repo_root, plan_path)
+            _write_plan(repo_root / 'notes.txt', 'advance head\n')
+            _git_commit_file(repo_root, repo_root / 'notes.txt')
+            rc, current_head, _ = _run_git_in_test(['rev-parse', 'HEAD'], cwd=repo_root)
+            assert rc == 0
+            wf_config = _make_branch_only_wf_config(main_branch='main')
+            call_count: list[int] = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                cwd = Path(kwargs['cwd'])
+                rc, branch_name, _ = _run_git_in_test(['branch', '--show-current'], cwd=cwd)
+                assert rc == 0
+                text = (cwd / plan_path.relative_to(repo_root)).read_text(encoding='utf-8')
+                if call_count[0] == 1:
+                    assert branch_name != 'main'
+                    assert f'`{current_head}`' in text
+                    updated = text.replace('### [ ] Checkpoint 1: First', '### [x] Checkpoint 1: First')
+                    updated = updated.replace('- [ ] step one', '- [x] step one')
+                    (cwd / plan_path.relative_to(repo_root)).write_text(updated, encoding='utf-8')
+                else:
+                    _git_merge_feature_into_main(cwd, 'main')
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            result = run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=1),
+                wf_config, 'branch_wf', config_dir=repo_root,
+                runner=runner,
+                startup_base_head_refresh_sha=current_head,
+            )
+
+            assert call_count[0] == 2
+            assert result.turns_completed == 1
+            assert f'`{current_head}`' in plan_path.read_text(encoding='utf-8')
+
+    def test_preflight_worktree_refreshes_primary_and_execution_plan_before_first_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_root = root / 'repo'
+            repo_root.mkdir()
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            rc, initial_head, _ = _run_git_in_test(['rev-parse', 'HEAD'], cwd=repo_root)
+            assert rc == 0
+            worktree_root = root / 'worktrees'
+            worktree_root.mkdir()
+            plan_path = repo_root / 'plan.md'
+            _write_plan(
+                plan_path,
+                _VALID_GIT_TRACKING_PLAN.replace('`base`', f'`{initial_head}`'),
+            )
+            _git_commit_file(repo_root, plan_path)
+            _write_plan(repo_root / 'notes.txt', 'advance head\n')
+            _git_commit_file(repo_root, repo_root / 'notes.txt')
+            rc, current_head, _ = _run_git_in_test(['rev-parse', 'HEAD'], cwd=repo_root)
+            assert rc == 0
+            wf_config = _make_worktree_wf_config(worktree_root=str(worktree_root))
+            call_count: list[int] = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                cwd = Path(kwargs['cwd'])
+                exec_plan = cwd / plan_path.relative_to(repo_root)
+                primary_plan = repo_root / plan_path.relative_to(repo_root)
+                exec_text = exec_plan.read_text(encoding='utf-8')
+                primary_text = primary_plan.read_text(encoding='utf-8')
+                if call_count[0] == 1:
+                    assert f'`{current_head}`' in primary_text
+                    assert f'`{current_head}`' in exec_text
+                    updated = exec_text.replace('### [ ] Checkpoint 1: First', '### [x] Checkpoint 1: First')
+                    updated = updated.replace('- [ ] step one', '- [x] step one')
+                    exec_plan.write_text(updated, encoding='utf-8')
+                else:
+                    _git_merge_feature_into_main(cwd, 'main')
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            result = run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=1),
+                wf_config, 'wt_wf', config_dir=repo_root,
+                runner=runner,
+                startup_base_head_refresh_sha=current_head,
+            )
+
+            assert call_count[0] == 2
+            assert result.turns_completed == 1
+            assert f'`{current_head}`' in plan_path.read_text(encoding='utf-8')
+
     def test_worktree_rewrites_plan_branch_to_feature_branch_before_turn(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             repo_root = root / 'repo'
             repo_root.mkdir()
             _make_lifecycle_git_repo(repo_root, branch='main')
+            rc, current_head, _ = _run_git_in_test(['rev-parse', 'HEAD'], cwd=repo_root)
+            assert rc == 0
             worktree_root = root / 'worktrees'
             worktree_root.mkdir()
             plan_path = repo_root / 'plans' / 'in-progress' / 'plan.md'
@@ -2033,6 +2282,7 @@ class WorkflowLifecycleRuntimeTests(unittest.TestCase):
                 ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=2),
                 wf_config, 'wt_wf', config_dir=repo_root,
                 adapter=CodexAdapter(), runner=runner,
+                startup_base_head_refresh_sha=current_head,
             )
 
             done_path = repo_root / 'plans' / 'done' / 'plan.md'
@@ -2045,11 +2295,16 @@ class WorkflowLifecycleRuntimeTests(unittest.TestCase):
             repo_root = root / 'repo'
             repo_root.mkdir()
             _make_lifecycle_git_repo(repo_root, branch='main')
+            rc, current_head, _ = _run_git_in_test(['rev-parse', 'HEAD'], cwd=repo_root)
+            assert rc == 0
             worktree_root = root / 'worktrees'
             worktree_root.mkdir()
             plan_path = repo_root / 'plans' / 'in-progress' / 'plan.md'
             plan_path.parent.mkdir(parents=True, exist_ok=True)
-            _write_plan(plan_path, _VALID_GIT_TRACKING_PLAN)
+            _write_plan(
+                plan_path,
+                _VALID_GIT_TRACKING_PLAN.replace('`base`', f'`{current_head}`'),
+            )
             wf_config = _make_worktree_no_merge_wf_config(worktree_root=str(worktree_root))
             call_count = [0]
             marker = '  - synced marker\n'
@@ -2085,6 +2340,8 @@ class WorkflowLifecycleRuntimeTests(unittest.TestCase):
             repo_root = root / 'repo'
             repo_root.mkdir()
             _make_lifecycle_git_repo(repo_root, branch='main')
+            rc, current_head, _ = _run_git_in_test(['rev-parse', 'HEAD'], cwd=repo_root)
+            assert rc == 0
             worktree_root = root / 'worktrees'
             worktree_root.mkdir()
             exclude_path = repo_root / '.git' / 'info' / 'exclude'
@@ -2094,7 +2351,10 @@ class WorkflowLifecycleRuntimeTests(unittest.TestCase):
             )
             plan_path = repo_root / 'plans' / 'in-progress' / 'plan.md'
             plan_path.parent.mkdir(parents=True, exist_ok=True)
-            _write_plan(plan_path, _VALID_GIT_TRACKING_PLAN)
+            _write_plan(
+                plan_path,
+                _VALID_GIT_TRACKING_PLAN.replace('`base`', f'`{current_head}`'),
+            )
             wf_config = _make_worktree_wf_config(worktree_root=str(worktree_root))
             call_count = [0]
             marker = '  - merged marker\n'
@@ -2129,12 +2389,23 @@ class WorkflowLifecycleRuntimeTests(unittest.TestCase):
             repo_root = root / 'repo'
             repo_root.mkdir()
             _make_lifecycle_git_repo(repo_root, branch='main')
+            rc, current_head, _ = _run_git_in_test(['rev-parse', 'HEAD'], cwd=repo_root)
+            assert rc == 0
             worktree_root = root / 'worktrees'
             worktree_root.mkdir()
             plan_path = repo_root / 'plans' / 'in-progress' / 'plan.md'
             plan_path.parent.mkdir(parents=True, exist_ok=True)
-            _write_plan(plan_path, _VALID_GIT_TRACKING_PLAN)
-            _git_commit_file(repo_root, plan_path)
+            _write_plan(
+                plan_path,
+                _VALID_GIT_TRACKING_PLAN.replace('`base`', f'`{current_head}`'),
+            )
+            _git_force_commit_file(repo_root, plan_path)
+            rc, committed_head, _ = _run_git_in_test(['rev-parse', 'HEAD'], cwd=repo_root)
+            assert rc == 0
+            _write_plan(
+                plan_path,
+                _VALID_GIT_TRACKING_PLAN.replace('`base`', f'`{committed_head}`'),
+            )
             wf_config = _make_worktree_wf_config(worktree_root=str(worktree_root))
             call_count = [0]
             marker = '  - tracked merge marker\n'
@@ -2213,7 +2484,7 @@ class WorkflowLifecycleRuntimeTests(unittest.TestCase):
             plan_path = repo_root / 'plans' / 'in-progress' / 'nested' / 'plan.md'
             plan_path.parent.mkdir(parents=True, exist_ok=True)
             _write_plan(plan_path, _VALID_PLAN)
-            _git_commit_file(repo_root, plan_path)  # Commit plan so merge doesn't fail on untracked file
+            _git_force_commit_file(repo_root, plan_path)  # Commit plan so merge doesn't fail on untracked file
             wf_config = _make_worktree_wf_config(worktree_root=str(worktree_root))
             call_count: list[int] = [0]
 

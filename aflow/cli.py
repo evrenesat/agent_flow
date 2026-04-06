@@ -963,6 +963,7 @@ def main(argv: list[str] | None = None) -> int:
             prepared_run.workflow_name,
             parsed_plan=prepared_run.parsed_plan,
             startup_retry=prepared_run.startup_retry,
+            startup_base_head_refresh_sha=prepared_run.startup_base_head_refresh_sha,
             config_dir=config_path.parent,
             working_dir=working_dir,
             resume=resume_ctx,
@@ -1045,6 +1046,20 @@ def _answer_startup_question(question: StartupQuestion) -> str | int | bool | No
         return step_index
 
     if question.kind == StartupQuestionKind.CONFIRM_WORKTREE_DIRTY:
+        if not is_tty:
+            print(
+                f"error: {question.message} "
+                "Interactive confirmation is required.",
+                file=sys.stderr,
+            )
+            return None
+        try:
+            response = input(f"{question.message} [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        return response in ("y", "yes")
+
+    if question.kind == StartupQuestionKind.CONFIRM_BASE_HEAD_REFRESH:
         if not is_tty:
             print(
                 f"error: {question.message} "
