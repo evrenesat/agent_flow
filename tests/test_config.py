@@ -262,6 +262,7 @@ class WorkflowConfigTests(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[1]
         readme = (repo_root / 'README.md').read_text(encoding='utf-8')
         architecture = (repo_root / 'ARCHITECTURE.md').read_text(encoding='utf-8')
+        devlog = (repo_root / 'devlog' / 'DEVLOG.md').read_text(encoding='utf-8')
         aflow_text = (repo_root / 'aflow' / 'aflow.toml').read_text(encoding='utf-8')
         workflows_text = (repo_root / 'aflow' / 'workflows.toml').read_text(encoding='utf-8')
 
@@ -293,6 +294,8 @@ class WorkflowConfigTests(unittest.TestCase):
         assert '--only' in readme
         assert 'aflow analyze' in readme
         assert 'AFLOW_LAST_RUN_ID' in readme
+        assert 'resume' in readme
+        assert 'reuses the recorded feature branch and worktree path' in readme
 
         assert 'team_lead' in architecture
         assert 'worktree_root' in architecture
@@ -302,7 +305,12 @@ class WorkflowConfigTests(unittest.TestCase):
         assert 'aflow analyze' in architecture
         assert 'AFLOW_LAST_RUN_ID' in architecture
         assert '.aflow/last_run_id' in architecture
+        assert 'resume' in architecture
+        assert 'reused execution context' in architecture
         assert 'optional bundled' in architecture
+
+        assert 'resume' in devlog
+        assert 'AFLOW_LAST_RUN_ID' in devlog
 
         # lifecycle defaults table is documented in workflows.toml
         assert '[workflow]' in workflows_text

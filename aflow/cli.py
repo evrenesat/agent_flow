@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 import subprocess
 import sys
+from typing import Any
 
 from .api import (
     PreparedRun,
@@ -25,7 +26,7 @@ from .config import (
 from .git_status import probe_worktree, classify_dirtiness_by_prefix
 from .plan import PlanParseError, load_plan, load_plan_tolerant
 from .skill_installer import InstallerError, install_skills
-from .run_state import ControllerConfig, RetryContext, WorkflowEndReason, describe_end_reason
+from .run_state import ControllerConfig, RetryContext, WorkflowEndReason, describe_end_reason, ResumeContext
 from .analyzer import (
     analyze_corpus,
     analyze_single_run,
@@ -45,6 +46,7 @@ from .workflow import (
     resolve_profile,
     run_workflow,
 )
+from .runlog import load_run_json
 
 RUN_HELP = """\
 Flags:
@@ -94,6 +96,171 @@ Supported auto targets:
   opencode -> ~/.config/opencode/skills
   pi -> ~/.agents/skills
 """
+
+
+def _is_valid_resume_candidate(
+    prev_run: dict[str, object],
+    current_workflow_config: Any,
+    current_repo_root: Path,
+    current_workflow_name: str,
+    current_plan_path: Path,
+    current_team: str | None,
+    current_selected_start_step: str | None,
+    current_max_turns: int | None,
+    current_extra_instructions: tuple[str, ...],
+) -> bool:
+    """Check if the previous run is a valid resume candidate for the current invocation.
+
+    A valid candidate must:
+    - Have lifecycle_setup that includes "worktree"
+    - Have non-empty feature_branch and worktree_path
+    - Have status of "failed" or "running" (not "completed")
+    - Have last_snapshot.is_complete == false
+    - Not have merge_status (merge-failed-after-complete runs are not resumable)
+    - Have lifecycle_setup that matches the current workflow's effective setup tuple
+    - Match on all resolved invocation fields
+    """
+    lifecycle_setup = prev_run.get("lifecycle_setup")
+    if not isinstance(lifecycle_setup, list) or "worktree" not in lifecycle_setup:
+        return False
+
+    feature_branch = prev_run.get("feature_branch")
+    worktree_path = prev_run.get("worktree_path")
+    if not isinstance(feature_branch, str) or not feature_branch:
+        return False
+    if not isinstance(worktree_path, str) or not worktree_path:
+        return False
+
+    status = prev_run.get("status")
+    if status not in ("failed", "running"):
+        return False
+
+    last_snapshot = prev_run.get("last_snapshot")
+    if isinstance(last_snapshot, dict) and last_snapshot.get("is_complete") is True:
+        return False
+
+    if "merge_status" in prev_run:
+        return False
+
+    prev_repo_root = prev_run.get("repo_root")
+    if not isinstance(prev_repo_root, str) or Path(prev_repo_root).resolve() != current_repo_root:
+        return False
+
+    prev_workflow_name = prev_run.get("workflow_name")
+    if not isinstance(prev_workflow_name, str) or prev_workflow_name != current_workflow_name:
+        return False
+
+    prev_plan_path = prev_run.get("plan_path")
+    if not isinstance(prev_plan_path, str) or Path(prev_plan_path).resolve() != current_plan_path:
+        return False
+
+    prev_team = prev_run.get("team")
+    prev_team_none_or_absent = prev_team is None or (isinstance(prev_team, str) and not prev_team.strip())
+    current_team_none_or_absent = current_team is None or not current_team.strip()
+    if prev_team_none_or_absent != current_team_none_or_absent:
+        return False
+    if not prev_team_none_or_absent and not current_team_none_or_absent:
+        if prev_team != current_team:
+            return False
+
+    prev_selected_start_step = prev_run.get("selected_start_step")
+    if prev_selected_start_step != current_selected_start_step:
+        return False
+
+    prev_max_turns = prev_run.get("max_turns")
+    if not isinstance(prev_max_turns, int) or prev_max_turns != current_max_turns:
+        return False
+
+    prev_extra_instructions = prev_run.get("extra_instructions")
+    if not isinstance(prev_extra_instructions, list) or tuple(prev_extra_instructions) != current_extra_instructions:
+        return False
+
+    current_setup = current_workflow_config.setup or ()
+    if tuple(lifecycle_setup) != current_setup:
+        return False
+
+    return True
+
+
+def _prompt_resume(prev_run_id: str, feature_branch: str, worktree_path: str) -> bool:
+    """Prompt the user whether to resume from the previous run.
+
+    Returns True if the user accepts resume, False otherwise.
+    """
+    is_tty = sys.stdin.isatty() and sys.stdout.isatty()
+    if not is_tty:
+        return False
+
+    try:
+        response = input(
+            f"Resume from previous run '{prev_run_id}' on branch '{feature_branch}' "
+            f"in worktree '{worktree_path}'? [Y/n]: "
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+    return response in ("", "y", "yes")
+
+
+def _detect_resume_candidate(
+    repo_root: Path,
+    workflow_config: Any,
+    workflow_name: str,
+    plan_path: Path,
+    team: str | None,
+    selected_start_step: str | None,
+    max_turns: int | None,
+    extra_instructions: tuple[str, ...],
+) -> ResumeContext | None:
+    """Detect if there's a valid resume candidate and prompt the user.
+
+    Returns ResumeContext if the user accepts resume, None otherwise.
+    """
+    resolved_run_id, _source = resolve_run_id(None, repo_root)
+    if resolved_run_id is None:
+        return None
+
+    runs_root = repo_root / ".aflow" / "runs"
+    run_dir = runs_root / resolved_run_id.name
+    prev_run = load_run_json(run_dir)
+    if prev_run is None:
+        return None
+
+    if not _is_valid_resume_candidate(
+        prev_run,
+        workflow_config,
+        repo_root,
+        workflow_name,
+        plan_path,
+        team,
+        selected_start_step,
+        max_turns,
+        extra_instructions,
+    ):
+        return None
+
+    feature_branch = prev_run.get("feature_branch")
+    worktree_path = prev_run.get("worktree_path")
+    main_branch = prev_run.get("main_branch")
+    lifecycle_setup = prev_run.get("lifecycle_setup")
+    lifecycle_teardown = prev_run.get("lifecycle_teardown")
+
+    if not isinstance(feature_branch, str) or not isinstance(worktree_path, str) or not isinstance(main_branch, str):
+        return None
+    if not isinstance(lifecycle_setup, list) or not isinstance(lifecycle_teardown, list):
+        return None
+
+    if not _prompt_resume(resolved_run_id.name, feature_branch, worktree_path):
+        return None
+
+    return ResumeContext(
+        resumed_from_run_id=resolved_run_id.name,
+        feature_branch=feature_branch,
+        worktree_path=Path(worktree_path),
+        main_branch=main_branch,
+        setup=tuple(lifecycle_setup),
+        teardown=tuple(lifecycle_teardown),
+    )
 
 
 def _resolve_repo_root() -> Path | None:
@@ -783,6 +950,17 @@ def main(argv: list[str] | None = None) -> int:
         start_step=prepared_run.start_step,
     )
 
+    resume_ctx = _detect_resume_candidate(
+        repo_root=prepared_run.repo_root,
+        workflow_config=workflow_config.workflows[prepared_run.workflow_name],
+        workflow_name=prepared_run.workflow_name,
+        plan_path=prepared_run.plan_path,
+        team=prepared_run.team,
+        selected_start_step=prepared_run.start_step,
+        max_turns=prepared_run.max_turns,
+        extra_instructions=prepared_run.extra_instructions,
+    )
+
     try:
         result = run_workflow(
             config,
@@ -792,6 +970,7 @@ def main(argv: list[str] | None = None) -> int:
             startup_retry=prepared_run.startup_retry,
             config_dir=config_path.parent,
             working_dir=working_dir,
+            resume=resume_ctx,
         )
     except WorkflowError as exc:
         print(exc.summary, file=sys.stderr)

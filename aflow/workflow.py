@@ -25,7 +25,7 @@ from .git_status import classify_dirtiness_by_prefix, RepoState, probe_repo_stat
 from .harnesses import get_adapter
 from .harnesses.base import HarnessAdapter, HarnessInvocation
 from .plan import FENCE_RE, ParsedPlan, PlanParseError, PlanSnapshot, load_plan, load_plan_tolerant, plan_has_git_tracking
-from .run_state import ControllerConfig, ControllerRunResult, ControllerState, ExecutionContext, RetryContext, TurnRecord, WorkflowEndReason, format_harness_model_display
+from .run_state import ControllerConfig, ControllerRunResult, ControllerState, ExecutionContext, RetryContext, ResumeContext, TurnRecord, WorkflowEndReason, format_harness_model_display
 from .runlog import create_run_paths, finalize_turn_artifacts, prune_old_runs, write_run_metadata, write_turn_artifacts_start
 from .status import BannerRenderer
 
@@ -1698,6 +1698,91 @@ def _rm_worktree_safe(primary_root: Path, worktree_path: Path) -> None:
         )
 
 
+def _validate_worktree_resume_context(
+    primary_root: Path,
+    resume_ctx: ResumeContext,
+) -> None:
+    """Validate that a recorded worktree execution context is safe to resume.
+
+    Verifies:
+    - The recorded feature_branch exists locally
+    - The recorded worktree_path exists and is a directory
+    - The worktree_path is still registered in git worktree list
+    - The recorded main_branch still exists locally
+    - No in-progress git operation is active in the worktree
+
+    Raises WorkflowError if any validation fails.
+    """
+    # Verify feature branch exists locally
+    rc, _, err = _run_git(
+        ["rev-parse", "--verify", f"refs/heads/{resume_ctx.feature_branch}"],
+        cwd=primary_root,
+    )
+    if rc != 0:
+        raise WorkflowError(
+            f"resume validation: feature branch '{resume_ctx.feature_branch}' does not exist locally"
+        )
+
+    # Verify worktree path exists and is a directory
+    if not resume_ctx.worktree_path.exists():
+        raise WorkflowError(
+            f"resume validation: worktree path '{resume_ctx.worktree_path}' does not exist on disk"
+        )
+    if not resume_ctx.worktree_path.is_dir():
+        raise WorkflowError(
+            f"resume validation: worktree path '{resume_ctx.worktree_path}' is not a directory"
+        )
+
+    # Verify worktree is still registered in git worktree list
+    rc, wt_list, _ = _run_git(["worktree", "list", "--porcelain"], cwd=primary_root)
+    if rc == 0:
+        worktree_registered = False
+        for line in wt_list.splitlines():
+            if line.startswith("worktree "):
+                registered_path = line[len("worktree "):]
+                if Path(registered_path).resolve() == resume_ctx.worktree_path.resolve():
+                    worktree_registered = True
+                    break
+        if not worktree_registered:
+            raise WorkflowError(
+                f"resume validation: worktree path '{resume_ctx.worktree_path}' is not registered in git worktree list"
+            )
+
+    # Verify main branch exists locally
+    rc, _, err = _run_git(
+        ["show-ref", "--verify", f"refs/heads/{resume_ctx.main_branch}"],
+        cwd=primary_root,
+    )
+    if rc != 0:
+        raise WorkflowError(
+            f"resume validation: main branch '{resume_ctx.main_branch}' does not exist locally"
+        )
+
+    # Check for in-progress git operations in the worktree
+    # Need to find the .git directory for the worktree
+    rc, git_dir, _ = _run_git(["rev-parse", "--git-dir"], cwd=resume_ctx.worktree_path)
+    if rc == 0:
+        worktree_git_dir = Path(git_dir)
+        if not worktree_git_dir.is_absolute():
+            worktree_git_dir = resume_ctx.worktree_path / worktree_git_dir
+
+        # Check for merge conflicts
+        if (worktree_git_dir / "MERGE_HEAD").exists():
+            raise WorkflowError(
+                f"resume validation: worktree '{resume_ctx.worktree_path}' has an in-progress merge (MERGE_HEAD exists)"
+            )
+        # Check for rebase in progress
+        if (worktree_git_dir / "REBASE_HEAD").exists():
+            raise WorkflowError(
+                f"resume validation: worktree '{resume_ctx.worktree_path}' has an in-progress rebase (REBASE_HEAD exists)"
+            )
+        # Check for rebase-merge directory
+        if (worktree_git_dir / "rebase-merge").exists():
+            raise WorkflowError(
+                f"resume validation: worktree '{resume_ctx.worktree_path}' has an in-progress rebase (rebase-merge exists)"
+            )
+
+
 def _execute_merge_handoff(
     exec_ctx: ExecutionContext,
     wf: WorkflowConfig,
@@ -1767,6 +1852,7 @@ def run_workflow(
     adapter: HarnessAdapter | None = None,
     runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     banner: BannerRenderer | None = None,
+    resume: ResumeContext | None = None,
 ) -> ControllerRunResult:
     if workflow_name not in workflow_config.workflows:
         raise WorkflowError(f"workflow '{workflow_name}' not found in config")
@@ -1777,11 +1863,14 @@ def run_workflow(
 
     repo_state = probe_repo_state(config.repo_root)
     needs_bootstrap = _lifecycle_is_bootstrap_eligible(wf, repo_state)
-    lifecycle_plan = _lifecycle_preflight(
-        config.repo_root, config.plan_path, wf, workflow_config.aflow, repo_state,
-        skip_phase_b=needs_bootstrap,
-    )
+    lifecycle_plan = None
+    if resume is None:
+        lifecycle_plan = _lifecycle_preflight(
+            config.repo_root, config.plan_path, wf, workflow_config.aflow, repo_state,
+            skip_phase_b=needs_bootstrap,
+        )
     exec_ctx: ExecutionContext | None = None
+    resumed_from_run_id = resume.resumed_from_run_id if resume else None
 
     original_plan_path = config.plan_path
     active_plan_path = original_plan_path
@@ -1798,6 +1887,7 @@ def run_workflow(
         run_paths, config, state, status="initializing",
         workflow_name=workflow_name, original_plan_path=original_plan_path,
         active_plan_path=active_plan_path,
+        resumed_from_run_id=resumed_from_run_id,
     )
 
     if banner is None:
@@ -1826,6 +1916,7 @@ def run_workflow(
             run_paths, config, state, status="failed", failure_reason=summary,
             workflow_name=workflow_name, original_plan_path=original_plan_path,
             active_plan_path=active_plan_path,
+            resumed_from_run_id=resumed_from_run_id,
         )
         raise WorkflowError(summary, run_dir=run_paths.run_dir) from exc
     except (PlanParseError, FileNotFoundError) as exc:
@@ -1840,6 +1931,7 @@ def run_workflow(
             run_paths, config, state, status="failed", failure_reason=summary,
             workflow_name=workflow_name, original_plan_path=original_plan_path,
             active_plan_path=active_plan_path,
+            resumed_from_run_id=resumed_from_run_id,
         )
         raise WorkflowError(summary, run_dir=run_paths.run_dir) from exc
 
@@ -1854,9 +1946,10 @@ def run_workflow(
             )
             write_run_metadata(
                 run_paths, config, state, status="failed", failure_reason=summary,
-                workflow_name=workflow_name, original_plan_path=original_plan_path,
-                active_plan_path=active_plan_path,
-            )
+            workflow_name=workflow_name, original_plan_path=original_plan_path,
+            active_plan_path=active_plan_path,
+            resumed_from_run_id=resumed_from_run_id,
+        )
             raise WorkflowError(summary, run_dir=run_paths.run_dir)
 
     original_snapshot = parsed_plan.snapshot
@@ -1867,6 +1960,7 @@ def run_workflow(
         run_paths, config, state, status="running", last_snapshot=original_snapshot,
         workflow_name=workflow_name, original_plan_path=original_plan_path,
         active_plan_path=active_plan_path,
+        resumed_from_run_id=resumed_from_run_id,
     )
     banner.update(state)
 
@@ -1898,6 +1992,7 @@ def run_workflow(
             end_reason=end_reason,
             workflow_name=workflow_name, original_plan_path=original_plan_path,
             active_plan_path=active_plan_path,
+            resumed_from_run_id=resumed_from_run_id,
         )
         return result
 
@@ -1910,7 +2005,36 @@ def run_workflow(
             f"workflow '{workflow_name}' references unknown team '{team_name}'"
         )
 
-    if lifecycle_plan is not None:
+    if resume is not None:
+        try:
+            _validate_worktree_resume_context(config.repo_root, resume)
+            exec_ctx = ExecutionContext(
+                primary_repo_root=config.repo_root,
+                execution_repo_root=resume.worktree_path,
+                main_branch=resume.main_branch,
+                feature_branch=resume.feature_branch,
+                worktree_path=resume.worktree_path,
+                setup=resume.setup,
+                teardown=resume.teardown,
+            )
+            _sync_plan_branch_for_execution(original_plan_path, exec_ctx)
+        except WorkflowError as exc:
+            state.status_message = "failed"
+            banner.stop(state)
+            summary = _format_failure(
+                reason=exc.summary,
+                run_dir=run_paths.run_dir,
+                snapshot=original_snapshot,
+            )
+            write_run_metadata(
+                run_paths, config, state, status="failed", failure_reason=summary,
+                workflow_name=workflow_name, original_plan_path=original_plan_path,
+                active_plan_path=active_plan_path,
+                execution_context=exec_ctx,
+                resumed_from_run_id=resumed_from_run_id,
+            )
+            raise WorkflowError(summary, run_dir=run_paths.run_dir) from exc
+    elif lifecycle_plan is not None:
         try:
             if needs_bootstrap:
                 plan_text = original_plan_path.read_text(encoding="utf-8")
@@ -1975,6 +2099,8 @@ def run_workflow(
                 run_paths, config, state, status="failed", failure_reason=summary,
                 workflow_name=workflow_name, original_plan_path=original_plan_path,
                 active_plan_path=active_plan_path,
+                execution_context=exec_ctx,
+                resumed_from_run_id=resumed_from_run_id,
             )
             raise WorkflowError(summary, run_dir=run_paths.run_dir) from exc
 
@@ -2002,6 +2128,7 @@ def run_workflow(
             workflow_name=workflow_name, original_plan_path=original_plan_path,
             current_step_name=current_step_name, active_plan_path=active_path,
             new_plan_path=new_path,
+            resumed_from_run_id=resumed_from_run_id,
         )
         raise WorkflowError(summary, run_dir=run_paths.run_dir)
 
@@ -2136,6 +2263,7 @@ def run_workflow(
                 run_paths, config, state, status="running", last_snapshot=state.last_snapshot,
                 workflow_name=workflow_name, original_plan_path=original_plan_path,
                 current_step_name=current_step_name, active_plan_path=retry_ctx.active_plan_path,
+                resumed_from_run_id=resumed_from_run_id,
             )
             done = retry_ctx.snapshot_before.is_complete
             active_plan_path = retry_ctx.active_plan_path
@@ -2173,9 +2301,10 @@ def run_workflow(
             state.status_message = f"running turn {turn_number}: step {current_step_name}"
             write_run_metadata(
                 run_paths, config, state, status="running", last_snapshot=state.last_snapshot,
-                workflow_name=workflow_name, original_plan_path=original_plan_path,
-                current_step_name=current_step_name, active_plan_path=active_plan_path,
-            )
+            workflow_name=workflow_name, original_plan_path=original_plan_path,
+            current_step_name=current_step_name, active_plan_path=active_plan_path,
+            resumed_from_run_id=resumed_from_run_id,
+        )
 
             _sync_plan_to_worktree(original_plan_path, exec_ctx)
 
@@ -2193,6 +2322,7 @@ def run_workflow(
                     run_paths, config, state, status="failed", failure_reason=summary,
                     workflow_name=workflow_name, original_plan_path=original_plan_path,
                     current_step_name=current_step_name, active_plan_path=active_plan_path,
+                    resumed_from_run_id=resumed_from_run_id,
                 )
                 raise WorkflowError(summary, run_dir=run_paths.run_dir) from exc
 
@@ -2306,9 +2436,11 @@ def run_workflow(
             write_run_metadata(
                 run_paths, config, state, status="failed", failure_reason=summary,
                 turns_completed=state.turns_completed,
+                execution_context=exec_ctx,
                 workflow_name=workflow_name, original_plan_path=original_plan_path,
                 current_step_name=current_step_name, active_plan_path=active_plan_path,
                 new_plan_path=new_plan_path,
+                resumed_from_run_id=resumed_from_run_id,
             )
             banner.stop(state)
             raise WorkflowError(summary, run_dir=run_paths.run_dir)
@@ -2403,6 +2535,7 @@ def run_workflow(
                     workflow_name=workflow_name, original_plan_path=original_plan_path,
                     current_step_name=current_step_name, active_plan_path=active_plan_path,
                     new_plan_path=new_plan_path,
+                    resumed_from_run_id=resumed_from_run_id,
                 )
                 banner.update(state)
                 continue
@@ -2437,9 +2570,11 @@ def run_workflow(
             write_run_metadata(
                 run_paths, config, state, status="failed", failure_reason=summary,
                 turns_completed=state.turns_completed,
+                execution_context=exec_ctx,
                 workflow_name=workflow_name, original_plan_path=original_plan_path,
                 current_step_name=current_step_name, active_plan_path=active_plan_path,
                 new_plan_path=new_plan_path,
+                resumed_from_run_id=resumed_from_run_id,
             )
             banner.stop(state)
             raise WorkflowError(summary, run_dir=run_paths.run_dir) from exc
@@ -2475,9 +2610,11 @@ def run_workflow(
                 run_paths, config, state, status="failed", failure_reason=summary,
                 turns_completed=state.turns_completed,
                 last_snapshot=post_snapshot,
+                execution_context=exec_ctx,
                 workflow_name=workflow_name, original_plan_path=original_plan_path,
                 current_step_name=current_step_name, active_plan_path=active_plan_path,
                 new_plan_path=new_plan_path,
+                resumed_from_run_id=resumed_from_run_id,
             )
             banner.stop(state)
             raise WorkflowError(summary, run_dir=run_paths.run_dir)
@@ -2539,9 +2676,11 @@ def run_workflow(
                 run_paths, config, state, status="failed", failure_reason=summary,
                 turns_completed=state.turns_completed,
                 last_snapshot=state.last_snapshot,
+                execution_context=exec_ctx,
                 workflow_name=workflow_name, original_plan_path=original_plan_path,
                 current_step_name=current_step_name, active_plan_path=active_plan_path,
                 new_plan_path=new_plan_path,
+                resumed_from_run_id=resumed_from_run_id,
             )
             banner.stop(state)
             raise WorkflowError(summary, run_dir=run_paths.run_dir) from exc
@@ -2593,6 +2732,7 @@ def run_workflow(
             workflow_name=workflow_name, original_plan_path=original_plan_path,
             current_step_name=current_step_name, active_plan_path=active_plan_path,
             new_plan_path=new_plan_path,
+            resumed_from_run_id=resumed_from_run_id,
         )
 
         if transition_target == "END":
@@ -2681,6 +2821,7 @@ def run_workflow(
                     workflow_name=workflow_name, original_plan_path=original_plan_path,
                     current_step_name=current_step_name, active_plan_path=active_plan_path,
                     new_plan_path=new_plan_path,
+                    resumed_from_run_id=resumed_from_run_id,
                 )
                 prune_old_runs(run_paths.runs_root, config.keep_runs)
                 banner.stop(state)
@@ -2715,6 +2856,7 @@ def run_workflow(
                 workflow_name=workflow_name, original_plan_path=original_plan_path,
                 current_step_name=current_step_name, active_plan_path=active_plan_path,
                 new_plan_path=new_plan_path,
+                resumed_from_run_id=resumed_from_run_id,
             )
             prune_old_runs(run_paths.runs_root, config.keep_runs)
             banner.stop(state)
@@ -2743,9 +2885,11 @@ def run_workflow(
                         run_paths, config, state, status="failed", failure_reason=summary,
                         turns_completed=state.turns_completed,
                         last_snapshot=post_snapshot,
+                        execution_context=exec_ctx,
                         workflow_name=workflow_name, original_plan_path=original_plan_path,
                         current_step_name=current_step_name, active_plan_path=active_plan_path,
                         new_plan_path=new_plan_path,
+                        resumed_from_run_id=resumed_from_run_id,
                     )
                     banner.stop(state)
                     raise WorkflowError(summary, run_dir=run_paths.run_dir)
@@ -2767,9 +2911,11 @@ def run_workflow(
         run_paths, config, state, status="failed", failure_reason=summary,
         last_snapshot=state.last_snapshot,
         turns_completed=state.turns_completed,
+        execution_context=exec_ctx,
         workflow_name=workflow_name, original_plan_path=original_plan_path,
         current_step_name=current_step_name, active_plan_path=active_plan_path,
         new_plan_path=new_plan_path,
+        resumed_from_run_id=resumed_from_run_id,
     )
     prune_old_runs(run_paths.runs_root, config.keep_runs)
     banner.stop(state)

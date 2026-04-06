@@ -1,3 +1,7 @@
+## 2026-04-06 — Interactive worktree resume
+
+- `aflow run` now offers to resume the last unfinished matching worktree run when the same resolved invocation is rerun in a TTY. It resolves the prior run through `AFLOW_LAST_RUN_ID` first, then `.aflow/last_run_id`, and reuses the recorded feature branch and worktree path only when the workflow, plan path, team, step, turn limit, extra instructions, and lifecycle setup all match.
+
 ## 2026-04-06 — Optional bundled skill selection and analyzer docs parity
 
 ### What changed

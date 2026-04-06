@@ -26,7 +26,7 @@ from aflow.harnesses.opencode import OpencodeAdapter
 from aflow.harnesses.pi import PiAdapter
 from aflow.harnesses.base import HarnessInvocation
 from aflow.plan import PlanParseError, PlanSnapshot, load_plan, load_plan_tolerant
-from aflow.run_state import ControllerConfig, ControllerState, ExecutionContext, RetryContext, TurnRecord
+from aflow.run_state import ControllerConfig, ControllerState, ExecutionContext, ResumeContext, RetryContext, TurnRecord
 from aflow.runlog import prune_old_runs
 from aflow.status import build_banner
 import pytest

@@ -54,6 +54,16 @@ class RetryContext:
     retry_limit: int
 
 
+@dataclass(frozen=True)
+class ResumeContext:
+    resumed_from_run_id: str
+    feature_branch: str
+    worktree_path: Path
+    main_branch: str
+    setup: tuple[str, ...]
+    teardown: tuple[str, ...]
+
+
 @dataclass
 class TurnRecord:
     turn_number: int

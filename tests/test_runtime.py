@@ -2631,6 +2631,305 @@ class WorkflowLifecycleRuntimeTests(unittest.TestCase):
             assert worktree_dir_name.startswith('wt-')
             assert not worktree_dir_name.startswith('br-')
 
+    def test_resume_reuses_existing_worktree_and_branch(self) -> None:
+        """Test that accepted resume reuses the same feature branch and worktree path."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_root = root / 'repo'
+            repo_root.mkdir()
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            worktree_root = root / 'worktrees'
+            worktree_root.mkdir()
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            _git_commit_file(repo_root, plan_path)
+            wf_config = _make_worktree_wf_config(worktree_root=str(worktree_root))
+
+            first_run_cwd: list[str] = []
+            first_run_branch: list[str] = []
+
+            def first_runner(argv, **kwargs):
+                cwd = Path(kwargs['cwd'])
+                first_run_cwd.append(str(cwd))
+                rc, branch_name, _ = _run_git_in_test(['branch', '--show-current'], cwd=cwd)
+                first_run_branch.append(branch_name)
+                return subprocess.CompletedProcess(argv, 1, 'failed', 'first run failed')
+
+            with pytest.raises(WorkflowError) as first_ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                    wf_config, 'wt_wf', config_dir=repo_root,
+                    adapter=CodexAdapter(), runner=first_runner,
+                )
+
+            run_json1 = json.loads((first_ctx.value.run_dir / 'run.json').read_text(encoding='utf-8'))
+            original_feature_branch = run_json1['feature_branch']
+            original_worktree_path = run_json1['worktree_path']
+
+            second_run_cwd: list[str] = []
+            second_run_branch: list[str] = []
+
+            def second_runner(argv, **kwargs):
+                cwd = Path(kwargs['cwd'])
+                second_run_cwd.append(str(cwd))
+                rc, branch_name, _ = _run_git_in_test(['branch', '--show-current'], cwd=cwd)
+                second_run_branch.append(branch_name)
+                return subprocess.CompletedProcess(argv, 1, 'failed', 'resumed run failed')
+
+            resume_ctx = ResumeContext(
+                resumed_from_run_id=first_ctx.value.run_dir.name,
+                feature_branch=original_feature_branch,
+                worktree_path=Path(original_worktree_path),
+                main_branch='main',
+                setup=('worktree', 'branch'),
+                teardown=('merge', 'rm_worktree'),
+            )
+
+            with pytest.raises(WorkflowError) as second_ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                    wf_config, 'wt_wf', config_dir=repo_root,
+                    adapter=CodexAdapter(), runner=second_runner, resume=resume_ctx,
+                )
+
+            assert len(second_run_cwd) == 1
+            assert second_run_cwd[0] == original_worktree_path
+            assert second_run_branch[0] == original_feature_branch
+
+            run_json2 = json.loads((second_ctx.value.run_dir / 'run.json').read_text(encoding='utf-8'))
+            assert run_json2['resumed_from_run_id'] == first_ctx.value.run_dir.name
+            assert run_json2['feature_branch'] == original_feature_branch
+            assert run_json2['worktree_path'] == original_worktree_path
+
+    def test_resume_does_not_create_second_worktree(self) -> None:
+        """Test that accepted resume does not create a second linked worktree."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_root = root / 'repo'
+            repo_root.mkdir()
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            worktree_root = root / 'worktrees'
+            worktree_root.mkdir()
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            _git_commit_file(repo_root, plan_path)
+            wf_config = _make_worktree_wf_config(worktree_root=str(worktree_root))
+
+            def first_runner(argv, **kwargs):
+                cwd = Path(kwargs['cwd'])
+                return subprocess.CompletedProcess(argv, 1, 'failed', 'first run failed')
+
+            with pytest.raises(WorkflowError) as first_ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                    wf_config, 'wt_wf', config_dir=repo_root,
+                    adapter=CodexAdapter(), runner=first_runner,
+                )
+
+            run_json1 = json.loads((first_ctx.value.run_dir / 'run.json').read_text(encoding='utf-8'))
+            original_worktree_path = run_json1['worktree_path']
+
+            rc, wt_list_before, _ = _run_git_in_test(['worktree', 'list', '--porcelain'], cwd=repo_root)
+            wt_count_before = wt_list_before.count('worktree ')
+
+            def second_runner(argv, **kwargs):
+                cwd = Path(kwargs['cwd'])
+                return subprocess.CompletedProcess(argv, 1, 'failed', 'resumed run failed')
+
+            resume_ctx = ResumeContext(
+                resumed_from_run_id=first_ctx.value.run_dir.name,
+                feature_branch=run_json1['feature_branch'],
+                worktree_path=Path(original_worktree_path),
+                main_branch='main',
+                setup=('worktree', 'branch'),
+                teardown=('merge', 'rm_worktree'),
+            )
+
+            with pytest.raises(WorkflowError):
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                    wf_config, 'wt_wf', config_dir=repo_root,
+                    adapter=CodexAdapter(), runner=second_runner, resume=resume_ctx,
+                )
+
+            rc, wt_list_after, _ = _run_git_in_test(['worktree', 'list', '--porcelain'], cwd=repo_root)
+            wt_count_after = wt_list_after.count('worktree ')
+            assert wt_count_after == wt_count_before, 'No new worktree should be created on resume'
+
+    def test_resume_syncs_plan_back_to_primary_checkout(self) -> None:
+        """Test that resumed runs still sync the original plan back to the primary checkout."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_root = root / 'repo'
+            repo_root.mkdir()
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            worktree_root = root / 'worktrees'
+            worktree_root.mkdir()
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            _git_commit_file(repo_root, plan_path)
+            wf_config = _make_worktree_wf_config(worktree_root=str(worktree_root))
+
+            resume_marker = '  - resumed run marker\n'
+            first_runner_calls = {'count': 0}
+
+            def first_runner(argv, **kwargs):
+                first_runner_calls['count'] += 1
+                cwd = Path(kwargs['cwd'])
+                exec_plan = cwd / plan_path.relative_to(repo_root)
+                if first_runner_calls['count'] == 1:
+                    text = exec_plan.read_text(encoding='utf-8')
+                    updated = text.replace('- [ ] step one\n', '- [ ] step one\n' + resume_marker)
+                    _write_plan(exec_plan, updated)
+                    return subprocess.CompletedProcess(argv, 0, 'ok', '')
+                return subprocess.CompletedProcess(argv, 1, 'failed', 'error')
+
+            with pytest.raises(WorkflowError) as first_ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                    wf_config, 'wt_wf', config_dir=repo_root,
+                    adapter=CodexAdapter(), runner=first_runner,
+                )
+
+            primary_plan_text = plan_path.read_text(encoding='utf-8')
+            assert resume_marker in primary_plan_text
+
+            def second_runner(argv, **kwargs):
+                cwd = Path(kwargs['cwd'])
+                return subprocess.CompletedProcess(argv, 1, 'failed', 'resumed run failed')
+
+            run_json = json.loads((first_ctx.value.run_dir / 'run.json').read_text(encoding='utf-8'))
+
+            resume_ctx = ResumeContext(
+                resumed_from_run_id=first_ctx.value.run_dir.name,
+                feature_branch=run_json['feature_branch'],
+                worktree_path=Path(run_json['worktree_path']),
+                main_branch='main',
+                setup=('worktree', 'branch'),
+                teardown=('merge', 'rm_worktree'),
+            )
+
+            with pytest.raises(WorkflowError):
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                    wf_config, 'wt_wf', config_dir=repo_root,
+                    adapter=CodexAdapter(), runner=second_runner, resume=resume_ctx,
+                )
+
+            assert resume_marker in plan_path.read_text(encoding='utf-8')
+
+    def test_resume_goes_through_normal_merge_and_worktree_removal(self) -> None:
+        """Test that resumed runs still go through normal merge teardown and worktree removal on success."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_root = root / 'repo'
+            repo_root.mkdir()
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            worktree_root = root / 'worktrees'
+            worktree_root.mkdir()
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            _git_commit_file(repo_root, plan_path)
+            wf_config = _make_worktree_wf_config(worktree_root=str(worktree_root))
+
+            def first_runner(argv, **kwargs):
+                return subprocess.CompletedProcess(argv, 1, 'failed', 'first run failed')
+
+            with pytest.raises(WorkflowError) as first_ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                    wf_config, 'wt_wf', config_dir=repo_root,
+                    adapter=CodexAdapter(), runner=first_runner,
+                )
+
+            run_json1 = json.loads((first_ctx.value.run_dir / 'run.json').read_text(encoding='utf-8'))
+            original_worktree_path = Path(run_json1['worktree_path'])
+            assert original_worktree_path.exists()
+
+            def second_runner(argv, **kwargs):
+                cwd = Path(kwargs['cwd'])
+                if 'merge' in str(argv):
+                    _git_merge_feature_into_main(cwd, 'main')
+                else:
+                    exec_plan = cwd / plan_path.relative_to(repo_root)
+                    _write_plan(exec_plan, _COMPLETE_PLAN)
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            resume_ctx = ResumeContext(
+                resumed_from_run_id=first_ctx.value.run_dir.name,
+                feature_branch=run_json1['feature_branch'],
+                worktree_path=original_worktree_path,
+                main_branch='main',
+                setup=('worktree', 'branch'),
+                teardown=('merge', 'rm_worktree'),
+            )
+
+            result2 = run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                wf_config, 'wt_wf', config_dir=repo_root,
+                adapter=CodexAdapter(), runner=second_runner, resume=resume_ctx,
+            )
+
+            assert not original_worktree_path.exists(), 'Worktree should be removed after successful merge'
+
+            rc, wt_list, _ = _run_git_in_test(['worktree', 'list', '--porcelain'], cwd=repo_root)
+            assert str(original_worktree_path) not in wt_list, 'Worktree should not be registered after removal'
+
+    def test_resume_rejects_worktree_with_in_progress_merge(self) -> None:
+        """Test that validation rejects a worktree with an in-progress git operation."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_root = root / 'repo'
+            repo_root.mkdir()
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            worktree_root = root / 'worktrees'
+            worktree_root.mkdir()
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            _git_commit_file(repo_root, plan_path)
+            wf_config = _make_worktree_wf_config(worktree_root=str(worktree_root))
+
+            def first_runner(argv, **kwargs):
+                return subprocess.CompletedProcess(argv, 1, 'failed', 'first run failed')
+
+            with pytest.raises(WorkflowError) as first_ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                    wf_config, 'wt_wf', config_dir=repo_root,
+                    adapter=CodexAdapter(), runner=first_runner,
+                )
+
+            run_json1 = json.loads((first_ctx.value.run_dir / 'run.json').read_text(encoding='utf-8'))
+            original_worktree_path = Path(run_json1['worktree_path'])
+
+            rc, git_dir, _ = _run_git_in_test(['rev-parse', '--git-dir'], cwd=original_worktree_path)
+            if rc == 0:
+                worktree_git_dir = Path(git_dir)
+                if not worktree_git_dir.is_absolute():
+                    worktree_git_dir = original_worktree_path / worktree_git_dir
+                (worktree_git_dir / 'MERGE_HEAD').write_text('test', encoding='utf-8')
+
+            resume_ctx = ResumeContext(
+                resumed_from_run_id=first_ctx.value.run_dir.name,
+                feature_branch=run_json1['feature_branch'],
+                worktree_path=original_worktree_path,
+                main_branch='main',
+                setup=('worktree', 'branch'),
+                teardown=('merge', 'rm_worktree'),
+            )
+
+            def second_runner(argv, **kwargs):
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                    wf_config, 'wt_wf', config_dir=repo_root,
+                    adapter=CodexAdapter(), runner=second_runner, resume=resume_ctx,
+                )
+
+            assert 'in-progress merge' in str(ctx.value).lower()
+
 
 class WorkflowMaxTurnsEndToEndTests(unittest.TestCase):
 

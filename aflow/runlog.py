@@ -78,6 +78,21 @@ def prune_old_runs(runs_root: Path, keep_runs: int) -> None:
         shutil.rmtree(doomed)
 
 
+def load_run_json(run_dir: Path) -> dict[str, object] | None:
+    """Safely load a run.json file from a run directory.
+
+    Returns None if the file doesn't exist or contains invalid JSON.
+    """
+    run_json = run_dir / "run.json"
+    if not run_json.is_file():
+        return None
+    try:
+        content = run_json.read_text(encoding="utf-8")
+        return json.loads(content)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def _snapshot_payload(snapshot: PlanSnapshot | None) -> dict[str, object] | None:
     if snapshot is None:
         return None
@@ -180,6 +195,8 @@ def write_run_metadata(
     active_plan_path: Path | None = None,
     new_plan_path: Path | None = None,
     pending_retry: RetryContext | None = None,
+    team: str | None = None,
+    resumed_from_run_id: str | None = None,
 ) -> None:
     payload: dict[str, object] = {
         "repo_root": str(paths.repo_root),
@@ -210,6 +227,10 @@ def write_run_metadata(
         payload["active_plan_path"] = str(active_plan_path)
     if new_plan_path is not None:
         payload["new_plan_path"] = str(new_plan_path)
+    if team is not None:
+        payload["team"] = team
+    if resumed_from_run_id is not None:
+        payload["resumed_from_run_id"] = resumed_from_run_id
     if state is not None:
         payload["run_started_at"] = state.run_started_at.isoformat()
         payload["active_turn"] = state.active_turn
