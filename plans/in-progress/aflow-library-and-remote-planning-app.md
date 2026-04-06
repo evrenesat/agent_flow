@@ -10,9 +10,9 @@ This handoff does **not** add plan-creation UX to the `aflow` CLI. Plan creation
 
 - Plan Branch: `main`
 - Pre-Handoff Base HEAD: `f22872cd7c14afce9253a90fdaff98260b26c9a9`
-- Last Reviewed HEAD: `none`
+- Last Reviewed HEAD: `e36e95af56bad3aa6113bebda9c4fcd6adee27a0`
 - Review Log:
-  - None yet.
+  - 2026-04-06: Reviewed against `e36e95af56bad3aa6113bebda9c4fcd6adee27a0` on `main`. Updated Checkpoint 1 and 2 bootstrap commands for current file layout, and replaced stale `tests/test_aflow.py` references with the split test modules present in the current worktree.
 
 ## Done Means
 
@@ -57,7 +57,7 @@ This handoff does **not** add plan-creation UX to the `aflow` CLI. Plan creation
 
 ## Checkpoints
 
-### [x] Checkpoint 1: Extract A Public aflow Library Startup Surface
+### [ ] Checkpoint 1: Extract A Public aflow Library Startup Surface
 
 **Goal:**
 
@@ -68,15 +68,17 @@ This handoff does **not** add plan-creation UX to the `aflow` CLI. Plan creation
 - Run these commands before editing:
 - `pwd`
 - `fd -HI AGENTS.md .`
-- `sed -n '1,260p' aflow/cli.py`
-- `sed -n '1,260p' aflow/run_state.py`
+- `rg -n "def main\\(|_resolve_numeric_start_step|_confirm_startup_recovery|selected_start_step|startup_retry" aflow/cli.py -S`
+- `sed -n '520,835p' aflow/cli.py`
+- `sed -n '1,180p' aflow/run_state.py`
+- `rg -n "startup_recovery|selected_start_step|startup_retry|move_completed_plan_to_done" tests/test_cli.py tests/test_plan.py tests/test_retry.py tests/test_runtime.py -S`
 - If this is Checkpoint 1, capture the git tracking values before any edits:
 - `git branch --show-current`
 - `git rev-parse HEAD`
 
 **Scope & Blast Radius:**
 
-- May create/modify: `aflow/__init__.py`, `aflow/api/__init__.py`, `aflow/api/models.py`, `aflow/api/startup.py`, `aflow/api/runner.py`, `aflow/run_state.py`, `aflow/cli.py`, `tests/test_aflow.py`, `tests/test_library_api.py`
+- May create/modify: `aflow/__init__.py`, `aflow/api/__init__.py`, `aflow/api/models.py`, `aflow/api/startup.py`, `aflow/api/runner.py`, `aflow/run_state.py`, `aflow/cli.py`, `tests/test_cli.py`, `tests/test_plan.py`, `tests/test_retry.py`, `tests/test_runtime.py`, `tests/test_library_api.py`
 - Must not touch: `apps/**`, frontend files, Codex integration files, `plans/**` except this plan file and minimal progress tracking
 - Constraints:
 - Preserve current CLI flags and current successful CLI entrypoint behavior.
@@ -86,11 +88,11 @@ This handoff does **not** add plan-creation UX to the `aflow` CLI. Plan creation
 
 **Steps:**
 
-- [x] Step 1: Introduce public library-facing request/result models for startup preparation, startup questions, prepared runs, and post-run completion handling.
-- [x] Step 2: Move the CLI-owned startup branching logic into reusable library functions that can return deterministic results or structured questions instead of reading from stdin.
-- [x] Step 3: Expose a minimal public import surface from `aflow.__init__` or `aflow.api.__init__` for the new startup API.
-- [x] Step 4: Refactor `aflow.cli.main()` to consume the new startup API and preserve current prompt text semantics where practical.
-- [x] Step 5: Add focused tests for library startup preparation and update existing CLI tests to prove no regression.
+- [ ] Step 1: Introduce public library-facing request/result models for startup preparation, startup questions, prepared runs, and post-run completion handling.
+- [ ] Step 2: Move the CLI-owned startup branching logic into reusable library functions that can return deterministic results or structured questions instead of reading from stdin.
+- [ ] Step 3: Expose a minimal public import surface from `aflow.__init__` or `aflow.api.__init__` for the new startup API.
+- [ ] Step 4: Refactor `aflow.cli.main()` to consume the new startup API and preserve current prompt text semantics where practical.
+- [ ] Step 5: Add focused tests for library startup preparation and update existing CLI tests to prove no regression.
 
 **Dependencies:**
 
@@ -99,7 +101,7 @@ This handoff does **not** add plan-creation UX to the `aflow` CLI. Plan creation
 **Verification:**
 
 - Run scoped tests: `uv run pytest -q tests/test_library_api.py`
-- Run non-regression tests: `uv run pytest -q tests/test_aflow.py -k "main or start_step or startup_recovery or move_completed_plan_to_done"`
+- Run non-regression tests: `uv run pytest -q tests/test_cli.py tests/test_plan.py tests/test_retry.py tests/test_runtime.py -k "start_step or startup_recovery or move_completed_plan_to_done or selected_start_step or startup_retry or tolerant_loader"`
 
 **Done When:**
 
@@ -126,14 +128,16 @@ This handoff does **not** add plan-creation UX to the `aflow` CLI. Plan creation
 **Context Bootstrapping:**
 
 - Run these commands before editing:
-- `sed -n '1,260p' aflow/workflow.py`
-- `sed -n '1,260p' aflow/status.py`
+- `rg -n "def run_workflow\\(|write_turn_artifacts_start|finalize_turn_artifacts|AFLOW_STOP" aflow/workflow.py -S`
+- `sed -n '1740,2120p' aflow/workflow.py`
+- `sed -n '300,430p' aflow/status.py`
 - `sed -n '1,220p' aflow/harnesses/base.py`
 - `rg -n "run_workflow\\(|BannerRenderer|AFLOW_STOP|write_turn_artifacts_start|finalize_turn_artifacts" aflow tests -S`
+- `rg -n "run_workflow|BannerRenderer|build_banner|merge|lifecycle|same_step" tests/test_runtime.py tests/test_harnesses.py tests/test_retry.py -S`
 
 **Scope & Blast Radius:**
 
-- May create/modify: `aflow/api/events.py`, `aflow/api/runner.py`, `aflow/workflow.py`, `aflow/status.py`, `aflow/cli.py`, `aflow/run_state.py`, `tests/test_aflow.py`, `tests/test_library_api.py`, `ARCHITECTURE.md`
+- May create/modify: `aflow/api/events.py`, `aflow/api/runner.py`, `aflow/workflow.py`, `aflow/status.py`, `aflow/cli.py`, `aflow/run_state.py`, `tests/test_runtime.py`, `tests/test_harnesses.py`, `tests/test_retry.py`, `tests/test_library_api.py`, `ARCHITECTURE.md`
 - Must not touch: `apps/**`, Codex adapter code, transcription code, root `pyproject.toml`
 - Constraints:
 - Keep the existing run log format and plan-on-disk authority.
@@ -157,7 +161,7 @@ This handoff does **not** add plan-creation UX to the `aflow` CLI. Plan creation
 **Verification:**
 
 - Run scoped tests: `uv run pytest -q tests/test_library_api.py -k "event or runner"`
-- Run non-regression tests: `uv run pytest -q tests/test_aflow.py -k "run_workflow or banner or merge or lifecycle or same_step"`
+- Run non-regression tests: `uv run pytest -q tests/test_runtime.py tests/test_harnesses.py tests/test_retry.py -k "run_workflow or banner or merge or lifecycle or same_step"`
 
 **Done When:**
 
@@ -396,7 +400,7 @@ This handoff does **not** add plan-creation UX to the `aflow` CLI. Plan creation
 **Verification:**
 
 - Run scoped tests: `uv run --project apps/aflow_app/server pytest -q apps/aflow_app/server/tests/test_transcription.py apps/aflow_app/server/tests/test_api.py`
-- Run non-regression tests: `npm --prefix apps/aflow_app/web test -- --run && npm --prefix apps/aflow_app/web run build && uv run pytest -q tests/test_library_api.py tests/test_aflow.py`
+- Run non-regression tests: `npm --prefix apps/aflow_app/web test -- --run && npm --prefix apps/aflow_app/web run build && uv run pytest -q tests/test_library_api.py tests/test_cli.py tests/test_plan.py tests/test_retry.py tests/test_runtime.py tests/test_harnesses.py`
 
 **Done When:**
 
@@ -432,7 +436,7 @@ This handoff does **not** add plan-creation UX to the `aflow` CLI. Plan creation
 | Requirement | Verification |
 | --- | --- |
 | Library startup questions replace hidden prompt logic | `uv run pytest -q tests/test_library_api.py` |
-| CLI remains execution-capable after refactor | `uv run pytest -q tests/test_aflow.py -k "main or start_step or startup_recovery"` |
+| CLI remains execution-capable after refactor | `uv run pytest -q tests/test_cli.py tests/test_runtime.py -k "start_step or startup_recovery or move_completed_plan_to_done"` |
 | Library exposes structured execution events | `uv run pytest -q tests/test_library_api.py -k "event or runner"` |
 | Remote server remains outside published wheel | `rg -n 'packages = \\[\"aflow\"\\]' pyproject.toml` and `uv build && python - <<'PY'\nimport zipfile, pathlib\nwheel = sorted(pathlib.Path('dist').glob('*.whl'))[-1]\nwith zipfile.ZipFile(wheel) as z:\n    names = [n for n in z.namelist() if n.startswith('apps/') or 'aflow_app' in n]\n    print(names)\n    raise SystemExit(1 if names else 0)\nPY` |
 | Repo registry and execution APIs work | `uv run --project apps/aflow_app/server pytest -q apps/aflow_app/server/tests/test_api.py` |

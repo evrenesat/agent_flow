@@ -288,13 +288,21 @@ class WorkflowConfigTests(unittest.TestCase):
         assert 'teardown' in readme
         assert 'merge_prompt' in readme
         assert 'aflow-merge' in readme
-        assert 'eight bundled skills' in readme
+        assert 'aflow-assistant' in readme
+        assert '--include-optional' in readme
+        assert '--only' in readme
+        assert 'aflow analyze' in readme
+        assert 'AFLOW_LAST_RUN_ID' in readme
 
         assert 'team_lead' in architecture
         assert 'worktree_root' in architecture
         assert 'ExecutionContext' in architecture
         assert 'aflow-merge' in architecture
-        assert 'eight' in architecture
+        assert 'aflow-assistant' in architecture
+        assert 'aflow analyze' in architecture
+        assert 'AFLOW_LAST_RUN_ID' in architecture
+        assert '.aflow/last_run_id' in architecture
+        assert 'optional bundled' in architecture
 
         # lifecycle defaults table is documented in workflows.toml
         assert '[workflow]' in workflows_text

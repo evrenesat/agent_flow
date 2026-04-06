@@ -45,12 +45,17 @@ flowchart TD
 ## Module Breakdown
 
 ### `cli.py`
-Entry point. Exposes two subcommands:
+Entry point. Exposes three subcommands:
 - **`aflow run [plan_or_workflow ...] [-- extra instructions]`** -- runs a workflow.
   - Plan path and workflow name are resolved from explicit flags (`--plan`/`-p`, `--workflow`/`-w`) and/or positional arguments.
   - Two positionals are resolved intelligently by file existence and workflow name validity; one positional is always treated as the plan path.
   - `--start-step`/`-ss` accepts either a workflow step name or a 1-based numeric index into the declared workflow step order.
 - **`aflow install-skills [destination]`** -- copies bundled skills into harness skill directories.
+  - The default install set is the eight default bundled skills.
+  - `--include-optional` adds optional bundled skills such as `aflow-assistant`.
+  - `--only` installs exactly the named skill(s).
+- **`aflow analyze [RUN_ID] [--all]`** -- analyzes run logs from `.aflow/runs/`.
+  - Single-run mode resolves the target run in `analyzer.py`, not in the installer path.
 
 `main()` resolves `aflow run` startup in this order:
 
@@ -67,6 +72,12 @@ Entry point. Exposes two subcommands:
 8. If the plan is half-done and the workflow has more than one step, require a TTY and prompt for an explicit step unless `--start-step` was given.
 9. If strict plan loading fails with `inconsistent_checkpoint_state`, require a TTY and ask whether to recover.
 10. When recovery is accepted, load a tolerant snapshot from the invalid plan, seed startup retry state, and pass both the parsed plan and retry context into `run_workflow()`.
+
+### `analyzer.py`
+Analyzes `.aflow/runs/` artifacts and powers `aflow analyze`.
+- Single-run mode resolves the run in this order: explicit `RUN_ID` argument, `AFLOW_LAST_RUN_ID` environment variable, then `.aflow/last_run_id`.
+- `--all` switches to corpus mode, which summarizes multiple runs instead of one.
+- The bundled assistant skill uses this command as its primary evidence-first entrypoint.
 
 ### `config.py`
 Loads `~/.config/aflow/aflow.toml` plus sibling `workflows.toml` (bootstrapped from the bundled defaults on first run). Parses and validates:
@@ -149,6 +160,7 @@ Data classes for runtime state:
 Persists run data under `.aflow/runs/<timestamp>-<uuid>/`:
 - `run.json` -- run-level metadata, updated after each turn.
 - `turns/turn-NNN/` -- per-turn artifacts: `system-prompt.txt`, `user-prompt.txt`, `effective-prompt.txt`, `argv.json`, `env.json`, `stdout.txt`, `stderr.txt`, `result.json`.
+- `create_run_paths()` also writes `.aflow/last_run_id` immediately after the run directory is created so later `aflow analyze` invocations can find the latest run even if the workflow fails mid-run.
 
 Prunes old run directories to respect `keep_runs`.
 
@@ -166,10 +178,10 @@ Rich-based live banner rendered to stderr during a run. Shows elapsed time, work
 `BannerRenderer` owns a background daemon thread that rebuilds and pushes the panel every `refresh_interval_seconds` (default 1 s) and polls for a new `GitSummary` every `git_poll_interval_seconds` (default 10 s). This keeps the elapsed timer alive between step transitions without requiring external pushes. `set_context(...)` is used to update mutable banner fields instead of directly writing private attributes.
 
 ### `skill_installer.py`
-Discovers the eight bundled skills from package resources and copies them into harness-specific skill directories. Supports auto-detection (looks for harness CLIs on PATH) and manual mode (explicit destination path). Handles duplicate destinations when multiple harnesses share a path (e.g., codex, copilot, gemini, and pi all use `~/.agents/skills`).
+Discovers the default bundled skills plus the optional bundled skills from package resources, and copies the selected set into harness-specific skill directories. `BUNDLED_SKILL_NAMES` is the full sorted inventory of valid bundled skill names, while `DEFAULT_BUNDLED_SKILL_NAMES` and `OPTIONAL_BUNDLED_SKILL_NAMES` preserve install behavior. Supports auto-detection (looks for harness CLIs on PATH) and manual mode (explicit destination path). Handles duplicate destinations when multiple harnesses share a path (e.g., codex, copilot, gemini, and pi all use `~/.agents/skills`).
 
 ### `bundled_skills/`
-Eight Markdown-based skill definitions installed into harness skill directories:
+Eight default Markdown-based skill definitions plus one optional shipped skill installed into harness skill directories:
 
 | Skill                       | Purpose                                                        |
 |-----------------------------|----------------------------------------------------------------|
@@ -181,6 +193,7 @@ Eight Markdown-based skill definitions installed into harness skill directories:
 | `aflow-review-final`        | Final review without squash; approve or create follow-up plan  |
 | `aflow-merge`               | Local-only merge handoff; preserves commits, resolves conflicts, emits `AFLOW_STOP:` for irrecoverable states |
 | `aflow-init-repo`           | Pre-lifecycle bootstrap; initializes a local repo and creates the initial commit from the plan preamble       |
+| `aflow-assistant`           | Optional evidence-first debugging and setup helper              |
 
 ## Workflow Configuration
 
@@ -254,5 +267,5 @@ plans/                 # user plan files and backups
 - **Interactive startup decisions live in the CLI.** Step picking and startup recovery happen before `run_workflow()` so the workflow loop only deals with an already-chosen step and, when needed, a seeded retry context.
 - **Condition-based transitions.** Step transitions use a small expression language over three boolean symbols rather than hardcoded control flow. This keeps workflow definitions declarative.
 - **Structured run logging.** Every turn's prompts, outputs, and snapshots are persisted to `.aflow/runs/` for debugging and auditability. Old runs are pruned automatically.
-- **Skills as Markdown.** The eight bundled skills are plain SKILL.md files that get copied into each harness's skill directory. They contain behavioral instructions that the agent reads at runtime, not executable code.
+- **Skills as Markdown.** The bundled skills are plain SKILL.md files that get copied into each harness's skill directory. The default set stays separate from the optional `aflow-assistant` helper. They contain behavioral instructions that the agent reads at runtime, not executable code.
 - **Local-only lifecycle.** Branch and worktree creation, feature branch setup, and merge handoff all operate on local refs only. The engine never fetches, pulls, or pushes. The primary checkout is the control root for run artifacts and merge verification even when normal steps execute inside a linked worktree.

@@ -31,6 +31,12 @@ def _write_executable(path: Path) -> None:
     path.chmod(0o755)
 
 
+def test_bundled_skill_inventory_is_sorted_full_union() -> None:
+    assert BUNDLED_SKILL_NAMES == tuple(
+        sorted(DEFAULT_BUNDLED_SKILL_NAMES + OPTIONAL_BUNDLED_SKILL_NAMES)
+    )
+
+
 def test_discover_bundled_skills_uses_package_resources() -> None:
     skills = discover_bundled_skills()
     assert tuple(skill.name for skill in skills) == DEFAULT_BUNDLED_SKILL_NAMES

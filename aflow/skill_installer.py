@@ -9,35 +9,33 @@ import sys
 from typing import Callable
 
 
-DEFAULT_BUNDLED_SKILL_NAMES = (
-    "aflow-plan",
-    "aflow-execute-plan",
-    "aflow-execute-checkpoint",
-    "aflow-review-squash",
-    "aflow-review-checkpoint",
-    "aflow-review-final",
-    "aflow-merge",
-    "aflow-init-repo",
-)
-
-OPTIONAL_BUNDLED_SKILL_NAMES = (
-    "aflow-assistant",
-)
-
-BUNDLED_SKILL_NAMES = DEFAULT_BUNDLED_SKILL_NAMES + OPTIONAL_BUNDLED_SKILL_NAMES
-
-
 @dataclass(frozen=True)
 class BundledSkillMetadata:
     name: str
     default: bool
 
 
-BUNDLED_SKILL_METADATA = tuple(
-    BundledSkillMetadata(name=name, default=True) for name in DEFAULT_BUNDLED_SKILL_NAMES
-) + tuple(
-    BundledSkillMetadata(name=name, default=False) for name in OPTIONAL_BUNDLED_SKILL_NAMES
+BUNDLED_SKILL_METADATA = (
+    BundledSkillMetadata(name="aflow-plan", default=True),
+    BundledSkillMetadata(name="aflow-execute-plan", default=True),
+    BundledSkillMetadata(name="aflow-execute-checkpoint", default=True),
+    BundledSkillMetadata(name="aflow-review-squash", default=True),
+    BundledSkillMetadata(name="aflow-review-checkpoint", default=True),
+    BundledSkillMetadata(name="aflow-review-final", default=True),
+    BundledSkillMetadata(name="aflow-merge", default=True),
+    BundledSkillMetadata(name="aflow-init-repo", default=True),
+    BundledSkillMetadata(name="aflow-assistant", default=False),
 )
+
+DEFAULT_BUNDLED_SKILL_NAMES = tuple(
+    meta.name for meta in BUNDLED_SKILL_METADATA if meta.default
+)
+
+OPTIONAL_BUNDLED_SKILL_NAMES = tuple(
+    meta.name for meta in BUNDLED_SKILL_METADATA if not meta.default
+)
+
+BUNDLED_SKILL_NAMES = tuple(sorted(meta.name for meta in BUNDLED_SKILL_METADATA))
 
 
 @dataclass(frozen=True)
@@ -101,15 +99,13 @@ def discover_bundled_skills(
     root = bundled_skills_root()
     skills: list[BundledSkill] = []
     missing: list[str] = []
-    
+
     skill_names_to_discover: tuple[str, ...]
     if only_skills is not None:
         skill_names_to_discover = only_skills
     else:
-        skill_names_to_discover = DEFAULT_BUNDLED_SKILL_NAMES
-        if include_optional:
-            skill_names_to_discover = skill_names_to_discover + OPTIONAL_BUNDLED_SKILL_NAMES
-    
+        skill_names_to_discover = BUNDLED_SKILL_NAMES if include_optional else DEFAULT_BUNDLED_SKILL_NAMES
+
     for skill_name in skill_names_to_discover:
         skill_dir = root.joinpath(skill_name)
         skill_md = skill_dir.joinpath("SKILL.md")

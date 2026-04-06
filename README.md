@@ -31,7 +31,9 @@ uv run python -m aflow run path/to/plan.md
 
 ## Install Skills
 
-`aflow install-skills` copies the eight bundled skills into harness skill directories. In auto mode, it only targets supported harness CLIs that are already on `PATH`.
+`aflow install-skills` copies the eight default bundled skills into harness skill directories. The optional `aflow-assistant` skill is not installed unless you ask for it.
+
+`aflow-assistant` is for setup help, aflow concepts, and evidence-first run debugging.
 
 Auto mode:
 
@@ -54,6 +56,26 @@ The auto-install destination map is:
 - `kiro` -> `~/.kiro/skills`
 - `opencode` -> `~/.config/opencode/skills`
 - `claude` -> `~/.claude/skills`
+
+Selection flags:
+
+- `--include-optional` installs the default bundled skills plus the optional bundled skills, including `aflow-assistant`
+- `--only SKILL` installs exactly the named skill(s), can be repeated, and does not include the default set unless you name it explicitly
+
+## Analyze
+
+`aflow analyze` is the supported analyzer entrypoint for run logs under `.aflow/runs/`.
+
+```bash
+aflow analyze <RUN_ID>
+aflow analyze --repo-root path/to/repo <RUN_ID>
+aflow analyze
+aflow analyze --repo-root path/to/repo
+aflow analyze --all
+```
+
+Resolution order for a single run is explicit `RUN_ID`, then `AFLOW_LAST_RUN_ID`, then `.aflow/last_run_id`.
+`--all` switches to corpus mode instead of a single run.
 
 ## Usage
 

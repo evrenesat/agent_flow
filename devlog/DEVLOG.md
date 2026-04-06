@@ -1,3 +1,15 @@
+## 2026-04-06 — Optional bundled skill selection and analyzer docs parity
+
+### What changed
+
+- `aflow install-skills` now documents the default eight-skill install, optional bundled skill selection via `--include-optional`, and exact selection via repeatable `--only`. `BUNDLED_SKILL_NAMES` is now the full sorted inventory of bundled skill names, while the default install set stays unchanged.
+
+- `aflow-assistant` is now documented as an optional bundled skill for setup help, aflow concepts, and evidence-first run debugging instead of being implied as part of the default install.
+
+- `aflow analyze [RUN_ID] [--all]` is now documented in the top-level README and architecture reference as the supported analyzer entrypoint, and the run-id fallback chain is spelled out as explicit `RUN_ID`, `AFLOW_LAST_RUN_ID`, then `.aflow/last_run_id`.
+
+- `runlog.py` persists `.aflow/last_run_id` immediately when run paths are created, so the latest run remains discoverable even if the workflow later fails.
+
 ## 2026-04-06 — Auto-bootstrap empty repos from plan preamble
 
 ### What changed
