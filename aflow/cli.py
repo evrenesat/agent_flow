@@ -7,10 +7,13 @@ import sys
 from typing import Any
 
 from .api import (
+    ExecutionEvent,
+    ExecutionObserver,
     PreparedRun,
     StartupQuestion,
     StartupQuestionKind,
     StartupRequest,
+    execute_workflow,
     prepare_startup,
     prepare_startup_with_answer,
 )
@@ -26,7 +29,7 @@ from .config import (
 from .git_status import probe_worktree, classify_dirtiness_by_prefix
 from .plan import PlanParseError, load_plan, load_plan_tolerant
 from .skill_installer import InstallerError, install_skills
-from .run_state import ControllerConfig, RetryContext, WorkflowEndReason, describe_end_reason, ResumeContext
+from .run_state import WorkflowEndReason, describe_end_reason, ResumeContext
 from .analyzer import (
     analyze_corpus,
     analyze_single_run,
@@ -38,15 +41,10 @@ from .analyzer import (
 )
 from .workflow import (
     WorkflowError,
-    _effective_retry_limit,
-    generate_new_plan_path,
     move_completed_plan_to_done,
-    render_step_prompts,
-    resolve_role_selector,
-    resolve_profile,
-    run_workflow,
 )
 from .runlog import load_run_json
+from .status import BannerRenderer
 
 RUN_HELP = """\
 Flags:
@@ -689,6 +687,9 @@ def _resolve_numeric_start_step(raw_value: str, workflow: WorkflowConfig) -> tup
     Returns (resolved_step_name, error_message).
     If successful, error_message is None.
     If parsing or validation fails, resolved_step_name is the raw_value and error_message describes the issue.
+
+    Note: The library's prepare_startup() now handles numeric step resolution internally.
+    This function is retained for backward compatibility and direct testing.
     """
     step_names = list(workflow.steps.keys())
 
@@ -757,6 +758,13 @@ def _maybe_move_completed_plan_to_done(repo_root: Path, plan_path: Path, *, is_c
     if response in ("", "y", "yes"):
         return move_completed_plan_to_done(repo_root, plan_path)
     return plan_path
+
+
+class TerminalObserver(ExecutionObserver):
+    """Observer that formats execution events for terminal rendering."""
+
+    def on_event(self, event: ExecutionEvent) -> None:
+        pass
 
 
 def run_install_skills(argv: list[str] | None = None) -> int:
@@ -905,19 +913,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    startup_workflow_name = workflow_arg
+    startup_workflow_name = workflow_arg or workflow_config.aflow.default_workflow
     startup_start_step = args.start_step
-    resolved_workflow_name = workflow_arg or workflow_config.aflow.default_workflow
-    if startup_start_step is not None and resolved_workflow_name in workflow_config.workflows:
-        resolved_step, error_msg = _resolve_numeric_start_step(
-            startup_start_step,
-            workflow_config.workflows[resolved_workflow_name],
-        )
-        if error_msg is not None:
-            print(error_msg, file=sys.stderr)
-            return 1
-        startup_workflow_name = resolved_workflow_name
-        startup_start_step = resolved_step
 
     startup_request = StartupRequest(
         repo_root=repo_root,
@@ -935,16 +932,6 @@ def main(argv: list[str] | None = None) -> int:
     if prepared_run is None:
         return 1
 
-    config = ControllerConfig(
-        repo_root=prepared_run.repo_root,
-        plan_path=prepared_run.plan_path,
-        max_turns=prepared_run.max_turns,
-        keep_runs=workflow_config.aflow.keep_runs,
-        team=prepared_run.team,
-        extra_instructions=prepared_run.extra_instructions,
-        start_step=prepared_run.start_step,
-    )
-
     resume_ctx = _detect_resume_candidate(
         repo_root=prepared_run.repo_root,
         workflow_config=workflow_config.workflows[prepared_run.workflow_name],
@@ -956,17 +943,24 @@ def main(argv: list[str] | None = None) -> int:
         extra_instructions=prepared_run.extra_instructions,
     )
 
+    workflow_spec = workflow_config.workflows[prepared_run.workflow_name]
+    banner = BannerRenderer(
+        config_max_turns=prepared_run.max_turns,
+        config_plan_path=prepared_run.plan_path,
+        workflow_steps=workflow_spec.steps,
+        config_banner_files_limit=workflow_config.aflow.banner_files_limit,
+        workflow_name=prepared_run.workflow_name,
+        original_plan_path=prepared_run.plan_path,
+        repo_root=prepared_run.repo_root,
+    )
+    observer = TerminalObserver()
+
     try:
-        result = run_workflow(
-            config,
-            workflow_config,
-            prepared_run.workflow_name,
-            parsed_plan=prepared_run.parsed_plan,
-            startup_retry=prepared_run.startup_retry,
-            startup_base_head_refresh_sha=prepared_run.startup_base_head_refresh_sha,
-            config_dir=config_path.parent,
-            working_dir=working_dir,
+        result = execute_workflow(
+            prepared_run,
+            banner=banner,
             resume=resume_ctx,
+            observer=observer,
         )
     except WorkflowError as exc:
         print(exc.summary, file=sys.stderr)

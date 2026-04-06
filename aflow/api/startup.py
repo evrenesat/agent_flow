@@ -37,6 +37,45 @@ class StartupError(Exception):
     pass
 
 
+def _resolve_start_step(raw_start_step: str | None, workflow_name: str, request: StartupRequest) -> str | None:
+    """Resolve start step from raw value (numeric index or step name).
+
+    If raw_start_step is a plain ASCII base-10 integer (only digits 0-9), treat it as a 1-based
+    workflow step index. Otherwise, treat it as a step name.
+
+    Returns the resolved step name or None if raw_start_step is None.
+    Raises StartupError if the step is invalid or out of range.
+    """
+    if raw_start_step is None:
+        return None
+
+    workflow = request.workflow_config.workflows[workflow_name]
+    step_names = list(workflow.steps.keys())
+
+    if not step_names:
+        raise StartupError(
+            f"Workflow '{workflow_name}' has no steps defined"
+        )
+
+    raw_str = str(raw_start_step)
+
+    is_ascii_decimal = raw_str and all(c in '0123456789' for c in raw_str)
+    if is_ascii_decimal:
+        index = int(raw_str)
+
+        if index < 1 or index > len(step_names):
+            available = ", ".join(step_names)
+            raise StartupError(
+                f"Start-step index {index} is out of range for workflow '{workflow_name}'. "
+                f"Valid indexes: 1 to {len(step_names)}. "
+                f"Available steps: {available}"
+            )
+
+        return step_names[index - 1]
+
+    return raw_str
+
+
 def _resolve_workflow_name(request: StartupRequest) -> str:
     """Resolve workflow name from request or config default.
 
@@ -53,16 +92,19 @@ def _resolve_workflow_name(request: StartupRequest) -> str:
 
 
 def _validate_start_step(workflow_name: str, start_step: str | None, request: StartupRequest) -> None:
-    """Validate that start_step (if provided) exists in the workflow.
+    """Validate and resolve start_step (if provided).
+
+    Resolves numeric indices to step names and validates that the step exists in the workflow.
 
     Raises StartupError if start_step is invalid.
     """
     if start_step is None:
         return
+    resolved_step = _resolve_start_step(start_step, workflow_name, request)
     workflow = request.workflow_config.workflows[workflow_name]
-    if start_step not in workflow.steps:
+    if resolved_step not in workflow.steps:
         raise StartupError(
-            f"Step '{start_step}' not found in workflow '{workflow_name}'. "
+            f"Step '{resolved_step}' not found in workflow '{workflow_name}'. "
             f"Available steps: {', '.join(workflow.steps.keys())}"
         )
 
@@ -266,6 +308,8 @@ def prepare_startup(request: StartupRequest) -> PreparedRun | StartupQuestion:
     workflow_name = _resolve_workflow_name(request)
     _validate_start_step(workflow_name, request.start_step, request)
 
+    resolved_start_step = _resolve_start_step(request.start_step, workflow_name, request)
+
     if request.pre_recovered_plan is not None:
         parsed_plan = request.pre_recovered_plan
         startup_retry_error = request.startup_retry_error
@@ -287,12 +331,12 @@ def prepare_startup(request: StartupRequest) -> PreparedRun | StartupQuestion:
     effective_team = _resolve_effective_team(request, workflow_name)
 
     if is_complete:
-        if request.start_step is not None:
+        if resolved_start_step is not None:
             raise StartupError("plan is already complete, --start-step has no effect")
         selected_start_step = request.workflow_config.workflows[workflow_name].first_step
     else:
-        if request.start_step is not None:
-            selected_start_step = request.start_step
+        if resolved_start_step is not None:
+            selected_start_step = resolved_start_step
         elif _plan_needs_step_selection(workflow_name, parsed_plan, request):
             workflow = request.workflow_config.workflows[workflow_name]
             step_names = list(workflow.steps.keys())

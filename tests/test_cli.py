@@ -663,8 +663,9 @@ p = "do it"
 
             resolved_step_from_cli: list[str | None] = []
 
-            def capture_runner(config, *args, **kwargs):
-                resolved_step_from_cli.append(config.start_step)
+            def capture_runner(*args, **kwargs):
+                config_arg = kwargs.get('config') or args[0]
+                resolved_step_from_cli.append(config_arg.start_step)
                 return type(
                     "RunResult",
                     (),
@@ -675,7 +676,7 @@ p = "do it"
             try:
                 os.environ['HOME'] = str(home_dir)
                 with patch('aflow.api.startup.probe_worktree', return_value=None), \
-                     patch('aflow.cli.run_workflow', side_effect=capture_runner):
+                     patch('aflow.api.runner.run_workflow', side_effect=capture_runner):
                     result = main(['run', '--start-step', '1_0', str(plan_path)])
                 assert result == 0
                 assert resolved_step_from_cli == ['1_0']

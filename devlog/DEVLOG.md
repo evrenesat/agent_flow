@@ -1,3 +1,17 @@
+## 2026-04-07 — Library API surface and CLI shell
+
+### What changed
+
+- `aflow.api` public surface for startup preparation and workflow execution; CLI converted to a thin terminal adapter; structured execution events and observer pattern; documentation updates.
+
+### Why
+
+- Non-CLI callers (future daemon, web, Codex adapter) need to import and use aflow without invoking `aflow.cli.main()` or requiring a TTY.
+
+### Gotchas
+
+- The library API does not handle TTY prompts; callers must render `StartupQuestion` objects themselves.
+
 ## 2026-04-06 — Startup refresh guard for stale pre-handoff base HEAD
 
 - `aflow` now checks live `## Git Tracking` metadata before startup prompts when the original plan contains it. A pristine plan with an empty or stale `Pre-Handoff Base HEAD` can ask for confirmation and refresh that field to the current `git rev-parse HEAD` value.

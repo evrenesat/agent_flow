@@ -178,3 +178,32 @@ class SkillDocsTests(unittest.TestCase):
                     f"{wf_name}.{step_name} first transition must be MAX_TURNS_REACHED"
                 )
                 assert first_go['to'] == 'END'
+
+    def test_library_api_exports_match_architecture_docs(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        architecture_text = (repo_root / 'ARCHITECTURE.md').read_text(encoding='utf-8')
+
+        import aflow
+
+        # Verify all names in __all__ are importable
+        for name in aflow.__all__:
+            assert hasattr(aflow, name), f"Exported name '{name}' not found in aflow module"
+
+        # Verify key public types are documented in ARCHITECTURE.md
+        documented_types = [
+            'StartupRequest',
+            'StartupQuestion',
+            'PreparedRun',
+            'ExecutionObserver',
+            'CallbackObserver',
+            'CollectingObserver',
+            'ExecutionEvent',
+            'WorkflowRunner',
+            'RunnerConfig',
+            'prepare_startup',
+            'prepare_startup_with_answer',
+            'execute_workflow',
+        ]
+        for type_name in documented_types:
+            assert type_name in architecture_text, f"Public type '{type_name}' not documented in ARCHITECTURE.md"
+            assert hasattr(aflow, type_name), f"Documented type '{type_name}' not found in aflow module"

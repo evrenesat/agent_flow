@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -467,3 +468,188 @@ class LibraryStartupTests(unittest.TestCase):
             self.assertEqual(result.start_step, "step2")
             # Verify startup retry context survived
             self.assertIsNotNone(result.startup_retry)
+
+    def test_prepare_startup_numeric_start_step_resolves_to_step_name(self) -> None:
+        config_text = (
+            '[aflow]\ndefault_workflow = "test"\n\n'
+            '[workflow.test.steps.step1]\nrole = "architect"\nprompts = ["p"]\ngo = [{to = "step2"}]\n\n'
+            '[workflow.test.steps.step2]\nrole = "architect"\nprompts = ["p"]\ngo = [{to = "step3"}]\n\n'
+            '[workflow.test.steps.step3]\nrole = "architect"\nprompts = ["p"]\ngo = [{to = "END"}]\n\n'
+            '[harness.opencode.profiles.default]\nmodel = "m"\n\n'
+            '[roles]\narchitect = "opencode.default"\n\n'
+            '[prompts]\np = "do it"\n'
+        )
+        config_path = _write_config(self.home_dir, config_text)
+        workflow_config = load_workflow_config(config_path)
+        plan_path = self.repo_root / "plan.md"
+        plan_path.write_text("# Plan\n\n### [ ] Checkpoint 1: Test\n- [ ] step one\n")
+
+        # Test numeric step "1" resolves to "step1"
+        request = StartupRequest(
+            repo_root=self.repo_root,
+            plan_path=plan_path,
+            config_path=config_path,
+            workflow_config=workflow_config,
+            workflow_name="test",
+            start_step="1",
+            max_turns=None,
+            team=None,
+            extra_instructions=(),
+        )
+
+        result = prepare_startup(request)
+        self.assertIsInstance(result, PreparedRun)
+        self.assertEqual(result.start_step, "step1")
+
+        # Test numeric step "2" resolves to "step2"
+        request = StartupRequest(
+            repo_root=self.repo_root,
+            plan_path=plan_path,
+            config_path=config_path,
+            workflow_config=workflow_config,
+            workflow_name="test",
+            start_step="2",
+            max_turns=None,
+            team=None,
+            extra_instructions=(),
+        )
+
+        result = prepare_startup(request)
+        self.assertIsInstance(result, PreparedRun)
+        self.assertEqual(result.start_step, "step2")
+
+    def test_prepare_startup_numeric_start_step_out_of_range_raises_error(self) -> None:
+        config_text = (
+            '[aflow]\ndefault_workflow = "test"\n\n'
+            '[workflow.test.steps.step1]\nrole = "architect"\nprompts = ["p"]\ngo = [{to = "END"}]\n\n'
+            '[harness.opencode.profiles.default]\nmodel = "m"\n\n'
+            '[roles]\narchitect = "opencode.default"\n\n'
+            '[prompts]\np = "do it"\n'
+        )
+        config_path = _write_config(self.home_dir, config_text)
+        workflow_config = load_workflow_config(config_path)
+        plan_path = self.repo_root / "plan.md"
+        plan_path.write_text("# Plan\n\n### [ ] Checkpoint 1: Test\n- [ ] step one\n")
+
+        request = StartupRequest(
+            repo_root=self.repo_root,
+            plan_path=plan_path,
+            config_path=config_path,
+            workflow_config=workflow_config,
+            workflow_name="test",
+            start_step="5",  # Out of range
+            max_turns=None,
+            team=None,
+            extra_instructions=(),
+        )
+
+        with self.assertRaises(StartupError) as ctx:
+            prepare_startup(request)
+        self.assertIn("out of range", str(ctx.exception))
+
+
+class LibraryRunnerTests(unittest.TestCase):
+    """Test the public runner library API with events."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.home_dir = Path(self.temp_dir.name)
+        self.repo_root = self.home_dir / "repo"
+        self.repo_root.mkdir()
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_execute_workflow_with_observer_emits_events(self) -> None:
+        """Test that execute_workflow emits events through the observer."""
+        from aflow.api import (
+            CollectingObserver,
+            RunCompletedEvent,
+            RunStartedEvent,
+            execute_workflow,
+        )
+        from aflow.harnesses.base import HarnessAdapter
+
+        config_text = (
+            '[aflow]\ndefault_workflow = "test"\n\n'
+            '[workflow.test.steps.step1]\nrole = "architect"\nprompts = ["p"]\ngo = [{to = "END"}]\n\n'
+            '[harness.opencode.profiles.default]\nmodel = "m"\n\n'
+            '[roles]\narchitect = "opencode.default"\n\n'
+            '[prompts]\np = "do it"\n'
+        )
+        config_path = _write_config(self.home_dir, config_text)
+        workflow_config = load_workflow_config(config_path)
+        plan_path = self.repo_root / "plan.md"
+        plan_path.write_text("# Plan\n\n## Done When\n- Plan is complete\n\n### [x] Checkpoint 1: Test\n- [x] step one\n")
+
+        request = StartupRequest(
+            repo_root=self.repo_root,
+            plan_path=plan_path,
+            config_path=config_path,
+            workflow_config=workflow_config,
+            workflow_name="test",
+            start_step=None,
+            max_turns=5,
+            team=None,
+            extra_instructions=(),
+        )
+
+        result = prepare_startup(request)
+        self.assertIsInstance(result, PreparedRun)
+
+        observer = CollectingObserver()
+
+        class FakeAdapter(HarnessAdapter):
+            name = "fake"
+            supports_effort = False
+
+            def build_invocation(self, repo_root, model, system_prompt, user_prompt, effort=None):
+                from aflow.harnesses.base import HarnessInvocation
+                return HarnessInvocation(
+                    argv=[sys.executable, "-c", "print('done')"],
+                    env={},
+                )
+
+        execute_workflow(
+            result,
+            observer=observer,
+            adapter=FakeAdapter(),
+            runner=lambda argv, **kw: subprocess.CompletedProcess(argv, 0, "done\n", ""),
+        )
+
+        events = observer.events
+        event_types = [type(e) for e in events if e]
+
+        self.assertIn(RunStartedEvent, event_types)
+        self.assertTrue(any(isinstance(e, RunCompletedEvent) for e in events))
+
+    def test_collecting_observer_collects_events(self) -> None:
+        """Test that CollectingObserver properly collects events."""
+        from aflow.api import CollectingObserver, RunStartedEvent
+
+        observer = CollectingObserver()
+        event = RunStartedEvent.create(workflow_name="test")
+
+        observer.on_event(event)
+
+        self.assertEqual(len(observer.events), 1)
+        self.assertIsInstance(observer.events[0], RunStartedEvent)
+        self.assertEqual(observer.events[0].workflow_name, "test")
+
+    def test_callback_observer_calls_callback(self) -> None:
+        """Test that CallbackObserver calls the provided callback."""
+        from aflow.api import CallbackObserver, RunStartedEvent
+
+        collected = []
+
+        def callback(event):
+            collected.append(event)
+
+        observer = CallbackObserver(callback)
+        event = RunStartedEvent.create(workflow_name="test")
+
+        observer.on_event(event)
+
+        self.assertEqual(len(collected), 1)
+        self.assertIsInstance(collected[0], RunStartedEvent)
+        self.assertEqual(collected[0].workflow_name, "test")

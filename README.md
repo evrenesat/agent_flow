@@ -62,6 +62,62 @@ Selection flags:
 - `--include-optional` installs the default bundled skills plus the optional bundled skills, including `aflow-assistant`
 - `--only SKILL` installs exactly the named skill(s), can be repeated, and does not include the default set unless you name it explicitly
 
+## Library API
+
+You can also use `aflow` as a Python library instead of invoking the CLI. The public API is available under `aflow.api` and re-exported from the top-level `aflow` package for stable imports.
+
+Startup preparation returns either a `PreparedRun` (ready to execute) or a `StartupQuestion` (needs user input):
+
+```python
+from pathlib import Path
+from aflow import (
+    StartupRequest,
+    StartupQuestion,
+    prepare_startup,
+    prepare_startup_with_answer,
+    execute_workflow,
+)
+
+request = StartupRequest(
+    repo_root=Path("."),
+    plan_path=Path("plans/my-plan.md"),
+    workflow_name="ralph",
+    start_step=None,
+)
+
+result = prepare_startup(request)
+
+if isinstance(result, StartupQuestion):
+    # Handle the question (render a prompt, collect user input, then resume)
+    answer = input(f"{result.message}: ")
+    result = prepare_startup_with_answer(request, answer)
+
+# Now result is a PreparedRun
+run_result = execute_workflow(result)
+print(f"Run completed: {run_result.end_reason}")
+```
+
+For more control over execution, use `WorkflowRunner` with a custom observer:
+
+```python
+from aflow import WorkflowRunner, RunnerConfig, CallbackObserver, ExecutionEvent
+
+def my_observer(event: ExecutionEvent) -> None:
+    print(f"Event: {event.event_type}")
+
+config = RunnerConfig(
+    prepared_run=result,
+    observer=CallbackObserver(my_observer),
+)
+
+runner = WorkflowRunner(config)
+run_result = runner.run()
+```
+
+When startup preparation returns a `StartupQuestion`, the caller decides how to present it. The CLI renders questions as TTY prompts; non-CLI callers can present them in any UI or answer programmatically through `prepare_startup_with_answer()`.
+
+See `ARCHITECTURE.md` for full API documentation including all event types, observer implementations, and model definitions.
+
 ## Analyze
 
 `aflow analyze` is the supported analyzer entrypoint for run logs under `.aflow/runs/`.

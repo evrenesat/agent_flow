@@ -196,6 +196,46 @@ Eight default Markdown-based skill definitions plus one optional shipped skill i
 | `aflow-init-repo`           | Pre-lifecycle bootstrap; initializes a local repo and creates the initial commit from the plan preamble       |
 | `aflow-assistant`           | Optional evidence-first debugging and setup helper              |
 
+### `api/`
+Public library API for startup preparation and workflow execution. Re-exported from `aflow/__init__.py` for stable imports.
+
+**Startup preparation (`startup.py`):**
+- `prepare_startup(request: StartupRequest) -> PreparedRun | StartupQuestion` — Main entry point for startup preparation. Returns either a `PreparedRun` (ready to execute) or a `StartupQuestion` (needs user input).
+- `prepare_startup_with_answer(request: StartupRequest, answer: str) -> PreparedRun | StartupQuestion` — Resume startup preparation after answering a question.
+- `StartupError` — Raised when startup preparation encounters an unrecoverable error.
+
+Startup models (`models.py`):
+- `StartupRequest` — Immutable request parameters for startup preparation.
+- `StartupContext` — Immutable startup state loaded from config and environment.
+- `StartupQuestion` — Structured question requiring user input. Includes `kind` (enum: `select_start_step`, `dirty_worktree_confirmation`, `startup_recovery`, `pre_handoff_base_head_refresh`), `message` text, and metadata.
+- `StartupQuestionKind` — Enum of possible question kinds.
+- `PreparedRun` — Immutable result of successful startup preparation. Contains `StartupContext`, parsed plan, and resolved parameters for `execute_workflow()`.
+
+**Workflow execution (`runner.py`):**
+- `execute_workflow(prepared_run: PreparedRun) -> ControllerRunResult` — Convenience function that executes a prepared workflow with default configuration.
+- `WorkflowRunner` — Configurable runner class for executing prepared workflows with custom observers, banner renderers, harness adapters, or subprocess runners.
+- `RunnerConfig` — Configuration dataclass for `WorkflowRunner`. Accepts `PreparedRun`, optional `ExecutionObserver`, optional `BannerRenderer`, optional `HarnessAdapter`, and optional subprocess runner callable.
+
+**Execution events (`events.py`):**
+- `ExecutionObserver` — Protocol for observing workflow execution events. Subclasses implement `on_event(event: ExecutionEvent) -> None`.
+- `CallbackObserver` — Observer implementation that calls a user-provided function for each event.
+- `CollectingObserver` — Observer implementation that collects all events into a list for later inspection.
+- `ExecutionEvent` — Base class for all execution events.
+- `ExecutionEventType` — Enum of event types: `RUN_STARTED`, `STATUS_CHANGED`, `TURN_STARTED`, `TURN_FINISHED`, `QUESTION_REQUIRED`, `RUN_COMPLETED`, `RUN_FAILED`.
+- `RunStartedEvent` — Emitted when a workflow run starts.
+- `StatusChangedEvent` — Emitted when the workflow status changes.
+- `TurnStartedEvent` — Emitted when a workflow turn starts.
+- `TurnFinishedEvent` — Emitted when a workflow turn finishes.
+- `QuestionRequiredEvent` — Emitted when a workflow step requires a question (currently unused in library context but included for completeness).
+- `RunCompletedEvent` — Emitted when a workflow run completes successfully.
+- `RunFailedEvent` — Emitted when a workflow run fails.
+
+**CLI-as-adapter boundary:**
+- `cli.py` consumes the public `aflow.api` surface for startup preparation and workflow execution.
+- Terminal rendering in `cli.py` and `status.py` is implemented as an `ExecutionObserver` over structured library events.
+- CLI-specific behavior (TTY-only prompts, Rich banner rendering, exit codes) lives entirely in `cli.py`, while startup decisions, execution state, and plan mutations are owned by the library.
+- Non-CLI callers can import from `aflow` or `aflow.api` directly and use the same startup and runner APIs without invoking `aflow.cli.main()` or requiring terminal access.
+
 ## Workflow Configuration
 
 Workflows are state machines defined in `workflows.toml`. Each step has:
@@ -223,10 +263,17 @@ The built-in workflow diagrams live in the README so the default workflow shapes
 ```
 aflow/
   __main__.py          # entrypoint
+  __init__.py          # public API re-exports
   cli.py               # argument parsing, main(), dirty-worktree gate
   config.py            # TOML config loading and validation
   plan.py              # Markdown plan parser
   workflow.py          # workflow engine (turn loop, conditions, transitions)
+  api/
+    __init__.py        # public API exports
+    startup.py         # startup preparation functions
+    models.py          # startup and execution models
+    runner.py          # workflow execution runner
+    events.py          # execution events and observers
   run_state.py         # runtime data classes
   runlog.py            # run/turn artifact persistence
   status.py            # Rich live banner with background refresh thread
@@ -265,7 +312,8 @@ plans/                 # user plan files and backups
 
 - **Plan as source of truth.** The Markdown plan file on disk is authoritative. The engine re-reads it before and after every turn because the agent subprocess may modify it (checking off steps/checkpoints).
 - **Harness-agnostic.** The engine doesn't know how any specific agent CLI works. Adapters translate a uniform interface into CLI-specific argv/env. Adding a new harness means one ~30-line adapter file.
-- **Interactive startup decisions live in the CLI.** Step picking and startup recovery happen before `run_workflow()` so the workflow loop only deals with an already-chosen step and, when needed, a seeded retry context.
+- **Library-first architecture.** All startup preparation and workflow execution logic lives in the `aflow.api` public surface. The CLI is a thin terminal adapter that renders library-provided questions and events for interactive use. Non-CLI callers can import and use the same library APIs without terminal access or Rich dependencies.
+- **Interactive startup decisions are structured.** Startup decisions that require human input are represented as `StartupQuestion` objects with a `kind` enum, prompt text, and metadata. The CLI renders these as TTY prompts; library callers can present them in any UI or handle them programmatically via `prepare_startup_with_answer()`.
 - **Condition-based transitions.** Step transitions use a small expression language over three boolean symbols rather than hardcoded control flow. This keeps workflow definitions declarative.
 - **Structured run logging.** Every turn's prompts, outputs, and snapshots are persisted to `.aflow/runs/` for debugging and auditability. Old runs are pruned automatically.
 - **Skills as Markdown.** The bundled skills are plain SKILL.md files that get copied into each harness's skill directory. The default set stays separate from the optional `aflow-assistant` helper. They contain behavioral instructions that the agent reads at runtime, not executable code.

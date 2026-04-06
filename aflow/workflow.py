@@ -12,7 +12,10 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
+
+if TYPE_CHECKING:
+    from aflow.api.events import ExecutionEvent, ExecutionObserver
 
 from .config import (
     AflowSection,
@@ -40,6 +43,14 @@ from .plan import (
 from .run_state import ControllerConfig, ControllerRunResult, ControllerState, ExecutionContext, RetryContext, ResumeContext, TurnRecord, WorkflowEndReason, format_harness_model_display
 from .runlog import create_run_paths, finalize_turn_artifacts, prune_old_runs, write_run_metadata, write_turn_artifacts_start
 from .status import BannerRenderer
+from aflow.api.events import (
+    RunCompletedEvent,
+    RunFailedEvent,
+    RunStartedEvent,
+    StatusChangedEvent,
+    TurnFinishedEvent,
+    TurnStartedEvent,
+)
 
 
 PROCESS_POLL_INTERVAL_SECONDS = 0.05
@@ -1967,6 +1978,12 @@ def _execute_merge_handoff(
     )
 
 
+def _emit_event(observer: ExecutionObserver | None, event: ExecutionEvent) -> None:
+    """Emit an event to the observer if one is provided."""
+    if observer is not None:
+        observer.on_event(event)
+
+
 def run_workflow(
     config: ControllerConfig,
     workflow_config: WorkflowUserConfig,
@@ -1981,6 +1998,7 @@ def run_workflow(
     runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     banner: BannerRenderer | None = None,
     resume: ResumeContext | None = None,
+    observer: ExecutionObserver | None = None,
 ) -> ControllerRunResult:
     if workflow_name not in workflow_config.workflows:
         raise WorkflowError(f"workflow '{workflow_name}' not found in config")
@@ -1988,6 +2006,15 @@ def run_workflow(
     wf = workflow_config.workflows[workflow_name]
     if wf.first_step is None:
         raise WorkflowError(f"workflow '{workflow_name}' has no steps")
+
+    _emit_event(observer, RunStartedEvent.create(
+        workflow_name=workflow_name,
+        repo_root=config.repo_root,
+        plan_path=config.plan_path,
+        max_turns=config.max_turns,
+        team=config.team,
+        start_step=config.start_step,
+    ))
 
     repo_state = probe_repo_state(config.repo_root)
     needs_bootstrap = _lifecycle_is_bootstrap_eligible(wf, repo_state)
@@ -2046,6 +2073,13 @@ def run_workflow(
             active_plan_path=active_plan_path,
             resumed_from_run_id=resumed_from_run_id,
         )
+        _emit_event(observer, RunFailedEvent.create(
+            run_dir=run_paths.run_dir,
+            turns_completed=0,
+            failure_reason=summary,
+            final_snapshot=PlanSnapshot(None, 0, 0, False),
+            issues_accumulated=state.issues_accumulated,
+        ))
         raise WorkflowError(summary, run_dir=run_paths.run_dir) from exc
     except (PlanParseError, FileNotFoundError) as exc:
         state.status_message = "failed"
@@ -2061,6 +2095,13 @@ def run_workflow(
             active_plan_path=active_plan_path,
             resumed_from_run_id=resumed_from_run_id,
         )
+        _emit_event(observer, RunFailedEvent.create(
+            run_dir=run_paths.run_dir,
+            turns_completed=0,
+            failure_reason=summary,
+            final_snapshot=PlanSnapshot(None, 0, 0, False),
+            issues_accumulated=state.issues_accumulated,
+        ))
         raise WorkflowError(summary, run_dir=run_paths.run_dir) from exc
 
     if _workflow_requires_git_tracking(wf, workflow_config):
@@ -2183,6 +2224,15 @@ def run_workflow(
             active_plan_path=active_plan_path,
             resumed_from_run_id=resumed_from_run_id,
         )
+
+        _emit_event(observer, RunCompletedEvent.create(
+            run_dir=run_paths.run_dir,
+            turns_completed=0,
+            final_snapshot=original_snapshot,
+            end_reason=end_reason,
+            issues_accumulated=state.issues_accumulated,
+        ))
+
         return result
 
     use_popen = runner is None
@@ -2373,6 +2423,19 @@ def run_workflow(
                 started_at=started_at,
             )
         )
+
+        _emit_event(observer, TurnStartedEvent.create(
+            turn_number=turn_number,
+            step_name=step_name,
+            step_role=step_role,
+            resolved_harness_name=resolved.harness_name,
+            resolved_model_display=format_harness_model_display(
+                resolved.harness_name,
+                resolved.model,
+                resolved.effort,
+            ),
+        ))
+
         banner.set_context(
             current_step_name=step_name,
             active_plan_path=active_path,
@@ -2381,6 +2444,12 @@ def run_workflow(
             config_model=resolved.model,
             config_effort=resolved.effort,
         )
+        _emit_event(observer, StatusChangedEvent.create(
+            status_message=f"running turn {turn_number}: {step_name}",
+            turns_completed=turn_number - 1,
+            active_turn=turn_number,
+            current_step_name=step_name,
+        ))
         turn_dir = write_turn_artifacts_start(
             run_paths,
             turn_number=turn_number,
@@ -2459,6 +2528,17 @@ def run_workflow(
         record.outcome = "completed" if status in {"running", "completed"} else status
         record.finished_at = datetime.now(timezone.utc)
         record.duration_seconds = (record.finished_at - record.started_at).total_seconds()
+
+        _emit_event(observer, TurnFinishedEvent.create(
+            turn_number=state.active_turn,
+            step_name=step_name or record.step_name,
+            outcome=record.outcome,
+            duration_seconds=record.duration_seconds,
+            stdout_artifact_path=record.stdout_artifact_path,
+            stderr_artifact_path=record.stderr_artifact_path,
+            returncode=returncode,
+            error=error,
+        ))
 
     for turn_number in range(1, config.max_turns + 1):
         retry_ctx = state.pending_retry
@@ -3049,6 +3129,12 @@ def run_workflow(
                     active_plan_path = original_plan_path
 
             state.status_message = "completed"
+            _emit_event(observer, StatusChangedEvent.create(
+                status_message="completed",
+                turns_completed=state.turns_completed,
+                active_turn=None,
+                current_step_name=current_step_name,
+            ))
             result = ControllerRunResult(
                 run_dir=run_paths.run_dir,
                 turns_completed=state.turns_completed,
@@ -3070,6 +3156,15 @@ def run_workflow(
             )
             prune_old_runs(run_paths.runs_root, config.keep_runs)
             banner.stop(state)
+
+            _emit_event(observer, RunCompletedEvent.create(
+                run_dir=run_paths.run_dir,
+                turns_completed=state.turns_completed,
+                final_snapshot=post_snapshot,
+                end_reason=end_reason,
+                issues_accumulated=state.issues_accumulated,
+            ))
+
             return result
 
         if len(wf.steps) > 1:
@@ -3127,6 +3222,13 @@ def run_workflow(
         new_plan_path=new_plan_path,
         resumed_from_run_id=resumed_from_run_id,
     )
+    _emit_event(observer, RunFailedEvent.create(
+        run_dir=run_paths.run_dir,
+        turns_completed=state.turns_completed,
+        failure_reason=summary,
+        final_snapshot=state.last_snapshot,
+        issues_accumulated=state.issues_accumulated,
+    ))
     prune_old_runs(run_paths.runs_root, config.keep_runs)
     banner.stop(state)
     raise WorkflowError(summary, run_dir=run_paths.run_dir)
