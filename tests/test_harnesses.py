@@ -121,7 +121,7 @@ class AdaptersTests(unittest.TestCase):
     def test_opencode_without_effort(self) -> None:
         adapter = OpencodeAdapter()
         invocation = adapter.build_invocation(repo_root=Path('/repo'), model='glm-5-turbo', system_prompt='SYSTEM', user_prompt='USER')
-        assert invocation.argv == ('opencode', 'run', '--dangerously-skip-permissions', '--model', 'glm-5-turbo', '--format', 'default', '--dir', '/repo', 'SYSTEM\n\nUSER')
+        assert invocation.argv == ('opencode', 'run', '--model', 'glm-5-turbo', '--format', 'default', '--dir', '/repo', 'SYSTEM\n\nUSER')
         assert invocation.prompt_mode == 'prefix-system-into-user-prompt'
         assert invocation.effective_prompt == 'SYSTEM\n\nUSER'
 
@@ -131,7 +131,7 @@ class AdaptersTests(unittest.TestCase):
         assert not adapter.supports_effort
         argv = invocation.argv
         assert 'effort' not in ' '.join(argv).lower()
-        assert argv == ('opencode', 'run', '--dangerously-skip-permissions', '--model', 'glm-5-turbo', '--format', 'default', '--dir', '/repo', 'SYSTEM\n\nUSER')
+        assert argv == ('opencode', 'run', '--model', 'glm-5-turbo', '--format', 'default', '--dir', '/repo', 'SYSTEM\n\nUSER')
 
     def test_opencode_without_model_omits_model_flag(self) -> None:
         adapter = OpencodeAdapter()
