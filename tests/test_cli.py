@@ -655,25 +655,24 @@ p = "do it"
             plan_path = Path(tmpdir) / 'plan.md'
             _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: One\n- [ ] step\n')
 
-            # Patch subprocess to capture the resolver's choice
-            resolved_step_from_cli: list[str] = []
+            resolved_step_from_cli: list[str | None] = []
 
-            def capture_runner(argv, **kwargs):
-                # The --start-step value should map to the step name '1_0', not index 10
-                # We can't directly check the resolved value here, but we can verify
-                # that the main() function accepts '1_0' and doesn't error on it
-                resolved_step_from_cli.append('captured')
-                return subprocess.CompletedProcess(argv, 1, '', 'plan not found')
+            def capture_runner(config, *args, **kwargs):
+                resolved_step_from_cli.append(config.start_step)
+                return type(
+                    "RunResult",
+                    (),
+                    {"turns_completed": 0, "end_reason": "already_complete"},
+                )()
 
             original_home = os.environ.get('HOME')
             try:
                 os.environ['HOME'] = str(home_dir)
-                with patch('aflow.cli.run_workflow', return_value=None):
-                    # This should not raise an error for '1_0' being treated as a step name
-                    # Rather it should fail later because the plan file doesn't exist
+                with patch('aflow.api.startup.probe_worktree', return_value=None), \
+                     patch('aflow.cli.run_workflow', side_effect=capture_runner):
                     result = main(['run', '--start-step', '1_0', str(plan_path)])
-                # Should fail for missing plan file, not for invalid numeric index
-                assert result == 1
+                assert result == 0
+                assert resolved_step_from_cli == ['1_0']
             finally:
                 if original_home is None:
                     os.environ.pop('HOME', None)
