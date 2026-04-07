@@ -118,6 +118,20 @@ When startup preparation returns a `StartupQuestion`, the caller decides how to 
 
 See `ARCHITECTURE.md` for full API documentation including all event types, observer implementations, and model definitions.
 
+## Remote App
+
+A separate mobile-first web application is available under `apps/aflow_app/` for remote workflow management. The remote app provides:
+
+- Repository switching and management
+- Codex session reuse for plan creation
+- Plan draft save/load/promote workflow
+- Real-time execution monitoring via SSE
+- Optional audio transcription for voice input
+
+The remote app is not included in the published `aworkflow` wheel. It is designed for authenticated desktop-hosted local/LAN use.
+
+See `apps/aflow_app/README.md` for setup, configuration, and API documentation.
+
 ## Analyze
 
 `aflow analyze` is the supported analyzer entrypoint for run logs under `.aflow/runs/`.

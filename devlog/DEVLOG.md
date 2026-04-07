@@ -1,3 +1,57 @@
+## 2026-04-07 — Audio transcription and documentation (Checkpoint 6)
+
+### What changed
+
+- Added `transcription.py` module with OpenAI-compatible transcription client
+- Implemented `POST /api/transcribe` endpoint for browser-recorded audio clips
+- Updated `AudioRecorder` component to record, upload, and insert transcripts
+- Integrated audio recorder into `Composer` component with graceful degradation
+- Added comprehensive tests for transcription client and API endpoint
+- Updated documentation in README.md, ARCHITECTURE.md, and apps/aflow_app/README.md
+- Added `python-multipart` and `pytest-asyncio` dependencies to server
+
+### Why
+
+- Voice input improves mobile usability for plan creation and chat
+- Upload-based transcription is simpler than streaming and works with standard APIs
+- Graceful degradation ensures text-only usage remains fully functional
+- OpenAI-compatible API format supports multiple transcription backends
+
+### Gotchas
+
+- Transcription requires explicit configuration (URL and token) to be enabled
+- Uploaded audio files are stored temporarily and cleaned up after transcription
+- The transcription endpoint returns 503 when not configured, not 404
+- Browser MediaRecorder API requires HTTPS in production (localhost is exempt)
+- Audio recording requires microphone permission from the user
+
+## 2026-04-07 — Remote app server scaffold (Checkpoint 3)
+
+### What changed
+
+- Created `apps/aflow_app/server/` as a separate Python subproject with FastAPI backend
+- Implemented repository registry with file-backed JSON storage for managing multiple repos
+- Added authenticated REST API endpoints for repos, plans, and workflow execution
+- Integrated `aflow.api` library for startup preparation and workflow execution
+- Implemented SSE streaming for execution events using `ExecutionObserver`
+- Added comprehensive test suite for registry and API endpoints
+- Server is excluded from root `aworkflow` wheel package
+
+### Why
+
+- Non-CLI callers need a way to manage multiple repos and execute workflows remotely
+- The server demonstrates how to use `aflow` as a library rather than a CLI
+- SSE provides real-time execution updates without terminal scraping
+- Separate subproject allows independent versioning and deployment
+
+### Gotchas
+
+- The server requires explicit token authentication for all API operations
+- Repository registry validates git roots but also accepts non-git directories
+- Plan parsing failures are silently ignored when listing plans
+- The server is designed for local/LAN use, not internet-facing deployment
+- Server tests use direct global state injection rather than lifespan context managers
+
 ## 2026-04-07 — Library API surface and CLI shell
 
 ### What changed
@@ -130,3 +184,65 @@
 - **Transient follow-up plans:** Do not rely on follow-up-plan persistence across `aflow` invocations or restarts. They live only in the worktree for the duration of the run. If you need a follow-up plan to survive a restart or later invocation, implement that as part of the plan-update logic in your harness steps, not as worktree transience.
 - **Dirty-path prefix matching:** The `plans/` classification uses exact `startswith("plans/")` checks, not substring matching. Paths like `plans_backup/` or `my-plans/foo` are treated as unrelated dirtiness and will block startup. This strict rule prevents accidental allow-listing of unintended directories.
 - **Primary copy is the authority:** The original plan file in the primary checkout is the long-lived source of truth for plan state across runs. The worktree copy is a working copy that is synced back after each turn. If both the primary and worktree copies are edited externally between turns, the worktree copy wins (because it is synced after the harness returns).
+
+
+## 2026-04-07 - Checkpoint 4: Codex Session Reuse and Plan Draft Persistence
+
+Implemented Codex session management and plan draft persistence for the remote app server.
+
+### What Changed
+
+**New Components:**
+- `codex_backend.py` — Adapter interface for Codex server integration with HTTP implementation
+- `codex_routes.py` — FastAPI routes for Codex sessions and plan draft management
+- `plan_store.py` — Plan draft save/load/promote operations for repositories
+
+**API Endpoints Added:**
+- Codex session listing, fetching, and messaging
+- Plan draft save, load, delete, and promote operations
+- In-progress plan listing
+
+**Key Features:**
+- Codex adapter interface supports session reuse and message history
+- Plan drafts saved under `<repo>/plans/drafts/`
+- Approved drafts promoted to `<repo>/plans/in-progress/`
+- Content preserved verbatim during all operations
+- Graceful degradation when Codex is not configured
+
+### Implementation Details
+
+**Dependency Injection:**
+- Used FastAPI's `dependency_overrides` to inject global state into Codex routes
+- Codex routes define placeholder dependency functions that are overridden by main app
+- This allows routes to be defined at module level while still accessing request-scoped state
+
+**Codex Backend:**
+- Abstract `CodexBackend` protocol defines adapter interface
+- `HttpCodexBackend` implements HTTP-based Codex server communication
+- Normalizes external API responses into internal models
+- Supports optional authentication via bearer token
+
+**Plan Store:**
+- Validates plan names to prevent path traversal
+- Creates directories as needed
+- Preserves content verbatim with normal newline normalization
+- Promotion copies content without modification
+
+### Testing
+
+Added comprehensive test coverage:
+- 11 tests for Codex backend with mocked HTTP client
+- 20 tests for plan store operations
+- 10 tests for Codex and plan draft API endpoints
+
+All 71 server tests pass.
+
+### Gotchas
+
+- FastAPI dependency injection requires using `app.dependency_overrides` for module-level routers
+- Direct function replacement doesn't work because routes are registered at import time
+- Test client must set `raise_server_exceptions=True` to see actual errors during development
+
+### Next Steps
+
+Checkpoint 5 will add the mobile-first web client for repos, plans, sessions, and execution.

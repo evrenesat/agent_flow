@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aflow-app-server"
+version = "0.1.0"
+description = "Remote app server for aflow workflow management"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "sse-starlette>=2.2.0",
+    "pydantic>=2.0.0",
+    "httpx>=0.28.0",
+    "python-multipart>=0.0.9",
+    "tomli>=2.0.0;python_version<'3.11'",
+]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[project.urls]
+Repository = "https://github.com/evrenesat/aflow"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "httpx>=0.28.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[project.scripts]
+aflow-app-server = "aflow_app_server.main:run_server"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aflow_app_server"]

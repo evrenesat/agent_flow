@@ -304,6 +304,10 @@ tests/
 plans/                 # user plan files and backups
   backups/             # automatic plan backups
   in-progress/         # active handoff plans
+apps/                  # separate subprojects (not in published wheel)
+  aflow_app/           # remote management app
+    server/            # FastAPI backend using aflow library
+    web/               # React frontend (future)
 .aflow/
   runs/                # per-run logs (gitignored)
 ```
@@ -318,3 +322,147 @@ plans/                 # user plan files and backups
 - **Structured run logging.** Every turn's prompts, outputs, and snapshots are persisted to `.aflow/runs/` for debugging and auditability. Old runs are pruned automatically.
 - **Skills as Markdown.** The bundled skills are plain SKILL.md files that get copied into each harness's skill directory. The default set stays separate from the optional `aflow-assistant` helper. They contain behavioral instructions that the agent reads at runtime, not executable code.
 - **Local-only lifecycle.** Branch and worktree creation, feature branch setup, and merge handoff all operate on local refs only. The engine never fetches, pulls, or pushes. The primary checkout is the control root for run artifacts and merge verification even when normal steps execute inside a linked worktree.
+
+
+## Remote App (Separate Subproject)
+
+The `apps/aflow_app/` directory contains a separate remote management application that uses `aflow` as a library. This app is not included in the published `aworkflow` wheel.
+
+### Server (`apps/aflow_app/server/`)
+
+A FastAPI-based backend that provides:
+- Repository registry for managing multiple local repos
+- Plan listing from `plans/drafts/` and `plans/in-progress/`
+- Workflow execution through the `aflow.api` library
+- Server-Sent Events (SSE) for streaming execution progress
+- Token-based authentication for all state-changing operations
+
+The server imports `aflow` as a library and uses:
+- `prepare_startup()` for startup preparation
+- `execute_workflow()` for workflow execution
+- `ExecutionObserver` for streaming events over SSE
+
+Configuration is loaded from environment variables or `~/.config/aflow-app/config.toml`.
+
+### Web Client (`apps/aflow_app/web/`)
+
+A mobile-first React frontend (future checkpoint) that will provide:
+- Repository selection and management
+- Plan browsing and execution
+- Live execution status updates via SSE
+- Codex session integration (future)
+- Audio transcription support (future)
+
+### Design Principles
+
+- The server uses `aflow` as a library, not as a CLI subprocess
+- All execution state flows through structured library events, not terminal scraping
+- The app is designed for authenticated local/LAN use, not internet-facing deployment
+- The server and web client are separate packages from the root `aworkflow` wheel
+
+
+## Remote App Server
+
+The `apps/aflow_app/server/` subproject provides a FastAPI-based remote management server for aflow workflows. It is a separate package that imports `aflow` as a library and is not included in the published `aworkflow` wheel.
+
+### Architecture
+
+The server exposes authenticated REST APIs for:
+- Repository registry management (add, list, update, remove repos)
+- Plan file discovery (list drafts and in-progress plans)
+- Workflow execution (start runs, stream events via SSE)
+- Codex session management (list, attach, fetch messages, send messages)
+- Plan draft persistence (save, load, promote drafts to in-progress)
+
+### Key Components
+
+**`main.py`** — FastAPI application with lifespan management for global state (`ServerConfig`, `RepoRegistry`, `AflowService`). Uses dependency injection to provide these services to route handlers. Includes Codex routes with authentication.
+
+**`config.py`** — Server configuration loading from environment variables and `~/.config/aflow-app/config.toml`. Supports:
+- Server bind settings (`bind_host`, `bind_port`)
+- Authentication (`auth_token`)
+- Repository registry path
+- Codex server settings (`codex_server_url`, `codex_server_token`)
+- Transcription settings (`transcription_url`, `transcription_token`)
+
+**`repo_registry.py`** — JSON-backed repository registry with validation. Stores repo metadata (id, name, path, git root status, registration timestamp). Validates that registered paths exist and are git roots or explicit user-chosen repo roots.
+
+**`aflow_service.py`** — Service layer that wraps `aflow.api` library calls. Provides:
+- Plan listing (scans `plans/drafts/` and `plans/in-progress/`)
+- Startup preparation (calls `aflow.api.startup.prepare_startup()`)
+- Async workflow execution (calls `aflow.api.runner.execute_workflow()` in thread pool)
+- Event streaming (collects `ExecutionEvent` objects into asyncio queues for SSE)
+
+**`codex_backend.py`** — Adapter interface for Codex server integration. Defines:
+- `CodexBackend` protocol with `list_sessions()`, `get_session()`, `fetch_messages()`, `send_message()`
+- `HttpCodexBackend` implementation for HTTP-based Codex servers
+- Normalizes external session/message payloads into server-local models
+
+**`codex_routes.py`** — FastAPI router for Codex and plan draft endpoints:
+- `GET /api/codex/sessions` — List available Codex sessions
+- `GET /api/codex/sessions/{session_id}` — Get specific session
+- `GET /api/codex/sessions/{session_id}/messages` — Fetch messages from session
+- `POST /api/codex/sessions/{session_id}/messages` — Send message to session
+- `POST /api/codex/repos/{repo_id}/plans/drafts` — Save plan draft
+- `GET /api/codex/repos/{repo_id}/plans/drafts` — List drafts
+- `GET /api/codex/repos/{repo_id}/plans/drafts/{name}` — Load draft
+- `DELETE /api/codex/repos/{repo_id}/plans/drafts/{name}` — Delete draft
+- `POST /api/codex/repos/{repo_id}/plans/promote` — Promote draft to in-progress
+- `GET /api/codex/repos/{repo_id}/plans/in-progress` — List in-progress plans
+
+**`plan_store.py`** — Plan draft and promotion management for a repository. Handles:
+- Saving drafts under `<repo>/plans/drafts/`
+- Promoting approved drafts to `<repo>/plans/in-progress/`
+- Preserving content verbatim during save/load/promote operations
+
+**`transcription.py`** — Audio transcription client for browser-recorded audio clips. Provides:
+- `TranscriptionClient` protocol for pluggable transcription backends
+- `OpenAICompatibleTranscriptionClient` for OpenAI Whisper-compatible APIs
+- Graceful degradation when transcription is not configured
+- Automatic cleanup of uploaded audio files after transcription
+
+**`models.py`** — API models for server endpoints:
+- `RepoInfo` — Repository metadata
+- `PlanInfo` — Plan file metadata with checkpoint counts
+- `ExecutionRequest` — Workflow execution request parameters
+- `ExecutionStatus` — Workflow execution status
+- `PlanStatus` — Enum for draft vs in-progress
+
+### Authentication
+
+All state-changing and session endpoints require bearer token authentication via `Authorization: Bearer <token>` header. The token is configured via `AFLOW_APP_TOKEN` environment variable or `server.auth_token` in config file.
+
+### Dependency Injection
+
+The server uses FastAPI's dependency injection system with global state managed in the lifespan context. Codex routes use dependency override to access the global `ServerConfig` and `RepoRegistry` instances.
+
+### External Integration
+
+**Codex Server:** The server expects a Codex server that exposes session listing, message fetching, and message sending APIs. The `HttpCodexBackend` adapter normalizes these into the server's internal models.
+
+**Plan Drafts:** Draft plans are stored in the repository's `plans/drafts/` directory. Promoted plans are written to `plans/in-progress/`. The server does not modify the aflow library's plan parsing or execution logic.
+
+### Testing
+
+The server includes comprehensive tests:
+- `test_transcription.py` — Tests for audio transcription client with mocked HTTP responses
+- `test_codex_backend.py` — Tests for Codex adapter with mocked HTTP client
+- `test_plan_store.py` — Tests for plan draft management
+- `test_api.py` — Integration tests for all API endpoints including transcription
+- `test_repo_registry.py` — Tests for repository registry
+
+### Deployment
+
+The server is designed for desktop-hosted, LAN-accessed use with token authentication. It is not intended for internet-exposed deployment without additional security measures.
+
+Run the server with:
+```bash
+uv run --project apps/aflow_app/server aflow-app-server
+```
+
+Or configure and run via uvicorn:
+```bash
+export AFLOW_APP_TOKEN="your-secret-token"
+export AFLOW_CODEX_URL="http://localhost:9000"
+uvicorn aflow_app_server.main:app --host 127.0.0.1 --port 8765
+```
