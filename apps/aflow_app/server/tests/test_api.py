@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -11,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from aflow_app_server.config import ServerConfig
-from aflow_app_server.main import app
+from aflow_app_server.main import AccessLogPathFilter, app
 from aflow_app_server.repo_registry import RepoRegistry
 from aflow_app_server.transcription import TranscriptionError
 
@@ -117,6 +118,185 @@ class TestAuth:
             client.headers["Authorization"] = "Bearer wrong-token"
             response = client.get("/api/repos")
             assert response.status_code == 401
+        finally:
+            main_module._config = None
+            main_module._registry = None
+            main_module._service = None
+
+    def test_query_token_is_accepted(self, test_config: ServerConfig, test_token: str) -> None:
+        """Test that token query param works for clients like EventSource."""
+        from aflow_app_server import main as main_module
+        from aflow_app_server.aflow_service import AflowService
+
+        main_module._config = test_config
+        main_module._registry = RepoRegistry(test_config.repo_registry_path)
+        main_module._service = AflowService()
+
+        try:
+            client = TestClient(app)
+            response = client.get(f"/api/repos?token={test_token}")
+            assert response.status_code == 200
+            assert response.json() == []
+        finally:
+            main_module._config = None
+            main_module._registry = None
+            main_module._service = None
+
+
+class TestLogging:
+    """Tests for access log suppression."""
+
+    def test_plugin_probe_access_log_is_suppressed(self) -> None:
+        """Suppress noisy local plugin probe requests."""
+        record = logging.LogRecord(
+            name="uvicorn.access",
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=1,
+            msg='%s - "%s %s HTTP/%s" %d',
+            args=("127.0.0.1:1234", "POST", "/api/plugin/events", "1.1", 405),
+            exc_info=None,
+        )
+        assert AccessLogPathFilter().filter(record) is False
+
+    def test_normal_access_log_is_kept(self) -> None:
+        """Keep normal access logs visible."""
+        record = logging.LogRecord(
+            name="uvicorn.access",
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=1,
+            msg='%s - "%s %s HTTP/%s" %d',
+            args=("127.0.0.1:1234", "GET", "/health", "1.1", 200),
+            exc_info=None,
+        )
+        assert AccessLogPathFilter().filter(record) is True
+
+    def test_plugin_probe_is_intercepted_quietly(
+        self,
+        test_config: ServerConfig,
+        tmp_path: Path,
+    ) -> None:
+        """Short-circuit known localhost plugin probes."""
+        from aflow_app_server import main as main_module
+        from aflow_app_server.aflow_service import AflowService
+
+        main_module._config = test_config
+        main_module._registry = RepoRegistry(test_config.repo_registry_path)
+        main_module._service = AflowService()
+        main_module._seen_plugin_probe_fingerprints.clear()
+
+        try:
+            client = TestClient(app)
+            response = client.post(
+                "/api/plugin/events",
+                headers={"User-Agent": "suspicious-local-plugin/1.0"},
+                json={"hello": "world"},
+            )
+            assert response.status_code == 204
+            assert response.text == ""
+        finally:
+            main_module._config = None
+            main_module._registry = None
+            main_module._service = None
+            main_module._seen_plugin_probe_fingerprints.clear()
+
+    def test_plugin_probe_logging_can_be_enabled_once(
+        self,
+        test_config: ServerConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Log one fingerprint once when debug logging is enabled."""
+        from aflow_app_server import main as main_module
+        from aflow_app_server.aflow_service import AflowService
+
+        monkeypatch.setenv("AFLOW_APP_LOG_PLUGIN_PROBES", "1")
+        main_module._config = test_config
+        main_module._registry = RepoRegistry(test_config.repo_registry_path)
+        main_module._service = AflowService()
+        main_module._seen_plugin_probe_fingerprints.clear()
+
+        try:
+            client = TestClient(app)
+            with caplog.at_level(logging.WARNING, logger="aflow_app_server.plugin_probe"):
+                response1 = client.post(
+                    "/api/plugin/events",
+                    headers={"User-Agent": "suspicious-local-plugin/1.0"},
+                    content=b"abc123",
+                )
+                response2 = client.post(
+                    "/api/plugin/events",
+                    headers={"User-Agent": "suspicious-local-plugin/1.0"},
+                    content=b"abc123",
+                )
+
+            assert response1.status_code == 204
+            assert response2.status_code == 204
+            matching = [
+                record.message for record in caplog.records
+                if "Blocked localhost probe:" in record.message
+            ]
+            assert len(matching) == 1
+            assert "suspicious-local-plugin/1.0" in matching[0]
+        finally:
+            main_module._config = None
+            main_module._registry = None
+            main_module._service = None
+            main_module._seen_plugin_probe_fingerprints.clear()
+
+
+class TestWebAppServing:
+    """Tests for serving the built frontend."""
+
+    def test_root_serves_built_index(self, test_config: ServerConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test that / serves the built frontend when dist exists."""
+        from aflow_app_server import main as main_module
+        from aflow_app_server.aflow_service import AflowService
+
+        dist_dir = tmp_path / "dist"
+        dist_dir.mkdir()
+        (dist_dir / "index.html").write_text("<!doctype html><html><body>aflow ui</body></html>")
+
+        monkeypatch.setenv("AFLOW_APP_WEB_DIST", str(dist_dir))
+        main_module._config = test_config
+        main_module._registry = RepoRegistry(test_config.repo_registry_path)
+        main_module._service = AflowService()
+
+        try:
+            client = TestClient(app)
+            response = client.get("/")
+            assert response.status_code == 200
+            assert "aflow ui" in response.text
+        finally:
+            main_module._config = None
+            main_module._registry = None
+            main_module._service = None
+
+    def test_unknown_frontend_route_falls_back_to_index(
+        self,
+        test_config: ServerConfig,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Test that SPA routes fall back to index.html."""
+        from aflow_app_server import main as main_module
+        from aflow_app_server.aflow_service import AflowService
+
+        dist_dir = tmp_path / "dist"
+        dist_dir.mkdir()
+        (dist_dir / "index.html").write_text("<!doctype html><html><body>spa shell</body></html>")
+
+        monkeypatch.setenv("AFLOW_APP_WEB_DIST", str(dist_dir))
+        main_module._config = test_config
+        main_module._registry = RepoRegistry(test_config.repo_registry_path)
+        main_module._service = AflowService()
+
+        try:
+            client = TestClient(app)
+            response = client.get("/plans/demo")
+            assert response.status_code == 200
+            assert "spa shell" in response.text
         finally:
             main_module._config = None
             main_module._registry = None

@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import hashlib
 import json
+import logging
+import os
 import tempfile
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, status
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, status
+from fastapi.responses import FileResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
@@ -29,6 +35,71 @@ _config: ServerConfig | None = None
 _registry: RepoRegistry | None = None
 _service: AflowService | None = None
 _transcription_client: TranscriptionClient | None = None
+_seen_plugin_probe_fingerprints: set[str] = set()
+
+
+class AccessLogPathFilter(logging.Filter):
+    """Suppress noisy access logs for known local probe endpoints."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = getattr(record, "args", ())
+        if len(args) >= 3 and args[2] == "/api/plugin/events":
+            return False
+        return True
+
+
+def _plugin_probe_logging_enabled() -> bool:
+    """Enable one-time probe fingerprint logging when debugging local traffic."""
+    value = os.environ.get("AFLOW_APP_LOG_PLUGIN_PROBES", "")
+    return value.lower() in {"1", "true", "yes", "on"}
+
+
+def _body_preview(body: bytes, limit: int = 200) -> str:
+    """Return a safe body preview for diagnostic logs."""
+    if not body:
+        return ""
+    preview = body[:limit].decode("utf-8", errors="replace")
+    if len(body) > limit:
+        preview += "..."
+    return preview
+
+
+def _maybe_log_plugin_probe(request: Request, body: bytes) -> None:
+    """Log a one-time fingerprint for localhost plugin probe traffic."""
+    user_agent = request.headers.get("user-agent", "")
+    origin = request.headers.get("origin", "")
+    referer = request.headers.get("referer", "")
+    content_type = request.headers.get("content-type", "")
+    content_length = request.headers.get("content-length", "")
+    body_hash = hashlib.sha256(body).hexdigest()[:12]
+    fingerprint = "|".join(
+        [
+            request.method,
+            request.url.path,
+            user_agent,
+            origin,
+            referer,
+            content_type,
+            content_length,
+            body_hash,
+        ]
+    )
+    if fingerprint in _seen_plugin_probe_fingerprints:
+        return
+    _seen_plugin_probe_fingerprints.add(fingerprint)
+
+    logging.getLogger("aflow_app_server.plugin_probe").warning(
+        "Blocked localhost probe: method=%s path=%s ua=%r origin=%r referer=%r content_type=%r content_length=%r body_sha256=%s body_preview=%r",
+        request.method,
+        request.url.path,
+        user_agent,
+        origin,
+        referer,
+        content_type,
+        content_length,
+        body_hash,
+        _body_preview(body),
+    )
 
 
 def get_config() -> ServerConfig:
@@ -62,20 +133,22 @@ def get_transcription_client() -> TranscriptionClient:
     return _transcription_client
 
 
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 
 async def verify_token(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+    token: str | None = Query(default=None),
     config: ServerConfig = Depends(get_config),
 ) -> str:
     """Verify the bearer token."""
-    if credentials.credentials != config.auth_token:
+    provided_token = credentials.credentials if credentials else token
+    if provided_token != config.auth_token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid authentication token",
         )
-    return credentials.credentials
+    return provided_token
 
 
 def get_codex_backend(config: ServerConfig = Depends(get_config)) -> CodexBackend:
@@ -103,6 +176,39 @@ def get_plan_store_factory(registry: RepoRegistry = Depends(get_registry)):
             )
         return PlanStore(repo.path)
     return _get_plan_store
+
+
+def _get_web_dist_dir() -> Path:
+    """Resolve the built web app directory."""
+    override = os.environ.get("AFLOW_APP_WEB_DIST")
+    if override:
+        return Path(override).expanduser()
+    return Path(__file__).resolve().parents[2].parent / "web" / "dist"
+
+
+def _get_web_file(path: str) -> Path:
+    """Resolve a requested frontend file safely within the dist directory."""
+    dist_dir = _get_web_dist_dir().resolve()
+    candidate = (dist_dir / path).resolve()
+    try:
+        candidate.relative_to(dist_dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found") from exc
+    return candidate
+
+
+def _build_uvicorn_log_config() -> dict[str, Any]:
+    """Keep normal access logs but drop noisy local probe traffic."""
+    from uvicorn.config import LOGGING_CONFIG
+
+    log_config = copy.deepcopy(LOGGING_CONFIG)
+    log_config.setdefault("filters", {})
+    log_config["filters"]["suppress_plugin_events"] = {
+        "()": "aflow_app_server.main.AccessLogPathFilter",
+    }
+    access_handler = log_config.setdefault("handlers", {}).setdefault("access", {})
+    access_handler["filters"] = [*access_handler.get("filters", []), "suppress_plugin_events"]
+    return log_config
 
 
 @asynccontextmanager
@@ -137,6 +243,17 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def block_local_plugin_probe(request: Request, call_next):
+    """Intercept noisy local plugin probe traffic before routing."""
+    if request.url.path == "/api/plugin/events":
+        body = await request.body()
+        if _plugin_probe_logging_enabled():
+            _maybe_log_plugin_probe(request, body)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return await call_next(request)
 
 # Override codex_routes dependencies using FastAPI's dependency override system
 app.dependency_overrides[codex_routes_module._get_config] = get_config
@@ -320,8 +437,7 @@ async def stream_execution_events(
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=30.0)
                 yield {
-                    "event": event.event_type.value if hasattr(event.event_type, "value") else str(event.event_type),
-                    "data": json.dumps(_event_to_dict(event)),
+                    "data": json.dumps(_event_to_client_payload(event)),
                 }
                 if isinstance(event, (RunCompletedEvent, RunFailedEvent)):
                     break
@@ -353,6 +469,27 @@ def _event_to_dict(event: Any) -> dict[str, Any]:
                 result[field_name] = value
 
     return result
+
+
+def _event_to_client_payload(event: Any) -> dict[str, Any]:
+    """Convert an execution event to the frontend's SSE payload shape."""
+    raw_type = event.event_type.value if hasattr(event.event_type, "value") else str(event.event_type)
+    event_type = "status_update" if raw_type == "status_changed" else raw_type
+    timestamp = getattr(event, "timestamp", None)
+    if hasattr(timestamp, "isoformat"):
+        timestamp_value = timestamp.isoformat()
+    else:
+        timestamp_value = datetime.now(timezone.utc).isoformat()
+
+    data = _event_to_dict(event)
+    data.pop("event_type", None)
+    data.pop("timestamp", None)
+
+    return {
+        "type": event_type,
+        "timestamp": timestamp_value,
+        "data": data,
+    }
 
 
 # Transcription endpoints
@@ -397,6 +534,35 @@ async def health_check() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/", include_in_schema=False)
+async def serve_web_root() -> FileResponse:
+    """Serve the built web app root."""
+    index_path = _get_web_file("index.html")
+    if not index_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Web app is not built. Run `npm run build` in `apps/aflow_app/web`.",
+        )
+    return FileResponse(index_path)
+
+
+@app.get("/{path:path}", include_in_schema=False)
+async def serve_web_path(path: str) -> FileResponse:
+    """Serve built frontend assets and SPA routes."""
+    asset_path = _get_web_file(path)
+    if asset_path.is_file():
+        return FileResponse(asset_path)
+
+    index_path = _get_web_file("index.html")
+    if index_path.exists():
+        return FileResponse(index_path)
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Web app is not built. Run `npm run build` in `apps/aflow_app/web`.",
+    )
+
+
 def run_server() -> None:
     """Run the server (entry point for CLI)."""
     import uvicorn
@@ -412,4 +578,5 @@ def run_server() -> None:
         host=config.bind_host,
         port=config.bind_port,
         reload=False,
+        log_config=_build_uvicorn_log_config(),
     )

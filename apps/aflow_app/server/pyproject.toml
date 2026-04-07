@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Remote app server for aflow workflow management"
 requires-python = ">=3.11"
 dependencies = [
+    "aworkflow",
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
     "sse-starlette>=2.2.0",
@@ -38,6 +39,9 @@ asyncio_default_fixture_loop_scope = "function"
 
 [project.scripts]
 aflow-app-server = "aflow_app_server.main:run_server"
+
+[tool.uv.sources]
+aworkflow = { path = "../../..", editable = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/aflow_app_server"]

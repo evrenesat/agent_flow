@@ -77,32 +77,45 @@ server_token = "openai-api-key"
 ## Running the Server
 
 ```bash
-# From the server directory
-cd apps/aflow_app/server
-uv run aflow-app-server
+# Build the web app once
+cd apps/aflow_app/web
+npm install
+npm run build
 
-# Or with environment variables
+# Then run the backend from the server directory
+cd apps/aflow_app/server
+uv sync
 AFLOW_APP_TOKEN=secret uv run aflow-app-server
+
+# Open the UI from the backend
+open http://127.0.0.1:8765/
 ```
+
+The backend serves the built frontend from `apps/aflow_app/web/dist`, so you do not need a separate frontend server for normal use. The server project depends on the repo-root `aworkflow` package through a local uv source, so it should be started from this checkout without setting `PYTHONPATH`.
 
 ## Running the Web Client
 
 ```bash
-# Install dependencies
+# Separate frontend dev server, only if you want hot reload
 cd apps/aflow_app/web
 npm install
 
 # Start development server (proxies API to localhost:8765)
 npm run dev
 
-# Build for production
+# Build static assets for the backend to serve
 npm run build
+
+# Preview the built output directly
+npm run preview
 
 # Run tests
 npm test -- --run
 ```
 
-The web client runs on `http://localhost:3000` in development and proxies API requests to the server at `http://127.0.0.1:8765`.
+`npm run dev` runs a separate Vite dev server on `http://localhost:3000` and proxies API requests to `http://127.0.0.1:8765`.
+
+`npm run preview` serves the already-built `dist/` output. Run `npm run build` first if you want to use preview.
 
 ## API Endpoints
 
@@ -182,7 +195,7 @@ The transcription client supports OpenAI-compatible APIs (Whisper format).
 
 ```bash
 cd apps/aflow_app/server
-uv run pytest -q
+uv run --extra dev pytest -q
 ```
 
 ### Project Structure
