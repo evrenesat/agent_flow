@@ -329,6 +329,33 @@ class RetryInconsistentCheckpointArtifactTests(unittest.TestCase):
             assert turn2['was_retry'] is True
             assert turn2['retry_attempt'] == 1
 
+    def test_retry_issue_link_stays_on_issue_turn_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            wf_config = _make_simple_wf_config(global_retry=1)
+            call_count = [0]
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    _write_plan(plan_path, _BROKEN_PLAN)
+                else:
+                    _write_plan(plan_path, _COMPLETE_PLAN)
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            controller_config = ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=5)
+            result = run_workflow(controller_config, wf_config, 'simple', config_dir=repo_root, adapter=CodexAdapter(), runner=runner)
+            turn1 = json.loads((result.run_dir / 'turns' / 'turn-001' / 'result.json').read_text(encoding='utf-8'))
+            turn2 = json.loads((result.run_dir / 'turns' / 'turn-002' / 'result.json').read_text(encoding='utf-8'))
+            run_json = json.loads((result.run_dir / 'run.json').read_text(encoding='utf-8'))
+
+            assert turn1['issues_summary_path'] == run_json['issues_summary_path']
+            assert 'issues_summary_path' not in turn2
+            assert run_json['issues_summary_path'] == '.aflow/runs/' + result.run_dir.name + '/issues.md'
+            assert (result.run_dir / 'issues.md').is_file()
+
 
 class SameStepCapWorkflowTests(unittest.TestCase):
 

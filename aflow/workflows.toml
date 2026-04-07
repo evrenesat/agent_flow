@@ -19,6 +19,8 @@ go = [
 ]
 
 # Alias workflow, inherits `ralph` steps but runs branch-only lifecycle with a per-workflow merge prompt.
+# Alias workflows can also use `exclude = ["step_name"]` to keep declared steps visible in `aflow show`
+# while removing them from the executable graph.
 [workflow.ralph_jr]
 extends = "ralph"
 team = "7teen"

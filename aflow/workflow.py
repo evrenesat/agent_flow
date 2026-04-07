@@ -49,9 +49,9 @@ from .recovery import (
     resolve_backup_team,
     TeamLeadRecoveryDecisionError,
 )
-from .run_state import ControllerConfig, ControllerRunResult, ControllerState, ExecutionContext, HarnessRecoveryAction, HarnessRecoveryContext, RetryContext, ResumeContext, TurnRecord, WorkflowEndReason, format_harness_model_display
-from .runlog import create_run_paths, finalize_turn_artifacts, prune_old_runs, write_run_metadata, write_turn_artifacts_start
-from .status import BannerRenderer
+from .run_state import ControllerConfig, ControllerRunResult, ControllerState, ExecutionContext, HarnessRecoveryAction, HarnessRecoveryContext, IssueRecord, RetryContext, ResumeContext, TurnRecord, WorkflowEndReason, format_harness_model_display
+from .runlog import create_run_paths, finalize_turn_artifacts, prune_old_runs, write_issue_summary, write_run_metadata, write_turn_artifacts_start
+from .status import BannerRenderer, WorkflowGraphSource
 from aflow.api.events import (
     RunCompletedEvent,
     RunFailedEvent,
@@ -900,6 +900,7 @@ def _make_banner(
     config: ControllerConfig,
     *,
     workflow_steps: dict[str, WorkflowStepConfig] | None = None,
+    workflow_graph_source: WorkflowGraphSource | None = None,
     workflow_name: str | None = None,
     original_plan_path: Path | None = None,
     banner_files_limit: int = 10,
@@ -908,6 +909,7 @@ def _make_banner(
         config_max_turns=config.max_turns,
         config_plan_path=config.plan_path,
         workflow_steps=workflow_steps,
+        workflow_graph_source=workflow_graph_source,
         config_banner_files_limit=banner_files_limit,
         workflow_name=workflow_name,
         original_plan_path=original_plan_path,
@@ -2140,9 +2142,15 @@ def run_workflow(
     )
 
     if banner is None:
+        workflow_graph_source = WorkflowGraphSource(
+            declared_steps=dict(wf.declared_steps),
+            executable_steps=dict(wf.steps),
+            excluded_step_names=wf.excluded_steps,
+        )
         banner = _make_banner(
             config,
             workflow_steps=wf.steps,
+            workflow_graph_source=workflow_graph_source,
             workflow_name=workflow_name,
             original_plan_path=original_plan_path,
             banner_files_limit=workflow_config.aflow.banner_files_limit,
@@ -2480,6 +2488,50 @@ def run_workflow(
 
     execution_repo_root = exec_ctx.execution_repo_root if exec_ctx else config.repo_root
 
+    def _record_issue(
+        kind: str,
+        message: str,
+        *,
+        turn_dir: Path | None = None,
+    ) -> str | None:
+        state.issues_accumulated += 1
+        current_turn = state.turn_history[-1] if state.turn_history else None
+        resolved_turn_dir = turn_dir
+        if resolved_turn_dir is None and current_turn is not None:
+            resolved_turn_dir = current_turn.turn_dir
+        turn_number = state.active_turn or (current_turn.turn_number if current_turn is not None else None)
+        issue_record = IssueRecord(
+            issue_number=state.issues_accumulated,
+            kind=kind,
+            message=message,
+            turn_number=turn_number,
+            turn_dir=(
+                str(resolved_turn_dir.relative_to(run_paths.repo_root))
+                if resolved_turn_dir is not None
+                else None
+            ),
+            result_artifact_path=(
+                str((resolved_turn_dir / "result.json").relative_to(run_paths.repo_root))
+                if resolved_turn_dir is not None
+                else None
+            ),
+            stdout_artifact_path=(
+                str((resolved_turn_dir / "stdout.txt").relative_to(run_paths.repo_root))
+                if resolved_turn_dir is not None
+                else None
+            ),
+            stderr_artifact_path=(
+                str((resolved_turn_dir / "stderr.txt").relative_to(run_paths.repo_root))
+                if resolved_turn_dir is not None
+                else None
+            ),
+        )
+        state.issue_history.append(issue_record)
+        issue_summary_path = write_issue_summary(run_paths, state)
+        if current_turn is not None:
+            current_turn.issues_summary_path = issue_summary_path
+        return issue_summary_path
+
     def _raise_pre_turn_failure(
         *,
         reason: str,
@@ -2534,6 +2586,7 @@ def run_workflow(
                     resolved.model,
                     resolved.effort,
                 ),
+                active_plan_path=str(active_path),
                 started_at=started_at,
             )
         )
@@ -2601,6 +2654,7 @@ def run_workflow(
         new_path: Path | None = None,
         conditions: dict[str, bool] | None = None,
         chosen_transition: str | None = None,
+        chosen_transition_condition: str | None = None,
         end_reason: WorkflowEndReason | None = None,
         retry_attempt: int | None = None,
         retry_limit_value: int | None = None,
@@ -2609,6 +2663,13 @@ def run_workflow(
         was_retry: bool | None = None,
         recovery: HarnessRecoveryContext | None = None,
     ) -> None:
+        record = state.turn_history[-1]
+        if record.active_plan_path is None and active_path is not None:
+            record.active_plan_path = str(active_path)
+        if chosen_transition is not None:
+            record.chosen_transition = chosen_transition
+        if chosen_transition_condition is not None:
+            record.chosen_transition_condition = chosen_transition_condition
         finalize_turn_artifacts(
             turn_dir,
             turn_number=state.active_turn,
@@ -2625,10 +2686,12 @@ def run_workflow(
             step_role=step_role,
             selector=selector,
             original_plan_path=original_plan_path,
-            active_plan_path=active_path,
+            active_plan_path=Path(record.active_plan_path) if record.active_plan_path is not None else active_path,
             new_plan_path=new_path,
             conditions=conditions,
             chosen_transition=chosen_transition,
+            chosen_transition_condition=chosen_transition_condition,
+            issues_summary_path=record.issues_summary_path,
             end_reason=end_reason,
             retry_attempt=retry_attempt,
             retry_limit=retry_limit_value,
@@ -2637,7 +2700,6 @@ def run_workflow(
             was_retry=was_retry,
             recovery=recovery,
         )
-        record = state.turn_history[-1]
         record.turn_dir = turn_dir
         record.stdout_artifact_path = _turn_artifact_display_path(run_paths.repo_root, turn_dir, "stdout.txt")
         record.stderr_artifact_path = _turn_artifact_display_path(run_paths.repo_root, turn_dir, "stderr.txt")
@@ -2707,7 +2769,7 @@ def run_workflow(
             state.current_harness_recovery = recovery
             state.harness_recovery_history.append(recovery)
             state.consecutive_harness_recoveries = recovery.consecutive_count
-            state.issues_accumulated += 1
+            _record_issue("recovery-failed", reason, turn_dir=turn_dir)
             state.status_message = "failed"
             _finalize_turn_record(
                 status="recovery-failed",
@@ -2782,7 +2844,7 @@ def run_workflow(
             state.current_harness_recovery = recovery
             state.harness_recovery_history.append(recovery)
             state.consecutive_harness_recoveries = recovery.consecutive_count
-            state.issues_accumulated += 1
+            _record_issue("recovery-scheduled", reason, turn_dir=turn_dir)
             state.turns_completed += 1
             state.last_snapshot = snapshot_after
             if delay is not None and delay > 0:
@@ -2875,7 +2937,7 @@ def run_workflow(
                 )
             except TeamLeadRecoveryDecisionError as exc:
                 state.status_message = "failed"
-                state.issues_accumulated += 1
+                _record_issue("recovery-failed", str(exc), turn_dir=turn_dir)
                 _finalize_turn_record(
                     status="recovery-failed",
                     started_at=started_at,
@@ -2981,7 +3043,7 @@ def run_workflow(
                 )
                 state.current_harness_recovery = recovery
                 state.harness_recovery_history.append(recovery)
-                state.issues_accumulated += 1
+                _record_issue("recovery-failed", recovery.reason, turn_dir=turn_dir)
                 state.status_message = "failed"
                 _finalize_turn_record(
                     status="recovery-failed",
@@ -3066,7 +3128,7 @@ def run_workflow(
                 )
             except TeamLeadRecoveryDecisionError as exc:
                 state.status_message = "failed"
-                state.issues_accumulated += 1
+                _record_issue("recovery-failed", str(exc), turn_dir=turn_dir)
                 _finalize_turn_record(
                     status="recovery-failed",
                     started_at=started_at,
@@ -3173,7 +3235,7 @@ def run_workflow(
             state.current_harness_recovery = recovery
             state.harness_recovery_history.append(recovery)
             state.consecutive_harness_recoveries = base_count
-            state.issues_accumulated += 1
+            _record_issue("recovery-scheduled", reason, turn_dir=turn_dir)
             state.turns_completed += 1
             state.last_snapshot = snapshot_after
             if matched_rule.delay_seconds > 0:
@@ -3239,7 +3301,7 @@ def run_workflow(
                 state.current_harness_recovery = recovery
                 state.harness_recovery_history.append(recovery)
                 state.consecutive_harness_recoveries = base_count
-                state.issues_accumulated += 1
+                _record_issue("recovery-failed", failure_reason, turn_dir=turn_dir)
                 state.status_message = "failed"
                 _finalize_turn_record(
                     status="recovery-failed",
@@ -3307,7 +3369,7 @@ def run_workflow(
             state.current_harness_recovery = recovery
             state.harness_recovery_history.append(recovery)
             state.consecutive_harness_recoveries = base_count
-            state.issues_accumulated += 1
+            _record_issue("recovery-scheduled", recovery.reason, turn_dir=turn_dir)
             state.turns_completed += 1
             state.last_snapshot = snapshot_after
             _finalize_turn_record(
@@ -3366,7 +3428,7 @@ def run_workflow(
             state.current_harness_recovery = recovery
             state.harness_recovery_history.append(recovery)
             state.consecutive_harness_recoveries = base_count
-            state.issues_accumulated += 1
+            _record_issue("recovery-failed", recovery.reason, turn_dir=turn_dir)
             state.status_message = "failed"
             _finalize_turn_record(
                 status="recovery-failed",
@@ -3582,7 +3644,7 @@ def run_workflow(
         stop_reason = _detect_stop_marker(completed.stdout, completed.stderr)
         if stop_reason is not None:
             state.status_message = "failed"
-            state.issues_accumulated += 1
+            _record_issue("aflow-stop", f"AFLOW_STOP: {stop_reason}", turn_dir=turn_dir)
             _finalize_turn_record(
                 status="harness-failed",
                 started_at=turn_started_at,
@@ -3660,7 +3722,7 @@ def run_workflow(
             base_prompt = retry_ctx.base_user_prompt if retry_ctx is not None else user_prompt
 
             if is_retryable and current_attempt <= retry_limit and turn_number < config.max_turns:
-                state.issues_accumulated += 1
+                _record_issue("retry-scheduled", str(exc), turn_dir=turn_dir)
                 state.turns_completed += 1
                 new_retry_ctx = RetryContext(
                     step_name=current_step_name,
@@ -3714,7 +3776,7 @@ def run_workflow(
 
             state.pending_retry = None
             state.status_message = "failed"
-            state.issues_accumulated += 1
+            _record_issue("plan-invalid", str(exc), turn_dir=turn_dir)
             _finalize_turn_record(
                 status="plan-invalid",
                 started_at=turn_started_at,
@@ -3776,7 +3838,11 @@ def run_workflow(
 
         if completed.returncode != 0:
             state.status_message = "failed"
-            state.issues_accumulated += 1
+            _record_issue(
+                "harness-failed",
+                f"harness '{invocation.label}' exited with code {completed.returncode}",
+                turn_dir=turn_dir,
+            )
             _finalize_turn_record(
                 status="harness-failed",
                 started_at=turn_started_at,
@@ -3842,7 +3908,7 @@ def run_workflow(
             transition_target = selected_transition.to
         except WorkflowError as exc:
             state.status_message = "failed"
-            state.issues_accumulated += 1
+            _record_issue("transition-failed", exc.summary, turn_dir=turn_dir)
             _finalize_turn_record(
                 status="transition-failed",
                 started_at=turn_started_at,
@@ -3895,6 +3961,7 @@ def run_workflow(
             new_path=new_plan_path,
             conditions=conditions,
             chosen_transition=transition_target,
+            chosen_transition_condition=selected_transition.when,
             end_reason=(
                 _normalize_end_reason(
                     selected_transition=selected_transition,
@@ -4090,7 +4157,14 @@ def run_workflow(
                 )
                 if max_cap > 0 and new_streak >= max_cap:
                     state.status_message = "failed"
-                    state.issues_accumulated += 1
+                    _record_issue(
+                        "same-step-cap",
+                        (
+                            f"same-step cap reached: step '{current_step_name}' "
+                            f"selected {new_streak} consecutive times (limit: {max_cap})"
+                        ),
+                        turn_dir=turn_dir,
+                    )
                     summary = _format_failure(
                         reason=(
                             f"same-step cap reached: step '{current_step_name}' "

@@ -76,6 +76,16 @@ class WorkflowCliTests(unittest.TestCase):
         args = build_parser().parse_args(['run', '-ss', 'implement_plan', 'plan.md'])
         assert args.start_step == 'implement_plan'
 
+    def test_show_parser_accepts_optional_workflow_name(self) -> None:
+        args = build_parser().parse_args(['show', 'alpha'])
+        assert args.command == 'show'
+        assert args.workflow_name == 'alpha'
+
+    def test_show_parser_defaults_workflow_name_to_none(self) -> None:
+        args = build_parser().parse_args(['show'])
+        assert args.command == 'show'
+        assert args.workflow_name is None
+
     def test_parser_no_legacy_flags(self) -> None:
         parser = build_parser()
         subparsers_action = next(a for a in parser._actions if hasattr(a, 'choices') and isinstance(a.choices, dict))
@@ -468,6 +478,107 @@ p = "do it"
                 else:
                     os.environ['HOME'] = original_home
             assert result == 1
+
+    def test_cli_show_all_workflows_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from contextlib import redirect_stdout
+            home_dir = Path(tmpdir)
+            _write_config(
+                home_dir,
+                '[workflow.alpha.steps.review]\nrole = "reviewer"\nprompts = ["p"]\ngo = [{ to = "implement" }]\n\n'
+                '[workflow.alpha.steps.implement]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n'
+                '[workflow.alpha]\nexclude = ["review"]\nteam = "7teen"\n\n'
+                '[workflow.beta.steps.ship]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n'
+                '[harness.claude.profiles.opus]\nmodel = "m"\n\n'
+                '[harness.codex.profiles.default]\nmodel = "m"\n\n'
+                '[roles]\nreviewer = "claude.opus"\narchitect = "codex.default"\n\n'
+                '[teams.7teen.roles]\narchitect = "codex.default"\n\n'
+                '[teams.reviewers.roles]\nreviewer = "claude.opus"\n\n'
+                '[prompts]\np = "do it"\n',
+            )
+            stdout = io.StringIO()
+            original_home = os.environ.get('HOME')
+            try:
+                os.environ['HOME'] = str(home_dir)
+                with redirect_stdout(stdout):
+                    result = main(['show'])
+            finally:
+                if original_home is None:
+                    os.environ.pop('HOME', None)
+                else:
+                    os.environ['HOME'] = original_home
+            assert result == 0
+            output = stdout.getvalue()
+            assert 'Roles / Teams' in output
+            assert 'reviewer' in output
+            assert 'architect' in output
+            assert '7teen' in output
+            assert 'reviewers' in output
+            assert 'alpha' in output
+            assert 'beta' in output
+
+    def test_cli_show_single_workflow_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from contextlib import redirect_stdout
+            home_dir = Path(tmpdir)
+            _write_config(
+                home_dir,
+                '[workflow.alpha.steps.review]\nrole = "reviewer"\nprompts = ["p"]\ngo = [{ to = "implement" }]\n\n'
+                '[workflow.alpha.steps.implement]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n'
+                '[workflow.alpha]\nexclude = ["review"]\nteam = "7teen"\n\n'
+                '[workflow.beta.steps.ship]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n'
+                '[harness.claude.profiles.opus]\nmodel = "m"\n\n'
+                '[harness.codex.profiles.default]\nmodel = "m"\n\n'
+                '[roles]\nreviewer = "claude.opus"\narchitect = "codex.default"\n\n'
+                '[teams.7teen.roles]\narchitect = "codex.default"\n\n'
+                '[teams.reviewers.roles]\nreviewer = "claude.opus"\n\n'
+                '[prompts]\np = "do it"\n',
+            )
+            stdout = io.StringIO()
+            original_home = os.environ.get('HOME')
+            try:
+                os.environ['HOME'] = str(home_dir)
+                with redirect_stdout(stdout):
+                    result = main(['show', 'alpha'])
+            finally:
+                if original_home is None:
+                    os.environ.pop('HOME', None)
+                else:
+                    os.environ['HOME'] = original_home
+            assert result == 0
+            output = stdout.getvalue()
+            assert 'Roles / Teams' in output
+            assert 'architect' in output
+            assert '7teen' in output
+            assert 'reviewers' not in output
+            assert 'review' in output
+            assert 'implement' in output
+
+    def test_cli_rejects_unknown_show_workflow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir)
+            _write_config(
+                home_dir,
+                '[workflow.alpha.steps.review]\nrole = "reviewer"\nprompts = ["p"]\ngo = [{ to = "implement" }]\n\n'
+                '[workflow.alpha.steps.implement]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n'
+                '[harness.claude.profiles.opus]\nmodel = "m"\n\n'
+                '[harness.codex.profiles.default]\nmodel = "m"\n\n'
+                '[roles]\nreviewer = "claude.opus"\narchitect = "codex.default"\n\n'
+                '[prompts]\np = "do it"\n',
+            )
+            stderr = io.StringIO()
+            original_home = os.environ.get('HOME')
+            try:
+                os.environ['HOME'] = str(home_dir)
+                with redirect_stderr(stderr):
+                    result = main(['show', 'missing'])
+            finally:
+                if original_home is None:
+                    os.environ.pop('HOME', None)
+                else:
+                    os.environ['HOME'] = original_home
+            assert result == 1
+            assert "unknown workflow 'missing'" in stderr.getvalue()
 
     def test_run_parser_accepts_start_step(self) -> None:
         args = build_parser().parse_args(['run', '--start-step', 'implement_plan', 'plan.md'])

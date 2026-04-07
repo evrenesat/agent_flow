@@ -54,6 +54,9 @@ Entry point. Exposes three subcommands:
   - The default install set is the nine default bundled skills, including `aflow-harness-recovery-lead`.
   - `--include-optional` adds optional bundled skills such as `aflow-assistant`.
   - `--only` installs exactly the named skill(s).
+- **`aflow show [workflow_name]`** -- renders workflow diagrams and the effective role/team relationships from the loaded config.
+  - With no workflow name, it prints a shared roles/teams section followed by every workflow in config order.
+  - With a workflow name, it prints only that workflow plus the roles and teams that apply to it.
 - **`aflow analyze [RUN_ID] [--all]`** -- analyzes run logs from `.aflow/runs/`.
   - Single-run mode resolves the target run in `analyzer.py`, and the CLI delegates to `aflow.api.analyze.analyze_runs()` so library callers get the same behavior.
 
@@ -88,6 +91,7 @@ Loads `~/.config/aflow/aflow.toml` plus sibling `workflows.toml` (bootstrapped f
 - **`[prompts]`** section: named prompt templates.
 - Bare **`[workflow]`** table in `workflows.toml`: lifecycle defaults (`setup`, `teardown`, `main_branch`, `merge_prompt`) inherited by all workflows that don't override them. Not a runnable workflow.
 - **`[workflow.<name>]`** tables in `workflows.toml`: concrete workflows define `steps`, alias workflows use `extends` and optional `team`. Both may override lifecycle defaults with `setup`, `teardown`, `main_branch`, and `merge_prompt`.
+- Concrete and alias workflows may also set `exclude = ["step_name"]` to remove declared steps from the executable graph while keeping them visible to `aflow show` and the live banner. Alias exclusions are applied after inheritance.
 - **`[workflow.<name>.steps.<step>]`** tables: `role` (global role key), `prompts` (list of prompt keys), `go` (transition array with `to` and optional `when` condition).
 
 Lifecycle validation enforces that `(setup, teardown)` is one of three accepted tuples: `([], [])`, `(["branch"], ["merge"])`, or `(["worktree", "branch"], ["merge", "rm_worktree"])`. Any other combination is rejected at load time with the exact workflow path.
@@ -178,6 +182,7 @@ All three functions return `None` when git is unavailable or fails, so the workf
 
 ### `status.py`
 Rich-based live banner rendered to stderr during a run. Shows elapsed time, workflow/step name, harness, model, checkpoint progress, turn count, issues, plan paths, git summary (if available), and status.
+The module also owns the shared workflow-graph and role/team render helpers used by both the live banner and `aflow show`, so classification rules stay identical across the two views.
 
 `BannerRenderer` owns a background daemon thread that rebuilds and pushes the panel every `refresh_interval_seconds` (default 1 s) and polls for a new `GitSummary` every `git_poll_interval_seconds` (default 10 s). This keeps the elapsed timer alive between step transitions without requiring external pushes. `set_context(...)` is used to update mutable banner fields instead of directly writing private attributes.
 

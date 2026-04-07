@@ -570,6 +570,395 @@ class GitBannerTests(unittest.TestCase):
         assert "Git" not in text
         assert "Files" not in text
 
+    def test_build_banner_uses_title_case_plan_stem(self) -> None:
+        state = ControllerState(last_snapshot=PlanSnapshot(None, 0, 0, False))
+        panel = build_banner(
+            config_max_turns=10,
+            config_plan_path=Path("/fake/config-plan.md"),
+            original_plan_path=Path("/fake/workflow-visualization_show-and_exclusions.md"),
+            state=state,
+        )
+        assert panel is not None
+        title = panel.title
+        title_text = title.plain if hasattr(title, "plain") else str(title)
+        assert title_text == "Workflow Visualization Show And Exclusions"
+
+    def test_build_banner_omits_issue_row_when_count_is_zero(self) -> None:
+        from rich.console import Console
+        state = ControllerState(last_snapshot=PlanSnapshot(None, 0, 0, False))
+        panel = build_banner(
+            config_max_turns=10,
+            config_plan_path=Path("/fake/plan.md"),
+            state=state,
+        )
+        assert panel is not None
+        console = Console(record=True, width=100)
+        console.print(panel)
+        text = console.export_text()
+        assert "Issues" not in text
+        assert "Harness/Model" not in text
+        assert "Active Plan" not in text
+        assert "Step" not in text
+
+    def test_build_banner_renders_issue_summary_path_when_present(self) -> None:
+        from rich.console import Console
+        state = ControllerState(
+            last_snapshot=PlanSnapshot(None, 0, 0, False),
+            issues_accumulated=1,
+            issues_summary_path=".aflow/runs/20260407T120000Z-00000001/issues.md",
+        )
+        panel = build_banner(
+            config_max_turns=10,
+            config_plan_path=Path("/fake/plan.md"),
+            state=state,
+        )
+        assert panel is not None
+        console = Console(record=True, width=120)
+        console.print(panel)
+        text = console.export_text()
+        assert ".aflow/runs/20260407T120000Z-00000001/issues.md" in text
+
+    def test_build_banner_renders_last_step_exits(self) -> None:
+        from rich.console import Console
+        from unittest.mock import patch
+        import aflow.status as status_mod
+
+        steps = {
+            "plan": WorkflowStepConfig(role="planner", go=(GoTransition(to="review"),)),
+            "review": WorkflowStepConfig(
+                role="reviewer",
+                go=(
+                    GoTransition(to="ship", when="DONE"),
+                    GoTransition(to="plan", when="!DONE"),
+                ),
+            ),
+        }
+        source = status_mod.WorkflowGraphSource(
+            declared_steps=steps,
+            executable_steps=steps,
+        )
+        state = ControllerState(last_snapshot=PlanSnapshot(None, 0, 0, False))
+        with patch.object(status_mod, "load_workflow_config", side_effect=AssertionError("should not reload")):
+            panel = build_banner(
+                workflow_name="demo",
+                workflow_graph_source=source,
+                config_max_turns=10,
+                config_plan_path=Path("/fake/plan.md"),
+                state=state,
+            )
+            assert panel is not None
+            console = Console(record=True, width=120)
+            console.print(panel)
+            text = console.export_text()
+        assert "go→ ship" in text
+        assert "[DONE]" in text
+
+    def test_build_banner_renders_excluded_steps_from_explicit_graph_source(self) -> None:
+        from rich.console import Console
+        from unittest.mock import patch
+        import aflow.status as status_mod
+
+        declared_steps = {
+            "plan": WorkflowStepConfig(role="planner", go=(GoTransition(to="review"),)),
+            "review": WorkflowStepConfig(role="reviewer", go=(GoTransition(to="ship"),)),
+            "ship": WorkflowStepConfig(role="shipper"),
+        }
+        source = status_mod.WorkflowGraphSource(
+            declared_steps=declared_steps,
+            executable_steps={
+                "plan": declared_steps["plan"],
+                "ship": declared_steps["ship"],
+            },
+            excluded_step_names=("review",),
+        )
+        state = ControllerState(last_snapshot=PlanSnapshot(None, 0, 0, False))
+        with patch.object(status_mod, "load_workflow_config", side_effect=AssertionError("should not reload")):
+            panel = build_banner(
+                workflow_name="demo",
+                workflow_graph_source=source,
+                config_max_turns=10,
+                config_plan_path=Path("/fake/plan.md"),
+                state=state,
+            )
+            assert panel is not None
+            console = Console(record=True, width=120)
+            console.print(panel)
+            text = console.export_text()
+        assert "plan" in text
+        assert "review" in text
+        assert "ship" in text
+
+    def test_turn_panels_render_transition_and_active_plan(self) -> None:
+        from rich.console import Console
+        import aflow.status as status_mod
+
+        steps = {
+            "review": WorkflowStepConfig(role="reviewer", go=(GoTransition(to="implement_plan", when="NEW_PLAN_EXISTS || !DONE"),)),
+        }
+        source = status_mod.WorkflowGraphSource(
+            declared_steps=steps,
+            executable_steps=steps,
+        )
+        record = TurnRecord(
+            turn_number=1,
+            step_name="review",
+            step_role="reviewer",
+            resolved_harness_name="codex",
+            resolved_model_display="codex / gpt-5.4",
+            active_plan_path="/fake/plan.md",
+            chosen_transition="implement_plan",
+            chosen_transition_condition="NEW_PLAN_EXISTS || !DONE",
+            issues_summary_path=".aflow/runs/20260407T120000Z-00000001/issues.md",
+            outcome="completed",
+            started_at=datetime.now(timezone.utc),
+            finished_at=datetime.now(timezone.utc),
+        )
+        state = ControllerState(
+            last_snapshot=PlanSnapshot(None, 0, 0, False),
+            turn_history=[record],
+        )
+        panel = build_banner(
+            workflow_name="demo",
+            workflow_graph_source=source,
+            config_max_turns=10,
+            config_plan_path=Path("/fake/plan.md"),
+            state=state,
+        )
+        assert panel is not None
+        console = Console(record=True, width=120)
+        console.print(panel)
+        text = console.export_text()
+        assert "review" in text
+        assert "Harness/Model" in text
+        assert "codex / gpt-5.4" in text
+        assert "Active Plan" in text
+        assert "go→ implement_plan" in text
+        assert "[NEW_PLAN_EXISTS || !DONE]" in text
+        assert ".aflow/runs/20260407T120000Z-00000001/issues.md" in text
+
+    def test_shared_step_classification_distinguishes_active_inactive_excluded_and_skipped(self) -> None:
+        import aflow.status as status_mod
+
+        steps = {
+            "plan": WorkflowStepConfig(role="planner"),
+            "review": WorkflowStepConfig(role="reviewer"),
+            "ship": WorkflowStepConfig(role="shipper"),
+            "deploy": WorkflowStepConfig(role="deployer"),
+        }
+        source = status_mod.WorkflowGraphSource(
+            declared_steps=steps,
+            executable_steps={"plan": steps["plan"], "ship": steps["ship"], "deploy": steps["deploy"]},
+            excluded_step_names=("review",),
+        )
+        assert status_mod._visual_start_skipped_step_names(
+            declared_steps=source.declared_steps,
+            executable_steps=source.executable_steps,
+            excluded_step_names=source.excluded_step_names,
+            selected_start_step="ship",
+        ) == ("plan",)
+        context = status_mod.WorkflowGraphContext(
+            source=source,
+            visual_start_step_skipped_step_names=("plan",),
+            current_step_name="ship",
+            current_turn_is_running=True,
+        )
+        assert status_mod._workflow_step_kind(step_name="plan", context=context) == "skipped"
+        assert status_mod._workflow_step_kind(step_name="review", context=context) == "excluded"
+        assert status_mod._workflow_step_kind(step_name="ship", context=context) == "active"
+        assert status_mod._workflow_step_kind(step_name="deploy", context=context) == "inactive"
+        assert status_mod._workflow_transition_target_kind(target_name="END", context=context) == "terminal"
+        assert status_mod._workflow_transition_target_kind(target_name="review", context=context) == "excluded"
+        assert status_mod._workflow_step_style("active") == "bold green"
+        assert status_mod._workflow_step_style("inactive") == "green"
+        assert status_mod._workflow_step_style("excluded") == "grey50"
+        assert status_mod._workflow_transition_style(source_kind="active", target_kind="terminal") == "white"
+        assert status_mod._workflow_transition_style(source_kind="inactive", target_kind="terminal") == "green"
+        assert status_mod._workflow_transition_style(source_kind="skipped", target_kind="terminal") == "grey50"
+        assert status_mod._workflow_transition_style(source_kind="active", target_kind="inactive") == "white"
+        assert status_mod._workflow_transition_style(source_kind="inactive", target_kind="inactive") == "green"
+        assert status_mod._workflow_transition_style(source_kind="excluded", target_kind="inactive") == "grey50"
+        assert status_mod._workflow_transition_style(source_kind="inactive", target_kind="excluded") == "grey50"
+
+    def test_build_banner_renders_end_transitions_with_runtime_styles(self) -> None:
+        from rich.console import Console
+        from datetime import datetime, timezone
+        import aflow.status as status_mod
+
+        active_steps = {
+            "go": WorkflowStepConfig(role="worker", go=(GoTransition(to="END"),)),
+        }
+        active_source = status_mod.WorkflowGraphSource(
+            declared_steps=active_steps,
+            executable_steps=active_steps,
+        )
+        active_record = TurnRecord(
+            turn_number=1,
+            step_name="go",
+            step_role="worker",
+            resolved_harness_name="codex",
+            resolved_model_display="codex / gpt-5.4",
+            outcome="running",
+            started_at=datetime.now(timezone.utc),
+        )
+        active_state = ControllerState(
+            last_snapshot=PlanSnapshot(None, 0, 0, False),
+            turn_history=[active_record],
+            current_turn_started_at=datetime.now(timezone.utc),
+            active_turn=1,
+        )
+        active_panel = build_banner(
+            workflow_name="demo",
+            workflow_graph_source=active_source,
+            current_step_name="go",
+            config_max_turns=10,
+            config_plan_path=Path("/fake/plan.md"),
+            state=active_state,
+        )
+        assert active_panel is not None
+        active_console = Console(record=True, width=120, force_terminal=True, color_system="standard")
+        active_console.print(active_panel)
+        active_text = active_console.export_text(styles=True)
+        assert "\x1b[37m  ├─go→ \x1b[0m\x1b[1mEND\x1b[0m" in active_text
+
+        skipped_steps = {
+            "prep": WorkflowStepConfig(role="worker", go=(GoTransition(to="END"),)),
+            "go": WorkflowStepConfig(role="worker"),
+        }
+        skipped_source = status_mod.WorkflowGraphSource(
+            declared_steps=skipped_steps,
+            executable_steps=skipped_steps,
+        )
+        skipped_state = ControllerState(
+            last_snapshot=PlanSnapshot(None, 0, 0, False),
+            selected_start_step="go",
+        )
+        skipped_panel = build_banner(
+            workflow_name="demo",
+            workflow_graph_source=skipped_source,
+            config_max_turns=10,
+            config_plan_path=Path("/fake/plan.md"),
+            state=skipped_state,
+        )
+        assert skipped_panel is not None
+        skipped_console = Console(record=True, width=120, force_terminal=True, color_system="standard")
+        skipped_console.print(skipped_panel)
+        skipped_text = skipped_console.export_text(styles=True)
+        assert "\x1b[38;5;244m  ├─go→ \x1b[0m\x1b[1;38;5;244mEND\x1b[0m" in skipped_text
+
+    def test_workflow_show_renders_end_transition_with_included_style(self) -> None:
+        from rich.console import Console
+        import aflow.status as status_mod
+        from aflow.config import WorkflowConfig, WorkflowUserConfig
+
+        steps = {
+            "go": WorkflowStepConfig(role="worker", go=(GoTransition(to="END"),)),
+        }
+        config = WorkflowUserConfig(
+            workflows={
+                "demo": WorkflowConfig(
+                    declared_steps=steps,
+                    steps=steps,
+                    first_step="go",
+                ),
+            },
+        )
+        renderable = status_mod.build_workflow_show(config=config, workflow_name="demo")
+        assert renderable is not None
+        console = Console(record=True, width=120, force_terminal=True, color_system="standard")
+        console.print(renderable)
+        text = console.export_text(styles=True)
+        assert "\x1b[32m  ├─go→ \x1b[0m\x1b[1;32mEND\x1b[0m" in text
+
+    def test_workflow_show_renders_shared_roles_and_all_workflows(self) -> None:
+        from rich.console import Console
+        import aflow.status as status_mod
+        from aflow.config import GoTransition, TeamConfig, WorkflowConfig, WorkflowStepConfig, WorkflowUserConfig
+
+        alpha_steps = {
+            "plan": WorkflowStepConfig(role="architect", go=(GoTransition(to="END"),)),
+        }
+        beta_steps = {
+            "ship": WorkflowStepConfig(role="worker", go=(GoTransition(to="END"),)),
+        }
+        config = WorkflowUserConfig(
+            roles={
+                "architect": "codex.default",
+                "worker": "codex.default",
+            },
+            teams={
+                "7teen": TeamConfig(roles={"worker": "codex.nano"}),
+            },
+            workflows={
+                "alpha": WorkflowConfig(
+                    declared_steps=alpha_steps,
+                    steps=alpha_steps,
+                    first_step="plan",
+                ),
+                "beta": WorkflowConfig(
+                    declared_steps=beta_steps,
+                    steps=beta_steps,
+                    first_step="ship",
+                ),
+            },
+        )
+        renderable = status_mod.build_workflow_show(config=config)
+        assert renderable is not None
+        console = Console(record=True, width=120)
+        console.print(renderable)
+        text = console.export_text()
+        assert "Roles / Teams" in text
+        assert "architect" in text
+        assert "worker" in text
+        assert "7teen" in text
+        assert "alpha" in text
+        assert "beta" in text
+
+    def test_workflow_show_single_filters_applicable_roles_and_teams(self) -> None:
+        from rich.console import Console
+        import aflow.status as status_mod
+        from aflow.config import GoTransition, TeamConfig, WorkflowConfig, WorkflowStepConfig, WorkflowUserConfig
+
+        declared_steps = {
+            "review": WorkflowStepConfig(role="reviewer", go=(GoTransition(to="implement"),)),
+            "implement": WorkflowStepConfig(role="architect", go=(GoTransition(to="END"),)),
+        }
+        config = WorkflowUserConfig(
+            roles={
+                "reviewer": "claude.opus",
+                "architect": "codex.default",
+            },
+            teams={
+                "7teen": TeamConfig(roles={"worker": "codex.nano"}),
+                "reviewers": TeamConfig(roles={"reviewer": "claude.opus"}),
+            },
+            workflows={
+                "alpha": WorkflowConfig(
+                    declared_steps=declared_steps,
+                    steps={"implement": declared_steps["implement"]},
+                    first_step="implement",
+                    excluded_steps=("review",),
+                    team="7teen",
+                ),
+            },
+        )
+        renderable = status_mod.build_workflow_show(config=config, workflow_name="alpha")
+        assert renderable is not None
+        assert status_mod._workflow_effective_role_names(config.workflows["alpha"]) == ("architect",)
+        assert status_mod._workflow_applicable_team_names(
+            config=config,
+            workflow=config.workflows["alpha"],
+            role_names=("architect",),
+        ) == ("7teen",)
+        console = Console(record=True, width=120)
+        console.print(renderable)
+        text = console.export_text()
+        assert "Roles / Teams" in text
+        assert "architect" in text
+        assert "7teen" in text
+        assert "reviewers" not in text
+        assert "review" in text
+        assert "implement" in text
+
     def test_banner_renderer_refresh_thread_updates_live(self) -> None:
         import aflow.status as status_mod
         from unittest.mock import MagicMock, patch

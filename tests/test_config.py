@@ -344,6 +344,8 @@ class WorkflowConfigTests(unittest.TestCase):
         assert 'setup' in readme
         assert 'teardown' in readme
         assert 'merge_prompt' in readme
+        assert 'aflow show' in readme
+        assert 'exclude = ["step_name"]' in readme
         assert 'aflow-merge' in readme
         assert 'aflow-assistant' in readme
         assert '--include-optional' in readme
@@ -357,15 +359,18 @@ class WorkflowConfigTests(unittest.TestCase):
         assert 'last_run_ids' in readme
         assert 'resume' in readme
         assert 'reuses the recorded feature branch and worktree path' in readme
+        assert 'Issues' in readme
 
         assert 'team_lead' in architecture
         assert 'worktree_root' in architecture
         assert 'ExecutionContext' in architecture
+        assert 'aflow show' in architecture
         assert 'aflow-merge' in architecture
         assert 'aflow-assistant' in architecture
         assert 'aflow analyze' in architecture
         assert 'aflow.api.analyze' in architecture
         assert 'AnalyzeRequest' in architecture
+        assert 'exclude = ["step_name"]' in architecture
         assert 'backup_team' in architecture
         assert 'aflow-harness-recovery-lead' in architecture
         assert 'AFLOW_LAST_RUN_ID' in architecture
@@ -377,6 +382,8 @@ class WorkflowConfigTests(unittest.TestCase):
 
         assert 'resume' in devlog
         assert 'Harness recovery docs and public analyze API' in devlog
+        assert 'aflow show' in devlog
+        assert 'exclude = ["step_name"]' in devlog
         assert 'AnalyzeRequest' in devlog
         assert 'AFLOW_LAST_RUN_ID' in devlog
         assert 'last_run_ids' in devlog
@@ -386,6 +393,7 @@ class WorkflowConfigTests(unittest.TestCase):
         assert 'setup' in workflows_text
         assert 'teardown' in workflows_text
         assert 'main_branch' in workflows_text
+        assert 'exclude = ["step_name"]' in workflows_text
 
         # merge-only placeholders are documented in README
         assert '{MAIN_BRANCH}' in readme
@@ -579,6 +587,137 @@ class WorkflowConfigTests(unittest.TestCase):
             assert alias.setup == ('branch',)
             assert alias.teardown == ('merge',)
             assert alias.main_branch == 'main'
+
+    def test_workflow_exclude_keeps_declared_graph_and_retargets_first_step(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                '[workflow.simple.steps.review]\nrole = "architect"\nprompts = ["p1"]\ngo = [{ to = "implement" }]\n\n'
+                '[workflow.simple.steps.implement]\nrole = "architect"\nprompts = ["p2"]\ngo = [{ to = "END" }]\n\n'
+                '[workflow.simple]\nexclude = ["review"]\n\n'
+                '[harness.opencode.profiles.default]\nmodel = "m"\n\n'
+                '[roles]\narchitect = "opencode.default"\n\n'
+                '[prompts]\np1 = "review"\np2 = "implement"\n',
+            )
+            config = load_workflow_config(config_path)
+            wf = config.workflows['simple']
+            assert list(wf.declared_steps) == ['review', 'implement']
+            assert list(wf.steps) == ['implement']
+            assert wf.first_step == 'implement'
+            assert wf.excluded_steps == ('review',)
+
+    def test_alias_workflow_exclude_applies_after_inheritance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                '[workflow.base.steps.review]\nrole = "architect"\nprompts = ["p1"]\ngo = [{ to = "implement" }]\n\n'
+                '[workflow.base.steps.implement]\nrole = "architect"\nprompts = ["p2"]\ngo = [{ to = "END" }]\n\n'
+                '[workflow.alias]\nextends = "base"\nexclude = ["review"]\n\n'
+                '[harness.opencode.profiles.default]\nmodel = "m"\n\n'
+                '[roles]\narchitect = "opencode.default"\n\n'
+                '[prompts]\np1 = "review"\np2 = "implement"\n',
+            )
+            config = load_workflow_config(config_path)
+            base = config.workflows['base']
+            alias = config.workflows['alias']
+            assert list(base.declared_steps) == ['review', 'implement']
+            assert list(base.steps) == ['review', 'implement']
+            assert list(alias.declared_steps) == ['review', 'implement']
+            assert list(alias.steps) == ['implement']
+            assert alias.first_step == 'implement'
+            assert alias.excluded_steps == ('review',)
+
+    def test_exclude_rejects_unknown_step(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                '[workflow.simple.steps.review]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n'
+                '[workflow.simple]\nexclude = ["missing"]\n\n'
+                '[harness.opencode.profiles.default]\nmodel = "m"\n\n'
+                '[roles]\narchitect = "opencode.default"\n\n'
+                '[prompts]\np = "review"\n',
+            )
+            with pytest.raises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            assert 'workflow.simple.exclude[0]' in str(ctx.value)
+            assert 'missing' in str(ctx.value)
+
+    def test_exclude_rejects_empty_step_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                '[workflow.simple.steps.review]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n'
+                '[workflow.simple]\nexclude = [""]\n\n'
+                '[harness.opencode.profiles.default]\nmodel = "m"\n\n'
+                '[roles]\narchitect = "opencode.default"\n\n'
+                '[prompts]\np = "review"\n',
+            )
+            with pytest.raises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            assert 'workflow.simple.exclude[0]' in str(ctx.value)
+            assert 'empty' in str(ctx.value)
+
+    def test_exclude_rejects_duplicate_step_names(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                '[workflow.simple.steps.review]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n'
+                '[workflow.simple]\nexclude = ["review", "review"]\n\n'
+                '[harness.opencode.profiles.default]\nmodel = "m"\n\n'
+                '[roles]\narchitect = "opencode.default"\n\n'
+                '[prompts]\np = "review"\n',
+            )
+            with pytest.raises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            assert "duplicate step 'review'" in str(ctx.value)
+            assert 'workflow.simple.exclude' in str(ctx.value)
+
+    def test_exclude_rejects_non_array_value(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                '[workflow.simple.steps.review]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n'
+                '[workflow.simple]\nexclude = "review"\n\n'
+                '[harness.opencode.profiles.default]\nmodel = "m"\n\n'
+                '[roles]\narchitect = "opencode.default"\n\n'
+                '[prompts]\np = "review"\n',
+            )
+            with pytest.raises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            assert 'workflow.simple.exclude' in str(ctx.value)
+            assert 'array' in str(ctx.value)
+
+    def test_exclude_rejects_dangling_transition_after_removal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                '[workflow.simple.steps.review]\nrole = "architect"\nprompts = ["p1"]\ngo = [{ to = "implement" }]\n\n'
+                '[workflow.simple.steps.implement]\nrole = "architect"\nprompts = ["p2"]\ngo = [{ to = "END" }]\n\n'
+                '[workflow.simple]\nexclude = ["implement"]\n\n'
+                '[harness.opencode.profiles.default]\nmodel = "m"\n\n'
+                '[roles]\narchitect = "opencode.default"\n\n'
+                '[prompts]\np1 = "review"\np2 = "implement"\n',
+            )
+            with pytest.raises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            assert 'workflow.simple.steps.review.go[0]' in str(ctx.value)
+            assert 'implement' in str(ctx.value)
+
+    def test_exclude_rejects_removing_all_executable_steps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                '[workflow.simple.steps.review]\nrole = "architect"\nprompts = ["p1"]\ngo = [{ to = "implement" }]\n\n'
+                '[workflow.simple.steps.implement]\nrole = "architect"\nprompts = ["p2"]\ngo = [{ to = "END" }]\n\n'
+                '[workflow.simple]\nexclude = ["review", "implement"]\n\n'
+                '[harness.opencode.profiles.default]\nmodel = "m"\n\n'
+                '[roles]\narchitect = "opencode.default"\n\n'
+                '[prompts]\np1 = "review"\np2 = "implement"\n',
+            )
+            with pytest.raises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            assert 'workflow.simple.first_step' in str(ctx.value)
+            assert 'exclusions' in str(ctx.value)
 
     def test_lifecycle_alias_cannot_redefine_steps(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

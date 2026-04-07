@@ -39,7 +39,7 @@ from .workflow import (
 )
 from .runlog import load_run_json
 from .analyzer import resolve_run_id
-from .status import BannerRenderer
+from .status import BannerRenderer, WorkflowGraphSource, build_workflow_show
 
 RUN_HELP = """\
 Flags:
@@ -433,6 +433,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Include low-signal test noise runs instead of filtering them out.",
     )
 
+    show_parser = subparsers.add_parser(
+        "show",
+        description="Show workflow diagrams and role/team relationships from the loaded config.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    show_parser.add_argument(
+        "workflow_name",
+        nargs="?",
+        help="Optional workflow name. Omit it to show every workflow in config order.",
+    )
+
     return parser
 
 
@@ -755,6 +766,15 @@ def _maybe_move_completed_plan_to_done(repo_root: Path, plan_path: Path, *, is_c
     return plan_path
 
 
+def _print_renderable(renderable: object) -> None:
+    try:
+        from rich.console import Console
+    except ImportError:
+        print(renderable)
+        return
+    Console(file=sys.stdout).print(renderable)
+
+
 class TerminalObserver(ExecutionObserver):
     """Observer that formats execution events for terminal rendering."""
 
@@ -819,11 +839,44 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     config_path: Path | None = None
-    if args.command in (None, "run"):
+    if args.command in (None, "run", "show"):
         config_path, created_paths = _bootstrap_config_files()
         if created_paths:
             _print_bootstrap_paths(config_path)
             return 0
+
+    if args.command == "show":
+        if config_path is None:
+            config_path = bootstrap_config()
+        try:
+            workflow_config = load_workflow_config(config_path)
+        except ConfigError as exc:
+            print(exc, file=sys.stderr)
+            return 1
+
+        validation_errors = validate_workflow_config(workflow_config)
+        if validation_errors:
+            errors = "\n".join(f"  {e}" for e in validation_errors)
+            print(
+                f"Config validation errors:\n{errors}",
+                file=sys.stderr,
+            )
+            return 1
+
+        workflow_name = args.workflow_name
+        if workflow_name is not None and workflow_name not in workflow_config.workflows:
+            available = ", ".join(workflow_config.workflows)
+            suffix = f" Available workflows: {available}." if available else ""
+            print(f"error: unknown workflow '{workflow_name}'.{suffix}", file=sys.stderr)
+            return 1
+
+        renderable = build_workflow_show(
+            config=workflow_config,
+            workflow_name=workflow_name,
+        )
+        if renderable is not None:
+            _print_renderable(renderable)
+        return 0
 
     if args.command != "run":
         parser.print_help(sys.stderr)
@@ -906,10 +959,16 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     workflow_spec = workflow_config.workflows[prepared_run.workflow_name]
+    workflow_graph_source = WorkflowGraphSource(
+        declared_steps=dict(workflow_spec.declared_steps),
+        executable_steps=dict(workflow_spec.steps),
+        excluded_step_names=workflow_spec.excluded_steps,
+    )
     banner = BannerRenderer(
         config_max_turns=prepared_run.max_turns,
         config_plan_path=prepared_run.plan_path,
         workflow_steps=workflow_spec.steps,
+        workflow_graph_source=workflow_graph_source,
         config_banner_files_limit=workflow_config.aflow.banner_files_limit,
         workflow_name=prepared_run.workflow_name,
         original_plan_path=prepared_run.plan_path,

@@ -1010,6 +1010,8 @@ class WorkflowArtifactTests(unittest.TestCase):
             assert run_json['selected_start_step'] is None
             assert run_json['startup_recovery_used'] is False
             assert run_json['startup_recovery_reason'] is None
+            assert 'issues_summary_path' not in run_json
+            assert not (run_dir / 'issues.md').exists()
 
     def test_turn_artifacts_include_workflow_step_and_transition(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1036,6 +1038,7 @@ class WorkflowArtifactTests(unittest.TestCase):
             assert result_json['conditions']['DONE'] == True
             assert result_json['conditions']['NEW_PLAN_EXISTS'] == False
             assert result_json['chosen_transition'] == 'END'
+            assert result_json['chosen_transition_condition'] == 'DONE || MAX_TURNS_REACHED'
             assert result_json['end_reason'] == 'done'
 
     def test_turn_artifacts_include_plan_paths(self) -> None:
@@ -1055,6 +1058,50 @@ class WorkflowArtifactTests(unittest.TestCase):
             assert result_json['original_plan_path'] == str(plan_path)
             assert 'active_plan_path' in result_json
             assert 'new_plan_path' in result_json
+
+    def test_issue_summary_is_persisted_for_failed_turns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            config_dir = repo_root
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+
+            def runner(argv, **kwargs):
+                return subprocess.CompletedProcess(argv, 1, 'stdout failure', 'stderr failure')
+
+            wf_config = WorkflowUserConfig(
+                roles={'architect': 'codex.default'},
+                harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})},
+                workflows={'simple': WorkflowConfig(steps={'implement_plan': WorkflowStepConfig(role='architect', prompts=('p',), go=(GoTransition(to='END'),))}, first_step='implement_plan')},
+                prompts={'p': 'Work.'},
+            )
+
+            with pytest.raises(WorkflowError):
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=2),
+                    wf_config,
+                    'simple',
+                    config_dir=config_dir,
+                    adapter=CodexAdapter(),
+                    runner=runner,
+                )
+
+            run_dirs = sorted((repo_root / '.aflow' / 'runs').iterdir())
+            assert len(run_dirs) == 1
+            run_dir = run_dirs[0]
+            run_json = json.loads((run_dir / 'run.json').read_text(encoding='utf-8'))
+            assert run_json['status'] == 'failed'
+            assert run_json['issues_summary_path'] == f".aflow/runs/{run_dir.name}/issues.md"
+
+            issues_md = (run_dir / 'issues.md').read_text(encoding='utf-8')
+            assert 'run.json' in issues_md
+            assert 'turns/turn-001/result.json' in issues_md
+            assert 'turns/turn-001/stdout.txt' in issues_md
+            assert 'turns/turn-001/stderr.txt' in issues_md
+
+            turn_result = json.loads((run_dir / 'turns' / 'turn-001' / 'result.json').read_text(encoding='utf-8'))
+            assert turn_result['issues_summary_path'] == run_json['issues_summary_path']
+            assert turn_result['status'] == 'harness-failed'
 
     def test_turn_directory_exists_before_harness_completes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

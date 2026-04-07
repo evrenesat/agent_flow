@@ -251,6 +251,62 @@ def _snapshot_payload(snapshot: PlanSnapshot | None) -> dict[str, object] | None
     return snapshot.to_dict()
 
 
+def _repo_relative_path(repo_root: Path, path: Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        return str(path.relative_to(repo_root))
+    except ValueError:
+        return str(path)
+
+
+def _issue_summary_relative_path(paths: RunPaths) -> str:
+    return str((paths.run_dir / "issues.md").relative_to(paths.repo_root))
+
+
+def _render_issue_summary(paths: RunPaths, state: ControllerState) -> str:
+    run_dir_path = _repo_relative_path(paths.repo_root, paths.run_dir)
+    lines: list[str] = [
+        "# Issues",
+        "",
+        f"Run: [`run.json`](run.json)",
+        f"Run directory: `{run_dir_path}`",
+        f"Count: {state.issues_accumulated}",
+        "",
+    ]
+    for record in state.issue_history:
+        lines.extend([
+            f"## {record.issue_number}. {record.kind}",
+            f"- Message: {record.message}",
+        ])
+        if record.turn_number is not None:
+            lines.append(f"- Turn: {record.turn_number}")
+        lines.append(f"- Run metadata: [`run.json`](run.json)")
+        if record.result_artifact_path is not None:
+            lines.append(f"- Turn result: [`{record.result_artifact_path}`]({record.result_artifact_path})")
+        if record.stdout_artifact_path is not None:
+            lines.append(f"- Stdout: [`{record.stdout_artifact_path}`]({record.stdout_artifact_path})")
+        if record.stderr_artifact_path is not None:
+            lines.append(f"- Stderr: [`{record.stderr_artifact_path}`]({record.stderr_artifact_path})")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def write_issue_summary(paths: RunPaths, state: ControllerState) -> str | None:
+    if not state.issue_history:
+        issue_summary = paths.run_dir / "issues.md"
+        if issue_summary.exists():
+            issue_summary.unlink()
+        state.issues_summary_path = None
+        return None
+
+    issue_summary_path = paths.run_dir / "issues.md"
+    issue_summary_path.write_text(_render_issue_summary(paths, state), encoding="utf-8")
+    relative_path = _issue_summary_relative_path(paths)
+    state.issues_summary_path = relative_path
+    return relative_path
+
+
 def _turn_result_payload(
     *,
     turn_number: int,
@@ -271,6 +327,8 @@ def _turn_result_payload(
     new_plan_path: Path | None = None,
     conditions: dict[str, bool] | None = None,
     chosen_transition: str | None = None,
+    chosen_transition_condition: str | None = None,
+    issues_summary_path: str | None = None,
     end_reason: WorkflowEndReason | None = None,
     error: str | None = None,
     retry_attempt: int | None = None,
@@ -312,6 +370,8 @@ def _turn_result_payload(
         payload["conditions"] = conditions
     if chosen_transition is not None:
         payload["chosen_transition"] = chosen_transition
+    if chosen_transition_condition is not None:
+        payload["chosen_transition_condition"] = chosen_transition_condition
     if end_reason is not None:
         payload["end_reason"] = end_reason
     if error is not None:
@@ -326,6 +386,8 @@ def _turn_result_payload(
         payload["retry_next_turn"] = retry_next_turn
     if was_retry is not None:
         payload["was_retry"] = was_retry
+    if issues_summary_path is not None:
+        payload["issues_summary_path"] = issues_summary_path
     if recovery is not None:
         payload["recovery_source"] = recovery.source
         payload["recovery_action"] = recovery.action
@@ -363,6 +425,7 @@ def write_run_metadata(
     new_plan_path: Path | None = None,
     pending_retry: RetryContext | None = None,
     team: str | None = None,
+    issues_summary_path: str | None = None,
     resumed_from_run_id: str | None = None,
 ) -> None:
     payload: dict[str, object] = {
@@ -398,6 +461,10 @@ def write_run_metadata(
         payload["team"] = team
     elif state is not None and state.current_team is not None:
         payload["team"] = state.current_team
+    if state is not None and state.issues_summary_path is not None:
+        payload["issues_summary_path"] = state.issues_summary_path
+    elif issues_summary_path is not None:
+        payload["issues_summary_path"] = issues_summary_path
     if resumed_from_run_id is not None:
         payload["resumed_from_run_id"] = resumed_from_run_id
     if state is not None:
@@ -510,6 +577,8 @@ def finalize_turn_artifacts(
     new_plan_path: Path | None = None,
     conditions: dict[str, bool] | None = None,
     chosen_transition: str | None = None,
+    chosen_transition_condition: str | None = None,
+    issues_summary_path: str | None = None,
     end_reason: WorkflowEndReason | None = None,
     retry_attempt: int | None = None,
     retry_limit: int | None = None,
@@ -540,6 +609,8 @@ def finalize_turn_artifacts(
         new_plan_path=new_plan_path,
         conditions=conditions,
         chosen_transition=chosen_transition,
+        chosen_transition_condition=chosen_transition_condition,
+        issues_summary_path=issues_summary_path,
         end_reason=end_reason,
         error=error,
         retry_attempt=retry_attempt,

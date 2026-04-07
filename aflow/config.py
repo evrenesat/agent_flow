@@ -145,8 +145,11 @@ class WorkflowStepConfig:
 
 @dataclass(frozen=True)
 class WorkflowConfig:
+    # declared_steps preserves the original ordered graph for rendering.
+    declared_steps: dict[str, WorkflowStepConfig] = field(default_factory=dict)
     steps: dict[str, WorkflowStepConfig] = field(default_factory=dict)
     first_step: str | None = None
+    excluded_steps: tuple[str, ...] = ()
     retry_inconsistent_checkpoint_state: int | None = None
     team: str | None = None
     extends: str | None = None
@@ -480,6 +483,20 @@ def _parse_lifecycle_array(value: object, *, path: str) -> tuple[str, ...]:
     )
 
 
+def _parse_excluded_steps(value: object, *, path: str) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise ConfigError(f"expected {path} to be an array")
+    excluded_steps: list[str] = []
+    seen: set[str] = set()
+    for i, item in enumerate(value):
+        step_name = _require_text(item, path=f"{path}[{i}]")
+        if step_name in seen:
+            raise ConfigError(f"duplicate step '{step_name}' in {path}")
+        seen.add(step_name)
+        excluded_steps.append(step_name)
+    return tuple(excluded_steps)
+
+
 def _parse_workflow_steps(
     raw: Mapping[str, object], *, path: str
 ) -> WorkflowConfig:
@@ -524,7 +541,11 @@ def _parse_workflow_steps(
             prompts=prompts,
             go=go_transitions,
         )
-    return WorkflowConfig(steps=steps, first_step=first_step)
+    return WorkflowConfig(
+        declared_steps=steps,
+        steps=dict(steps),
+        first_step=first_step,
+    )
 
 
 def _parse_workflow_definition(
@@ -532,6 +553,7 @@ def _parse_workflow_definition(
 ) -> WorkflowConfig:
     allowed = {
         "steps",
+        "exclude",
         "retry_inconsistent_checkpoint_state",
         "extends",
         "team",
@@ -578,15 +600,20 @@ def _parse_workflow_definition(
             raise ConfigError(f"missing 'steps' in {path}")
         steps_table = _require_table(raw["steps"], path=f"{path}.steps")
         wf_config = _parse_workflow_steps(steps_table, path=f"{path}.steps")
-        _validate_workflow_transitions(wf_config, path=path)
-        steps = wf_config.steps
+        _validate_workflow_transitions(wf_config.declared_steps, path=path)
+        steps = wf_config.declared_steps
         first_step = wf_config.first_step
     else:
         if "steps" in raw:
             raise ConfigError(f"{path} may not redefine 'steps' when using 'extends'")
+    excluded_steps: tuple[str, ...] = ()
+    if "exclude" in raw:
+        excluded_steps = _parse_excluded_steps(raw["exclude"], path=f"{path}.exclude")
     return WorkflowConfig(
-        steps=steps,
+        declared_steps=steps,
+        steps=dict(steps),
         first_step=first_step,
+        excluded_steps=excluded_steps,
         retry_inconsistent_checkpoint_state=wf_retry,
         team=wf_team,
         extends=wf_extends,
@@ -639,18 +666,50 @@ def _parse_workflow_tables(
 
 
 def _validate_workflow_transitions(
-    wf_config: WorkflowConfig,
+    steps: Mapping[str, WorkflowStepConfig],
     *,
     path: str,
 ) -> None:
-    known_steps = set(wf_config.steps)
-    for step_name, step_config in wf_config.steps.items():
+    known_steps = set(steps)
+    for step_name, step_config in steps.items():
         for index, transition in enumerate(step_config.go):
             if transition.to != "END" and transition.to not in known_steps:
                 raise ConfigError(
                     f"transition target '{transition.to}' in "
                     f"{path}.steps.{step_name}.go[{index}] does not reference a known step"
                 )
+
+
+def _merge_excluded_steps(
+    base_excluded: tuple[str, ...], local_excluded: tuple[str, ...]
+) -> tuple[str, ...]:
+    return tuple(dict.fromkeys((*base_excluded, *local_excluded)))
+
+
+def _apply_excluded_steps(
+    declared_steps: dict[str, WorkflowStepConfig],
+    excluded_steps: tuple[str, ...],
+    *,
+    path: str,
+) -> tuple[dict[str, WorkflowStepConfig], str]:
+    known_steps = set(declared_steps)
+    for index, step_name in enumerate(excluded_steps):
+        if step_name not in known_steps:
+            raise ConfigError(
+                f"{path}.exclude[{index}] references unknown step '{step_name}'"
+            )
+    excluded_set = set(excluded_steps)
+    executable_steps = {
+        step_name: step_config
+        for step_name, step_config in declared_steps.items()
+        if step_name not in excluded_set
+    }
+    if not executable_steps:
+        raise ConfigError(
+            f"{path}.first_step cannot be resolved after applying exclusions"
+        )
+    first_step = next(iter(executable_steps))
+    return executable_steps, first_step
 
 
 def _materialize_workflows(
@@ -672,9 +731,18 @@ def _materialize_workflows(
         resolving.add(name)
         raw_wf = raw_workflows[name]
         if raw_wf.extends is None:
+            declared_steps = dict(raw_wf.declared_steps or raw_wf.steps)
+            excluded_steps = raw_wf.excluded_steps
+            steps, first_step = _apply_excluded_steps(
+                declared_steps,
+                excluded_steps,
+                path=f"{path}.{name}",
+            )
             concrete = WorkflowConfig(
-                steps=dict(raw_wf.steps),
-                first_step=raw_wf.first_step,
+                declared_steps=declared_steps,
+                steps=steps,
+                first_step=first_step,
+                excluded_steps=excluded_steps,
                 retry_inconsistent_checkpoint_state=raw_wf.retry_inconsistent_checkpoint_state,
                 team=raw_wf.team,
                 extends=None,
@@ -683,7 +751,7 @@ def _materialize_workflows(
                 main_branch=raw_wf.main_branch if raw_wf.main_branch is not None else lifecycle_defaults.main_branch,
                 merge_prompt=raw_wf.merge_prompt if raw_wf.merge_prompt is not None else lifecycle_defaults.merge_prompt,
             )
-            _validate_workflow_transitions(concrete, path=f"{path}.{name}")
+            _validate_workflow_transitions(concrete.steps, path=f"{path}.{name}")
         else:
             base_name = raw_wf.extends
             if base_name not in raw_workflows:
@@ -696,9 +764,18 @@ def _materialize_workflows(
                     f"workflow '{name}' cannot extend alias workflow '{base_name}'"
                 )
             base = resolve(base_name)
+            declared_steps = dict(base.declared_steps)
+            excluded_steps = _merge_excluded_steps(base.excluded_steps, raw_wf.excluded_steps)
+            steps, first_step = _apply_excluded_steps(
+                declared_steps,
+                excluded_steps,
+                path=f"{path}.{name}",
+            )
             concrete = WorkflowConfig(
-                steps=dict(base.steps),
-                first_step=base.first_step,
+                declared_steps=declared_steps,
+                steps=steps,
+                first_step=first_step,
+                excluded_steps=excluded_steps,
                 retry_inconsistent_checkpoint_state=base.retry_inconsistent_checkpoint_state,
                 team=raw_wf.team if raw_wf.team is not None else base.team,
                 extends=None,
@@ -707,7 +784,7 @@ def _materialize_workflows(
                 main_branch=raw_wf.main_branch if raw_wf.main_branch is not None else base.main_branch,
                 merge_prompt=raw_wf.merge_prompt if raw_wf.merge_prompt is not None else base.merge_prompt,
             )
-            _validate_workflow_transitions(concrete, path=f"{path}.{name}")
+            _validate_workflow_transitions(concrete.steps, path=f"{path}.{name}")
         resolving.remove(name)
         resolved[name] = concrete
         return concrete

@@ -158,6 +158,17 @@ aflow analyze --all
 Resolution order for a single run is explicit `RUN_ID`, then the current shell's `.aflow/last_run_ids/<shell-id>` entry when available, then `AFLOW_LAST_RUN_ID`, then `.aflow/last_run_id`.
 `--all` switches to corpus mode instead of a single run.
 
+## Show
+
+`aflow show` prints workflow diagrams and the role/team relationships they use.
+
+```bash
+aflow show
+aflow show review_implement_cp_review
+```
+
+With no workflow argument, it prints a shared roles/teams section followed by every workflow in config order. With a workflow name, it prints only that workflow plus the roles and teams that apply to it. Steps listed in `exclude = [...]` stay visible in gray because `aflow show` uses the declared graph, not just the executable step map.
+
 ## Usage
 
 Positional forms (backward-compatible):
@@ -356,6 +367,7 @@ Config rules that matter in practice:
 - Team tables override a subset of global roles, and any missing role falls back to `[roles]`.
 - Team tables can also set `backup_team`, which names the next team to try when harness recovery switches away from the current team.
 - `workflows.toml` holds concrete workflows, and `[workflow.<name>]` can use `extends` plus an optional `team` override for aliases.
+- `exclude = ["step_name"]` removes named steps from the executable graph while keeping the declared graph intact for `aflow show` and the live banner. Alias workflows apply `exclude` after inheriting the base workflow's declared steps.
 - Bare `[workflow]` in `workflows.toml` is the lifecycle defaults table, not a runnable workflow. Concrete workflows and aliases inherit from it and can override `setup`, `teardown`, `main_branch`, and `merge_prompt`.
 - Supported lifecycle combinations are validated as `(setup, teardown)` tuples. The only accepted pairs in v1 are: `([], [])` (no lifecycle), `(["branch"], ["merge"])` (branch-only), `(["worktree", "branch"], ["merge", "rm_worktree"])` (worktree flow).
 - `merge_prompt` is an ordered array of prompt keys appended to the built-in merge instruction. The engine always prepends the instruction to use `aflow-merge`; `merge_prompt` adds workflow-specific context on top.
@@ -495,6 +507,8 @@ The changed-file list uses `[aflow].banner_files_limit`, which defaults to `10`.
 
 The banner does not show a speculative follow-up plan path before the file exists. When a review step actually creates the follow-up file, `Active Plan` switches to that file.
 
+When issues exist, the banner adds an `Issues` row pointing to `.aflow/runs/<run-id>/issues.md`, and the affected turn cards link to the same file using repo-relative paths.
+
 Empty stdout and stderr files stay hidden in the turn history.
 
 The git summary is based on a working-tree snapshot captured at workflow start, so pre-existing dirty state is excluded. If git is unavailable the git rows are omitted and the workflow still runs.
@@ -542,6 +556,8 @@ Saved data includes:
 - evaluated conditions and the chosen transition
 - `end_reason` on successful runs, both in `run.json` and in the final turn artifact
 - top-level run metadata such as workflow name, current step, turns completed, plan paths, and the terminal end reason
+
+When issues accumulate, `aflow` also writes `.aflow/runs/<run-id>/issues.md` and links it back to the relevant run and turn artifacts with repo-relative paths.
 
 After the harness exits, `aflow` finalizes the same turn directory in place with stdout, stderr, return code, the post-run snapshot, and the final turn outcome. If a harness crashes after the turn directory is created, the partial turn log is still inspectable.
 

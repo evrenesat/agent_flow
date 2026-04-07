@@ -97,12 +97,29 @@ class TurnRecord:
     turn_dir: Path | None = None
     step_role: str | None = None
     resolved_selector: str | None = None
+    active_plan_path: str | None = None
+    chosen_transition: str | None = None
+    chosen_transition_condition: str | None = None
+    issues_summary_path: str | None = None
     outcome: str = "running"
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     finished_at: datetime | None = None
     duration_seconds: float | None = None
     stdout_artifact_path: str | None = None
     stderr_artifact_path: str | None = None
+
+
+@dataclass(frozen=True)
+class IssueRecord:
+    issue_number: int
+    kind: str
+    message: str
+    turn_number: int | None = None
+    turn_dir: str | None = None
+    result_artifact_path: str | None = None
+    stdout_artifact_path: str | None = None
+    stderr_artifact_path: str | None = None
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 def format_harness_model_display(
@@ -121,6 +138,7 @@ class ControllerState:
     last_snapshot: PlanSnapshot
     turns_completed: int = 0
     issues_accumulated: int = 0
+    issues_summary_path: str | None = None
     run_started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     active_turn: int = 0
     current_turn_started_at: datetime | None = None
@@ -136,6 +154,7 @@ class ControllerState:
     harness_recovery_history: list[HarnessRecoveryContext] = field(default_factory=list)
     consecutive_harness_recoveries: int = 0
     turn_history: list[TurnRecord] = field(default_factory=list)
+    issue_history: list[IssueRecord] = field(default_factory=list)
     consec_step_name: str | None = None
     consec_step_count: int = 0
 

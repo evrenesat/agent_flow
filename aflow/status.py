@@ -3,12 +3,13 @@ from __future__ import annotations
 import threading
 import time
 from datetime import datetime, timezone
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from .plan import PlanSnapshot
-from .run_state import ControllerState, TurnRecord, format_harness_model_display
-from .config import WorkflowStepConfig
+from .run_state import ControllerState, TurnRecord
+from .config import WorkflowConfig, WorkflowStepConfig, WorkflowUserConfig, load_workflow_config
 
 if TYPE_CHECKING:
     from .git_status import GitSummary
@@ -33,6 +34,142 @@ if _RICH_AVAILABLE:
     _STDERR_CONSOLE = Console(file=None, stderr=True)  # type: ignore[call-arg]
 
 _UNSET = object()
+_WORKFLOW_TERMINAL_TARGET = "END"
+WorkflowStepVisualKind = Literal["active", "inactive", "excluded", "skipped"]
+WorkflowTransitionTargetKind = Literal["active", "inactive", "excluded", "skipped", "terminal"]
+
+
+@dataclass(frozen=True)
+class WorkflowGraphSource:
+    declared_steps: dict[str, WorkflowStepConfig]
+    executable_steps: dict[str, WorkflowStepConfig]
+    excluded_step_names: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class WorkflowGraphContext:
+    source: WorkflowGraphSource
+    visual_start_step_skipped_step_names: tuple[str, ...] = ()
+    current_step_name: str | None = None
+    current_turn_is_running: bool = False
+
+
+def _plan_title(plan_path: Path) -> str:
+    stem = plan_path.stem.replace("_", " ").replace("-", " ")
+    return " ".join(stem.split()).title()
+
+
+def _resolve_workflow_graph_source(
+    *,
+    workflow_name: str | None,
+    workflow_steps: dict[str, WorkflowStepConfig] | None,
+) -> WorkflowGraphSource:
+    if workflow_name is None:
+        steps = dict(workflow_steps or {})
+        return WorkflowGraphSource(
+            declared_steps=steps,
+            executable_steps=steps,
+        )
+
+    try:
+        workflow_config = load_workflow_config()
+    except Exception:
+        steps = dict(workflow_steps or {})
+        return WorkflowGraphSource(
+            declared_steps=steps,
+            executable_steps=steps,
+        )
+
+    workflow = workflow_config.workflows.get(workflow_name)
+    if workflow is None:
+        steps = dict(workflow_steps or {})
+        return WorkflowGraphSource(
+            declared_steps=steps,
+            executable_steps=steps,
+        )
+
+    return WorkflowGraphSource(
+        declared_steps=dict(workflow.declared_steps),
+        executable_steps=dict(workflow.steps),
+        excluded_step_names=workflow.excluded_steps,
+    )
+
+
+def _visual_start_skipped_step_names(
+    *,
+    declared_steps: dict[str, WorkflowStepConfig],
+    executable_steps: dict[str, WorkflowStepConfig],
+    excluded_step_names: tuple[str, ...],
+    selected_start_step: str | None,
+) -> tuple[str, ...]:
+    if selected_start_step is None:
+        return ()
+    skipped: list[str] = []
+    excluded_set = set(excluded_step_names)
+    for step_name in declared_steps:
+        if step_name == selected_start_step:
+            break
+        if step_name in executable_steps and step_name not in excluded_set:
+            skipped.append(step_name)
+    return tuple(skipped)
+
+
+def _workflow_step_kind(
+    *,
+    step_name: str,
+    context: WorkflowGraphContext,
+) -> WorkflowStepVisualKind:
+    if context.current_turn_is_running and step_name == context.current_step_name:
+        return "active"
+    if (
+        step_name in context.source.excluded_step_names
+        or step_name not in context.source.executable_steps
+    ):
+        return "excluded"
+    if step_name in context.visual_start_step_skipped_step_names:
+        return "skipped"
+    return "inactive"
+
+
+def _workflow_step_style(kind: WorkflowStepVisualKind) -> str:
+    if kind == "active":
+        return "bold green"
+    if kind == "inactive":
+        return "green"
+    return "grey50"
+
+
+def _workflow_transition_target_kind(
+    *,
+    target_name: str,
+    context: WorkflowGraphContext,
+) -> WorkflowTransitionTargetKind:
+    if target_name == _WORKFLOW_TERMINAL_TARGET:
+        return "terminal"
+    return _workflow_step_kind(step_name=target_name, context=context)
+
+
+def _workflow_transition_style(
+    *,
+    source_kind: WorkflowStepVisualKind,
+    target_kind: WorkflowTransitionTargetKind,
+) -> str:
+    if source_kind == "active" and target_kind not in {"excluded", "skipped"}:
+        return "white"
+    if source_kind in {"excluded", "skipped"} or target_kind in {"excluded", "skipped"}:
+        return "grey50"
+    return "green"
+
+
+def _turn_transition_text(record: TurnRecord) -> Text | None:
+    if record.chosen_transition is None:
+        return None
+    text = Text()
+    text.append("  ├─go→ ", style="dim")
+    text.append(record.chosen_transition, style="bold")
+    if record.chosen_transition_condition is not None:
+        text.append(f" [{record.chosen_transition_condition}]", style="dim")
+    return text
 
 
 def _elapsed(started_at: datetime) -> str:
@@ -137,8 +274,15 @@ def _render_turn_history(state: ControllerState) -> Group | Text | None:
             else:
                 body.add_row("Role", role_value)
         body.add_row("Harness/Model", record.resolved_model_display)
+        if record.active_plan_path is not None:
+            body.add_row("Active Plan", record.active_plan_path)
         body.add_row("Duration", _duration_display(record.started_at, record.finished_at))
         body.add_row("Outcome", record.outcome)
+        transition_text = _turn_transition_text(record)
+        if transition_text is not None:
+            body.add_row("Transition", transition_text)
+        if record.issues_summary_path is not None:
+            body.add_row("Issues", record.issues_summary_path)
         if record.stdout_artifact_path is not None:
             body.add_row("Stdout", record.stdout_artifact_path)
         if record.stderr_artifact_path is not None:
@@ -160,59 +304,228 @@ def _render_workflow_graph(
     workflow_steps: dict[str, WorkflowStepConfig] | None,
     current_step_name: str | None,
     state: ControllerState,
+    source: WorkflowGraphSource | None = None,
 ) -> Group | Text | None:
-    if not workflow_steps:
+    source = source or _resolve_workflow_graph_source(
+        workflow_name=workflow_name,
+        workflow_steps=workflow_steps,
+    )
+    if not source.declared_steps:
         if workflow_name is None:
             return None
         return Text(workflow_name, style="bold magenta")
 
-    completed_steps = {record.step_name for record in state.turn_history if record.outcome != "running"}
-    graph_items: list[object] = []
-    step_names = list(workflow_steps)
-    for index, (step_name, step) in enumerate(workflow_steps.items()):
-        is_current = (
-            current_step_name == step_name
+    visual_start_step_skipped_step_names = _visual_start_skipped_step_names(
+        declared_steps=source.declared_steps,
+        executable_steps=source.executable_steps,
+        excluded_step_names=source.excluded_step_names,
+        selected_start_step=state.selected_start_step,
+    )
+    context = WorkflowGraphContext(
+        source=source,
+        visual_start_step_skipped_step_names=visual_start_step_skipped_step_names,
+        current_step_name=current_step_name,
+        current_turn_is_running=(
+            state.current_turn_started_at is not None
             and state.turn_history
             and state.turn_history[-1].turn_number == state.active_turn
             and state.turn_history[-1].outcome == "running"
-        )
-        is_completed = step_name in completed_steps and not is_current
-        if is_current:
-            border_style = "bold green"
-            title_style = "bold green"
-        elif is_completed:
-            border_style = "green"
-            title_style = "green"
-        else:
-            border_style = "dim"
-            title_style = "dim"
+        ),
+    )
+    graph_items: list[object] = []
+    for step_name, step in source.declared_steps.items():
+        kind = _workflow_step_kind(step_name=step_name, context=context)
+        step_style = _workflow_step_style(kind)
         body = Text()
-        body.append(step_name, style=title_style)
+        body.append(step_name, style=step_style)
         body.append("\n")
         body.append(step.role, style="dim")
         graph_items.append(
             Panel(
                 body,
-                border_style=border_style,
+                border_style=step_style,
                 padding=(0, 1),
             )
         )
-        if index < len(step_names) - 1:
-            arrows = Text()
-            for transition in step.go:
-                arrows.append("  ├─go→ ", style="dim")
-                arrows.append(transition.to, style="bold")
-                if transition.when is not None:
-                    arrows.append(f" [{transition.when}]", style="dim")
-                arrows.append("\n")
-            graph_items.append(arrows)
+        arrows = Text()
+        for transition in step.go:
+            target_kind = _workflow_transition_target_kind(
+                target_name=transition.to,
+                context=context,
+            )
+            transition_style = _workflow_transition_style(
+                source_kind=kind,
+                target_kind=target_kind,
+            )
+            arrows.append("  ├─go→ ", style=transition_style)
+            arrows.append(transition.to, style=f"bold {transition_style}" if transition_style != "white" else "bold")
+            if transition.when is not None:
+                arrows.append(f" [{transition.when}]", style=transition_style)
+            arrows.append("\n")
+        graph_items.append(arrows)
     return Align.right(Group(*graph_items))
+
+
+def _workflow_effective_role_names(workflow: WorkflowConfig) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(step.role for step in workflow.steps.values()))
+
+
+def _workflow_applicable_team_names(
+    *,
+    config: WorkflowUserConfig,
+    workflow: WorkflowConfig,
+    role_names: tuple[str, ...],
+) -> tuple[str, ...]:
+    relevant_roles = set(role_names)
+    team_names: list[str] = []
+    if workflow.team is not None:
+        team_names.append(workflow.team)
+    for team_name, team_config in config.teams.items():
+        if team_name == workflow.team:
+            continue
+        if any(role_name in team_config.roles for role_name in relevant_roles):
+            team_names.append(team_name)
+    return tuple(team_names)
+
+
+def _render_roles_table(
+    *,
+    config: WorkflowUserConfig,
+    role_names: tuple[str, ...],
+) -> Table:
+    table = Table(box=None, show_header=True, header_style="bold cyan", expand=True)
+    table.add_column("Role", style="bold cyan", no_wrap=True)
+    table.add_column("Selector")
+    if not role_names:
+        table.add_row("-", "none")
+        return table
+    for role_name in role_names:
+        selector = config.roles.get(role_name)
+        table.add_row(role_name, selector if selector is not None else "missing")
+    return table
+
+
+def _render_teams_table(
+    *,
+    config: WorkflowUserConfig,
+    team_names: tuple[str, ...],
+    role_names: tuple[str, ...],
+    default_team_name: str | None = None,
+) -> Table:
+    table = Table(box=None, show_header=True, header_style="bold cyan", expand=True)
+    table.add_column("Team", style="bold cyan", no_wrap=True)
+    table.add_column("Overrides")
+    if not team_names:
+        table.add_row("-", "none")
+        return table
+    relevant_roles = set(role_names)
+    for team_name in team_names:
+        team_config = config.teams.get(team_name)
+        team_label = team_name
+        if default_team_name is not None and team_name == default_team_name:
+            team_label = f"{team_name} (default)"
+        if team_config is None:
+            table.add_row(team_label, "missing")
+            continue
+        overrides = [
+            f"{role_name} -> {selector}"
+            for role_name, selector in team_config.roles.items()
+            if role_name in relevant_roles
+        ]
+        if team_config.backup_team is not None:
+            overrides.append(f"backup -> {team_config.backup_team}")
+        table.add_row(team_label, ", ".join(overrides) if overrides else "-")
+    return table
+
+
+def _render_roles_teams_section(
+    *,
+    config: WorkflowUserConfig,
+    role_names: tuple[str, ...],
+    team_names: tuple[str, ...],
+    title: str,
+    default_team_name: str | None = None,
+) -> Panel:
+    body = Group(
+        _render_roles_table(config=config, role_names=role_names),
+        _render_teams_table(
+            config=config,
+            team_names=team_names,
+            role_names=role_names,
+            default_team_name=default_team_name,
+        ),
+    )
+    return Panel(body, title=title, border_style="blue")
+
+
+def _render_workflow_show_section(
+    *,
+    workflow_name: str,
+    workflow: WorkflowConfig,
+) -> Panel:
+    graph_source = WorkflowGraphSource(
+        declared_steps=dict(workflow.declared_steps),
+        executable_steps=dict(workflow.steps),
+        excluded_step_names=workflow.excluded_steps,
+    )
+    graph = _render_workflow_graph(
+        workflow_name=workflow_name,
+        workflow_steps=workflow.steps,
+        current_step_name=None,
+        state=ControllerState(last_snapshot=PlanSnapshot(None, 0, 0, False)),
+        source=graph_source,
+    )
+    return Panel(graph or Text(""), title=workflow_name, border_style="blue")
+
+
+def build_workflow_show(
+    *,
+    config: WorkflowUserConfig,
+    workflow_name: str | None = None,
+) -> Group | Panel | Text | None:
+    if not _RICH_AVAILABLE:
+        return None
+
+    sections: list[object] = []
+    if workflow_name is None:
+        if config.roles or config.teams:
+            sections.append(
+                _render_roles_teams_section(
+                    config=config,
+                    role_names=tuple(config.roles.keys()),
+                    team_names=tuple(config.teams.keys()),
+                    title="Roles / Teams",
+                )
+            )
+        for name, workflow in config.workflows.items():
+            sections.append(_render_workflow_show_section(workflow_name=name, workflow=workflow))
+    else:
+        workflow = config.workflows[workflow_name]
+        role_names = _workflow_effective_role_names(workflow)
+        team_names = _workflow_applicable_team_names(
+            config=config,
+            workflow=workflow,
+            role_names=role_names,
+        )
+        sections.append(
+            _render_roles_teams_section(
+                config=config,
+                role_names=role_names,
+                team_names=team_names,
+                title="Roles / Teams",
+                default_team_name=workflow.team,
+            )
+        )
+        sections.append(_render_workflow_show_section(workflow_name=workflow_name, workflow=workflow))
+
+    if not sections:
+        return Text("No workflows configured", style="yellow")
+    return Group(*sections)
 
 
 def _build_summary_table(
     *,
     workflow_name: str | None,
-    current_step_name: str | None,
     config_harness: str | None,
     config_model: str | None,
     config_effort: str | None,
@@ -233,35 +546,22 @@ def _build_summary_table(
 
     if workflow_name is not None:
         table.add_row("Workflow", workflow_name)
-    if current_step_name is not None:
-        table.add_row("Step", current_step_name)
-
-    harness_value = config_harness or "default"
-    model_value = config_model or "default"
-    table.add_row(
-        "Harness/Model",
-        format_harness_model_display(
-            harness_value,
-            model_value if config_model is not None else None,
-            config_effort,
-        ),
-    )
 
     table.add_row("Checkpoint", _checkpoint_display(state.last_snapshot))
     name = state.last_snapshot.current_checkpoint_name or "-"
     table.add_row("Name", name)
     table.add_row("Turn", f"{state.active_turn}/{config_max_turns}")
-    table.add_row("Issues", str(state.issues_accumulated))
 
     if original_plan_path is not None:
         table.add_row("Original Plan", original_plan_path.name)
-    if active_plan_path is not None:
-        table.add_row("Active Plan", active_plan_path.name)
     if new_plan_path is not None and new_plan_path.is_file() and new_plan_path != active_plan_path:
         table.add_row("Generated Plan", new_plan_path.name)
 
     if workflow_name is None:
         table.add_row("Plan", str(config_plan_path))
+
+    if state.issues_summary_path is not None:
+        table.add_row("Issues", state.issues_summary_path)
 
     if git_summary is not None:
         table.add_row("Git", _git_row(git_summary))
@@ -278,6 +578,7 @@ def build_banner(
     workflow_name: str | None = None,
     current_step_name: str | None = None,
     workflow_steps: dict[str, WorkflowStepConfig] | None = None,
+    workflow_graph_source: WorkflowGraphSource | None = None,
     config_harness: str | None = None,
     config_model: str | None = None,
     config_effort: str | None = None,
@@ -292,9 +593,12 @@ def build_banner(
 ) -> Panel | None:
     if not _RICH_AVAILABLE:
         return None
+    source = workflow_graph_source or _resolve_workflow_graph_source(
+        workflow_name=workflow_name,
+        workflow_steps=workflow_steps,
+    )
     summary = _build_summary_table(
         workflow_name=workflow_name,
-        current_step_name=current_step_name,
         config_harness=config_harness,
         config_model=config_model,
         config_effort=config_effort,
@@ -313,6 +617,7 @@ def build_banner(
         workflow_steps=workflow_steps,
         current_step_name=current_step_name,
         state=state,
+        source=source,
     )
     left_items: list[object] = []
     if turn_history is not None:
@@ -322,7 +627,8 @@ def build_banner(
     root.add_column(ratio=3)
     root.add_column(ratio=2)
     root.add_row(Group(*left_items), workflow_graph or Text(""))
-    title = Text("aflow", style="bold magenta")
+    title_source = original_plan_path or config_plan_path
+    title = Text(_plan_title(title_source), style="bold magenta")
     return Panel(root, title=title, border_style="blue")
 
 
@@ -342,6 +648,7 @@ class BannerRenderer:
         original_plan_path: Path | None = None,
         active_plan_path: Path | None = None,
         new_plan_path: Path | None = None,
+        workflow_graph_source: WorkflowGraphSource | None = None,
         console: Console | None = None,
         repo_root: Path | None = None,
         refresh_interval_seconds: float = 1.0,
@@ -359,6 +666,10 @@ class BannerRenderer:
         self._original_plan_path = original_plan_path
         self._active_plan_path = active_plan_path
         self._new_plan_path = new_plan_path
+        self._workflow_graph_source = workflow_graph_source or _resolve_workflow_graph_source(
+            workflow_name=workflow_name,
+            workflow_steps=workflow_steps,
+        )
         self._console = console or _STDERR_CONSOLE
         self._repo_root = repo_root
         self._refresh_interval_seconds = refresh_interval_seconds
@@ -399,6 +710,7 @@ class BannerRenderer:
             workflow_name=self._workflow_name,
             current_step_name=self._current_step_name,
             workflow_steps=self._workflow_steps,
+            workflow_graph_source=self._workflow_graph_source,
             config_harness=self._config_harness,
             config_model=self._config_model,
             config_effort=self._config_effort,

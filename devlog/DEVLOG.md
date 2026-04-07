@@ -1,3 +1,17 @@
+## 2026-04-07 — Workflow show command and excluded-step documentation (Checkpoint 4)
+
+### What changed
+
+- Added `aflow show [workflow_name]` to render workflow diagrams plus the applicable role/team relationships from the loaded config.
+- Documented `exclude = ["step_name"]` in the bundled workflow examples so declared steps stay visible in `aflow show` and the live banner while being removed from the executable graph.
+- Documented the issue summary link flow so the banner and affected turn cards point at `.aflow/runs/<run-id>/issues.md` when issues exist.
+
+### Why
+
+- The CLI needs a read-only way to inspect the same workflow semantics the live banner uses.
+- Exclusions only make sense if the declared graph remains visible in the docs and diagrams.
+- The issue summary path should be discoverable from the docs rather than reconstructed from runtime state.
+
 ## 2026-04-07 — Harness recovery docs and public analyze API (Checkpoint 5)
 
 ### What changed
