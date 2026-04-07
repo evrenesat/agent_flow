@@ -48,6 +48,7 @@ Flags:
   --start-step/-ss STEP     Start from this step name or 1-based index (default: first).
   --team/-t TEAM_NAME       Override workflow team.
   --max-turns/-mt N         Maximum turns (default from config).
+  --resume [RUN_ID]         Resume the last resumable run for this shell, or the explicit RUN_ID.
 
 Positional arguments:
   [workflow_name] [plan_file]   Either form works:
@@ -102,6 +103,30 @@ def _is_valid_resume_candidate(
     current_max_turns: int | None,
     current_extra_instructions: tuple[str, ...],
 ) -> bool:
+    return _resume_candidate_mismatch_reason(
+        prev_run,
+        current_workflow_config,
+        current_repo_root,
+        current_workflow_name,
+        current_plan_path,
+        current_team,
+        current_selected_start_step,
+        current_max_turns,
+        current_extra_instructions,
+    ) is None
+
+
+def _resume_candidate_mismatch_reason(
+    prev_run: dict[str, object],
+    current_workflow_config: Any,
+    current_repo_root: Path,
+    current_workflow_name: str,
+    current_plan_path: Path,
+    current_team: str | None,
+    current_selected_start_step: str | None,
+    current_max_turns: int | None,
+    current_extra_instructions: tuple[str, ...],
+) -> str | None:
     """Check if the previous run is a valid resume candidate for the current invocation.
 
     A valid candidate must:
@@ -115,64 +140,64 @@ def _is_valid_resume_candidate(
     """
     lifecycle_setup = prev_run.get("lifecycle_setup")
     if not isinstance(lifecycle_setup, list) or "worktree" not in lifecycle_setup:
-        return False
+        return "it was not recorded as a worktree lifecycle run"
 
     feature_branch = prev_run.get("feature_branch")
     worktree_path = prev_run.get("worktree_path")
     if not isinstance(feature_branch, str) or not feature_branch:
-        return False
+        return "it has no recorded feature branch"
     if not isinstance(worktree_path, str) or not worktree_path:
-        return False
+        return "it has no recorded worktree path"
 
     status = prev_run.get("status")
     if status not in ("failed", "running"):
-        return False
+        return f"its status is '{status}', not 'failed' or 'running'"
 
     last_snapshot = prev_run.get("last_snapshot")
     if isinstance(last_snapshot, dict) and last_snapshot.get("is_complete") is True:
-        return False
+        return "its last saved plan snapshot was already complete"
 
     if "merge_status" in prev_run:
-        return False
+        return "it already entered merge teardown"
 
     prev_repo_root = prev_run.get("repo_root")
     if not isinstance(prev_repo_root, str) or Path(prev_repo_root).resolve() != current_repo_root:
-        return False
+        return "it belongs to a different repo root"
 
     prev_workflow_name = prev_run.get("workflow_name")
     if not isinstance(prev_workflow_name, str) or prev_workflow_name != current_workflow_name:
-        return False
+        return "its workflow name does not match this invocation"
 
     prev_plan_path = prev_run.get("plan_path")
     if not isinstance(prev_plan_path, str) or Path(prev_plan_path).resolve() != current_plan_path:
-        return False
+        return "its plan path does not match this invocation"
 
     prev_team = prev_run.get("team")
     prev_team_none_or_absent = prev_team is None or (isinstance(prev_team, str) and not prev_team.strip())
     current_team_none_or_absent = current_team is None or not current_team.strip()
     if prev_team_none_or_absent != current_team_none_or_absent:
-        return False
+        return "its effective team does not match this invocation"
     if not prev_team_none_or_absent and not current_team_none_or_absent:
         if prev_team != current_team:
-            return False
+            return "its effective team does not match this invocation"
 
     prev_selected_start_step = prev_run.get("selected_start_step")
     if prev_selected_start_step != current_selected_start_step:
-        return False
+        return "its selected start step does not match this invocation"
 
     prev_max_turns = prev_run.get("max_turns")
     if not isinstance(prev_max_turns, int) or prev_max_turns != current_max_turns:
-        return False
+        return "its max-turns value does not match this invocation"
 
     prev_extra_instructions = prev_run.get("extra_instructions")
     if not isinstance(prev_extra_instructions, list) or tuple(prev_extra_instructions) != current_extra_instructions:
-        return False
+        return "its extra instructions do not match this invocation"
 
     current_setup = current_workflow_config.setup or ()
     if tuple(lifecycle_setup) != current_setup:
-        return False
+        return "its lifecycle setup does not match this invocation"
 
-    return True
+    return None
 
 
 def _prompt_resume(prev_run_id: str, feature_branch: str, worktree_path: str) -> bool:
@@ -204,22 +229,31 @@ def _detect_resume_candidate(
     selected_start_step: str | None,
     max_turns: int | None,
     extra_instructions: tuple[str, ...],
+    requested_run_id: str | None = None,
+    require_resume: bool = False,
 ) -> ResumeContext | None:
     """Detect if there's a valid resume candidate and prompt the user.
 
     Returns ResumeContext if the user accepts resume, None otherwise.
     """
-    resolved_run_id, _source = resolve_run_id(None, repo_root)
+    resolved_run_id, _source = resolve_run_id(requested_run_id, repo_root)
     if resolved_run_id is None:
+        if require_resume:
+            raise ValueError(
+                "error: no previous run could be resolved for resume from the current shell context. "
+                "Pass --resume RUN_ID to select a specific run."
+            )
         return None
 
     runs_root = repo_root / ".aflow" / "runs"
     run_dir = runs_root / resolved_run_id.name
     prev_run = load_run_json(run_dir)
     if prev_run is None:
+        if require_resume:
+            raise ValueError(f"error: run '{resolved_run_id.name}' does not contain readable run metadata.")
         return None
 
-    if not _is_valid_resume_candidate(
+    reason = _resume_candidate_mismatch_reason(
         prev_run,
         workflow_config,
         repo_root,
@@ -229,7 +263,10 @@ def _detect_resume_candidate(
         selected_start_step,
         max_turns,
         extra_instructions,
-    ):
+    )
+    if reason is not None:
+        if require_resume:
+            raise ValueError(f"error: run '{resolved_run_id.name}' is not resumable: {reason}.")
         return None
 
     feature_branch = prev_run.get("feature_branch")
@@ -239,11 +276,15 @@ def _detect_resume_candidate(
     lifecycle_teardown = prev_run.get("lifecycle_teardown")
 
     if not isinstance(feature_branch, str) or not isinstance(worktree_path, str) or not isinstance(main_branch, str):
+        if require_resume:
+            raise ValueError(f"error: run '{resolved_run_id.name}' is missing worktree resume metadata.")
         return None
     if not isinstance(lifecycle_setup, list) or not isinstance(lifecycle_teardown, list):
+        if require_resume:
+            raise ValueError(f"error: run '{resolved_run_id.name}' is missing lifecycle resume metadata.")
         return None
 
-    if not _prompt_resume(resolved_run_id.name, feature_branch, worktree_path):
+    if not require_resume and not _prompt_resume(resolved_run_id.name, feature_branch, worktree_path):
         return None
 
     return ResumeContext(
@@ -369,6 +410,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="STEP_NAME",
         help="Start the workflow from a specific step instead of the first step.",
+    )
+    run_parser.add_argument(
+        "--resume",
+        nargs="?",
+        const="AUTO",
+        default=None,
+        metavar="RUN_ID",
+        help=(
+            "Resume a previous unfinished worktree run. With no RUN_ID, requires a resumable last run "
+            "from the current shell context. With RUN_ID, resumes that exact run."
+        ),
     )
     run_parser.add_argument("run_args", nargs=argparse.REMAINDER)
 
@@ -947,16 +999,29 @@ def main(argv: list[str] | None = None) -> int:
     if prepared_run is None:
         return 1
 
-    resume_ctx = _detect_resume_candidate(
-        repo_root=prepared_run.repo_root,
-        workflow_config=workflow_config.workflows[prepared_run.workflow_name],
-        workflow_name=prepared_run.workflow_name,
-        plan_path=prepared_run.plan_path,
-        team=prepared_run.team,
-        selected_start_step=prepared_run.start_step,
-        max_turns=prepared_run.max_turns,
-        extra_instructions=prepared_run.extra_instructions,
-    )
+    requested_resume_run_id: str | None = None
+    require_resume = False
+    if args.resume is not None:
+        require_resume = True
+        if args.resume != "AUTO":
+            requested_resume_run_id = args.resume
+
+    try:
+        resume_ctx = _detect_resume_candidate(
+            repo_root=prepared_run.repo_root,
+            workflow_config=workflow_config.workflows[prepared_run.workflow_name],
+            workflow_name=prepared_run.workflow_name,
+            plan_path=prepared_run.plan_path,
+            team=prepared_run.team,
+            selected_start_step=prepared_run.start_step,
+            max_turns=prepared_run.max_turns,
+            extra_instructions=prepared_run.extra_instructions,
+            requested_run_id=requested_resume_run_id,
+            require_resume=require_resume,
+        )
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 1
 
     workflow_spec = workflow_config.workflows[prepared_run.workflow_name]
     workflow_graph_source = WorkflowGraphSource(

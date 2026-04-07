@@ -1787,6 +1787,99 @@ class WorkflowStartupFlowTests(unittest.TestCase):
 
         assert result is None
 
+    def test_resume_flag_with_explicit_run_id_skips_prompt_and_returns_context(self) -> None:
+        import aflow.cli as cli_module
+        from aflow.run_state import ResumeContext
+
+        prev_run = {
+            "repo_root": str(Path("/fake/repo").resolve()),
+            "workflow_name": "test_workflow",
+            "plan_path": str(Path("/fake/plan.md").resolve()),
+            "team": None,
+            "selected_start_step": None,
+            "max_turns": 15,
+            "extra_instructions": [],
+            "lifecycle_setup": ["worktree", "branch"],
+            "lifecycle_teardown": ["merge", "rm_worktree"],
+            "feature_branch": "feature/test-branch",
+            "worktree_path": str(Path("/fake/repo/.git/worktrees/test")),
+            "main_branch": "main",
+            "status": "failed",
+            "last_snapshot": {"is_complete": False},
+        }
+
+        with patch('aflow.cli.resolve_run_id', return_value=(Path("20260101T000000Z-abc123"), "explicit_run_id")), \
+             patch('aflow.cli.load_run_json', return_value=prev_run), \
+             patch('builtins.input', side_effect=AssertionError('should not prompt')):
+            result = cli_module._detect_resume_candidate(
+                repo_root=Path("/fake/repo").resolve(),
+                workflow_config=type('obj', (object,), {'setup': ('worktree', 'branch')})(),
+                workflow_name="test_workflow",
+                plan_path=Path("/fake/plan.md").resolve(),
+                team=None,
+                selected_start_step=None,
+                max_turns=15,
+                extra_instructions=(),
+                requested_run_id="20260101T000000Z-abc123",
+                require_resume=True,
+            )
+
+        assert isinstance(result, ResumeContext)
+        assert result.resumed_from_run_id == "20260101T000000Z-abc123"
+
+    def test_resume_flag_without_id_errors_when_no_prior_run_can_be_resolved(self) -> None:
+        import aflow.cli as cli_module
+
+        with patch('aflow.cli.resolve_run_id', return_value=(None, None)):
+            with pytest.raises(ValueError, match="Pass --resume RUN_ID"):
+                cli_module._detect_resume_candidate(
+                    repo_root=Path("/fake/repo").resolve(),
+                    workflow_config=type('obj', (object,), {'setup': ('worktree', 'branch')})(),
+                    workflow_name="test_workflow",
+                    plan_path=Path("/fake/plan.md").resolve(),
+                    team=None,
+                    selected_start_step=None,
+                    max_turns=15,
+                    extra_instructions=(),
+                    require_resume=True,
+                )
+
+    def test_resume_flag_errors_when_run_is_not_resumable(self) -> None:
+        import aflow.cli as cli_module
+
+        prev_run = {
+            "repo_root": str(Path("/fake/repo").resolve()),
+            "workflow_name": "different_workflow",
+            "plan_path": str(Path("/fake/plan.md").resolve()),
+            "team": None,
+            "selected_start_step": None,
+            "max_turns": 15,
+            "extra_instructions": [],
+            "lifecycle_setup": ["worktree", "branch"],
+            "lifecycle_teardown": ["merge", "rm_worktree"],
+            "feature_branch": "feature/test-branch",
+            "worktree_path": str(Path("/fake/repo/.git/worktrees/test")),
+            "main_branch": "main",
+            "status": "failed",
+            "last_snapshot": {"is_complete": False},
+        }
+
+        with patch('aflow.cli.resolve_run_id', return_value=(Path("20260101T000000Z-abc123"), "explicit_run_id")), \
+             patch('aflow.cli.load_run_json', return_value=prev_run):
+            with pytest.raises(ValueError, match="is not resumable"):
+                cli_module._detect_resume_candidate(
+                    repo_root=Path("/fake/repo").resolve(),
+                    workflow_config=type('obj', (object,), {'setup': ('worktree', 'branch')})(),
+                    workflow_name="test_workflow",
+                    plan_path=Path("/fake/plan.md").resolve(),
+                    team=None,
+                    selected_start_step=None,
+                    max_turns=15,
+                    extra_instructions=(),
+                    requested_run_id="20260101T000000Z-abc123",
+                    require_resume=True,
+                )
+
 
 class RepoRootTests(unittest.TestCase):
 

@@ -136,6 +136,8 @@ def format_harness_model_display(
 @dataclass
 class ControllerState:
     last_snapshot: PlanSnapshot
+    run_id: str | None = None
+    resumed_from_run_id: str | None = None
     turns_completed: int = 0
     issues_accumulated: int = 0
     issues_summary_path: str | None = None

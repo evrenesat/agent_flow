@@ -177,6 +177,8 @@ Positional forms (backward-compatible):
 aflow run path/to/plan.md
 aflow run workflow_name path/to/plan.md
 aflow run path/to/plan.md workflow_name
+aflow run --resume path/to/plan.md
+aflow run --resume 20260407T120000Z-abc123 path/to/plan.md
 aflow run --start-step implement_plan path/to/plan.md
 aflow run -ss 2 path/to/plan.md
 aflow run --team 7teen path/to/plan.md
@@ -189,6 +191,8 @@ Flag forms (explicit):
 ```bash
 aflow run --plan path/to/plan.md
 aflow run -p path/to/plan.md -w workflow_name
+aflow run --resume -p path/to/plan.md -w workflow_name
+aflow run --resume 20260407T120000Z-abc123 -p path/to/plan.md -w workflow_name
 aflow run --plan path/to/plan.md --workflow workflow_name --start-step implement_plan
 aflow run -p path/to/plan.md -w workflow_name -ss 2 -t 7teen -mt 10
 ```
@@ -206,6 +210,7 @@ If the workflow name is omitted, `aflow` uses `aflow.default_workflow` from conf
 `--workflow` / `-w` explicitly specifies the workflow name.
 `--team` / `-t` selects a team for the run, and it overrides any team set in the workflow config.
 `--max-turns` / `-mt` overrides `[aflow].max_turns` for that run.
+`--resume [RUN_ID]` forces resume mode. With no `RUN_ID`, `aflow` must find a resumable last run from the current shell context. With `RUN_ID`, `aflow` resumes that exact run or fails with a clear error.
 
 `--start-step` / `-ss` selects where to begin the workflow. It accepts either a workflow step name (like `implement_plan`) or a 1-based numeric index (like `2` to start from the second declared step). Numeric indexes must be within the valid range for the selected workflow; out-of-range values fail with a clear error.
 
@@ -217,7 +222,22 @@ If the pre-handoff base refresh prompt, that prompt, or the startup recovery pro
 
 If startup hits an `inconsistent_checkpoint_state` parse error, `aflow` asks whether to recover and resume from the affected checkpoint using the same retry path it uses for in-run retries. That recovery prompt is interactive only too.
 
-For worktree workflows, `aflow` first checks the current shell's `.aflow/last_run_ids/<shell-id>` entry when it can detect a stable shell/session id, then falls back to `AFLOW_LAST_RUN_ID`, then `.aflow/last_run_id`. If that previous run was an unfinished worktree run for the same resolved invocation, and stdin/stdout are TTYs, `aflow` asks whether to resume it before creating a fresh worktree. Matching means the same repo root, workflow name, absolute plan path, effective team, selected start step, max turns, extra instructions, and lifecycle setup. Answering yes reuses the recorded feature branch and worktree path; answering no keeps the normal fresh-run path. Non-TTY runs never prompt.
+For worktree workflows, `aflow` has two resume paths.
+
+- Implicit auto-resume on plain `aflow run`: it checks the current shell's `.aflow/last_run_ids/<shell-id>` entry when it can detect a stable shell/session id, then falls back to `AFLOW_LAST_RUN_ID`, then `.aflow/last_run_id`. If that previous run looks resumable for the same resolved invocation, and stdin/stdout are TTYs, `aflow` asks whether to resume it before creating a fresh worktree. Non-TTY runs skip this prompt and continue with a fresh run.
+- Explicit resume with `aflow run --resume [RUN_ID]`: resume becomes mandatory. With no `RUN_ID`, `aflow` must resolve a previous run from the same shell-local lookup order. If it cannot, it exits and tells you to pass an explicit run ID. With `RUN_ID`, `aflow` uses that run directly and does not fall back to a fresh run.
+
+A prior run is considered resumable only when all of the following hold:
+
+- the run used a worktree lifecycle and recorded a feature branch plus worktree path
+- the saved status is `failed` or `running`
+- the saved `last_snapshot.is_complete` is not `true`
+- the run did not already enter merge teardown
+- the resolved invocation still matches on repo root, workflow name, absolute plan path, effective team, selected start step, max turns, extra instructions, and lifecycle setup
+
+If resume is accepted, `aflow` reuses the recorded feature branch and worktree path instead of provisioning a new execution context. The plan file on disk remains the source of truth for checkpoint progress. Before execution starts, the runtime also validates that the recorded worktree still exists, is still registered in `git worktree list`, the feature and main branches still exist locally, and the worktree is not in the middle of a merge or rebase.
+
+At run start, `aflow` prints the new run ID immediately, and the live banner keeps showing that run ID. Resumed runs also show which prior run they came from.
 
 If you pass `--start-step` on a plan that is already complete, `aflow` exits with a clear error instead of ignoring the flag.
 

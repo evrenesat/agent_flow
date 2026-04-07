@@ -544,6 +544,11 @@ def _build_summary_table(
 
     table.add_row("Elapsed", _elapsed(state.run_started_at))
 
+    if state.run_id is not None:
+        table.add_row("Run ID", state.run_id)
+    if state.resumed_from_run_id is not None:
+        table.add_row("Resumed From", state.resumed_from_run_id)
+
     if workflow_name is not None:
         table.add_row("Workflow", workflow_name)
 

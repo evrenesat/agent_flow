@@ -618,6 +618,27 @@ class GitBannerTests(unittest.TestCase):
         text = console.export_text()
         assert ".aflow/runs/20260407T120000Z-00000001/issues.md" in text
 
+    def test_build_banner_renders_run_id_and_resumed_from(self) -> None:
+        from rich.console import Console
+        state = ControllerState(
+            last_snapshot=PlanSnapshot(None, 0, 0, False),
+            run_id="20260407T120000Z-00000001",
+            resumed_from_run_id="20260407T110000Z-00000000",
+        )
+        panel = build_banner(
+            config_max_turns=10,
+            config_plan_path=Path("/fake/plan.md"),
+            state=state,
+        )
+        assert panel is not None
+        console = Console(record=True, width=120)
+        console.print(panel)
+        text = console.export_text()
+        assert "Run ID" in text
+        assert "20260407T120000Z-00000001" in text
+        assert "Resumed From" in text
+        assert "20260407T110000Z-00000000" in text
+
     def test_build_banner_renders_last_step_exits(self) -> None:
         from rich.console import Console
         from unittest.mock import patch
