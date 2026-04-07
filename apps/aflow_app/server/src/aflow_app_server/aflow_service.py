@@ -49,11 +49,11 @@ class AflowService:
         self._active_runs: dict[str, ExecutionStatus] = {}
         self._event_queues: dict[str, asyncio.Queue[ExecutionEvent]] = {}
 
-    def list_plans(self, repo_path: Path) -> list[PlanInfo]:
+    def list_plans(self, project_path: Path) -> list[PlanInfo]:
         """List all plan files in a repository.
 
         Args:
-            repo_path: Path to the repository root.
+            project_path: Path to the project root.
 
         Returns:
             List of PlanInfo for all found plans.
@@ -61,7 +61,7 @@ class AflowService:
         plans: list[PlanInfo] = []
 
         # Check drafts directory
-        drafts_dir = repo_path / "plans" / "drafts"
+        drafts_dir = project_path / "plans" / "drafts"
         if drafts_dir.exists():
             for plan_file in drafts_dir.glob("*.md"):
                 info = self._get_plan_info(plan_file, PlanStatus.DRAFT)
@@ -69,7 +69,7 @@ class AflowService:
                     plans.append(info)
 
         # Check in-progress directory
-        in_progress_dir = repo_path / "plans" / "in-progress"
+        in_progress_dir = project_path / "plans" / "in-progress"
         if in_progress_dir.exists():
             for plan_file in in_progress_dir.glob("*.md"):
                 info = self._get_plan_info(plan_file, PlanStatus.IN_PROGRESS)
@@ -96,19 +96,19 @@ class AflowService:
 
     def prepare_execution(
         self,
-        repo_path: Path,
+        project_path: Path,
         request: ExecutionRequest,
     ) -> StartupResult:
         """Prepare a workflow execution.
 
         Args:
-            repo_path: Path to the repository root.
+            project_path: Path to the project root.
             request: Execution request parameters.
 
         Returns:
             StartupResult with either a PreparedRun or a question.
         """
-        plan_path = repo_path / request.plan_path
+        plan_path = project_path / request.plan_path
 
         if not plan_path.exists():
             return StartupResult(error=f"Plan file not found: {request.plan_path}")
@@ -116,7 +116,7 @@ class AflowService:
         try:
             from aflow.api.models import StartupRequest
             startup_request = StartupRequest(
-                repo_root=repo_path,
+                repo_root=project_path,
                 plan_path=plan_path,
                 workflow_name=request.workflow_name,
                 team=request.team,
@@ -144,13 +144,13 @@ class AflowService:
     async def execute_workflow_async(
         self,
         prepared_run: PreparedRun,
-        repo_id: str,
+        project_id: str,
     ) -> str:
         """Execute a workflow asynchronously.
 
         Args:
             prepared_run: The prepared run configuration.
-            repo_id: ID of the repository.
+            project_id: ID of the project.
 
         Returns:
             Run ID for tracking.
@@ -161,7 +161,7 @@ class AflowService:
 
         status = ExecutionStatus(
             run_id=run_id,
-            repo_id=repo_id,
+            project_id=project_id,
             plan_path=str(prepared_run.plan_path),
             workflow_name=prepared_run.workflow_name,
             status="starting",
@@ -207,7 +207,7 @@ class AflowService:
 
             status = ExecutionStatus(
                 run_id=run_id,
-                repo_id=status.repo_id,
+                project_id=status.project_id,
                 plan_path=status.plan_path,
                 workflow_name=status.workflow_name,
                 status="completed" if result.end_reason == "done" else "failed",
@@ -221,7 +221,7 @@ class AflowService:
         except Exception as e:
             status = ExecutionStatus(
                 run_id=run_id,
-                repo_id=status.repo_id,
+                project_id=status.project_id,
                 plan_path=status.plan_path,
                 workflow_name=status.workflow_name,
                 status="failed",

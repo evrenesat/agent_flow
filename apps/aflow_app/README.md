@@ -22,7 +22,9 @@ apps/aflow_app/
 │   │   ├── models.py         # API models
 │   │   ├── repo_registry.py  # Repository management
 │   │   ├── aflow_service.py  # aflow library integration
-│   │   ├── codex_backend.py  # Codex server adapter
+│   │   ├── codex_backend.py  # Codex gateway compatibility exports
+│   │   ├── codex_thread_gateway.py  # Codex thread gateway interface
+│   │   ├── codex_app_server_client.py  # Codex websocket JSON-RPC client
 │   │   ├── codex_routes.py   # Codex API routes
 │   │   ├── plan_store.py     # Plan draft management
 │   │   └── main.py           # FastAPI app and endpoints
@@ -50,8 +52,8 @@ The server is configured via environment variables or a TOML config file.
 | `AFLOW_APP_PORT` | Bind port | `8765` |
 | `AFLOW_APP_TOKEN` | Auth token (required) | - |
 | `AFLOW_APP_REGISTRY_PATH` | Repo registry file path | `<config_dir>/repos.json` |
-| `AFLOW_CODEX_URL` | Codex server URL | - |
-| `AFLOW_CODEX_TOKEN` | Codex server token | - |
+| `AFLOW_CODEX_APP_SERVER_URL` | Codex app-server websocket URL | - |
+| `AFLOW_CODEX_APP_SERVER_TOKEN` | Codex app-server auth token | - |
 | `AFLOW_TRANSCRIPTION_URL` | Transcription service URL | - |
 | `AFLOW_TRANSCRIPTION_TOKEN` | Transcription service token | - |
 
@@ -65,8 +67,8 @@ bind_host = "127.0.0.1"
 bind_port = 8765
 auth_token = "your-secret-token"
 
-[codex]
-server_url = "http://localhost:8080"
+[codex_app_server]
+server_url = "ws://localhost:8080"
 server_token = "codex-token"
 
 [transcription]
@@ -135,10 +137,13 @@ All endpoints (except `/health`) require Bearer token authentication.
 
 ### Codex
 
-- `GET /api/codex/sessions` - List Codex sessions
-- `GET /api/codex/sessions/{session_id}` - Get a specific session
-- `GET /api/codex/sessions/{session_id}/messages` - Fetch messages from a session
-- `POST /api/codex/sessions/{session_id}/messages` - Send a message to a session
+- `GET /api/codex/threads` - List Codex threads
+- `GET /api/codex/threads/{thread_id}` - Read a thread
+- `POST /api/codex/threads` - Start a thread
+- `POST /api/codex/threads/{thread_id}/resume` - Resume a thread
+- `POST /api/codex/threads/{thread_id}/fork` - Fork a thread
+- `PATCH /api/codex/threads/{thread_id}/name` - Rename a thread
+- `POST /api/codex/threads/{thread_id}/turns` - Send a user turn
 - `GET /api/codex/repos/{repo_id}/plans/drafts` - List plan drafts
 - `POST /api/codex/repos/{repo_id}/plans/drafts` - Save a plan draft
 - `GET /api/codex/repos/{repo_id}/plans/drafts/{filename}` - Load a plan draft

@@ -365,7 +365,7 @@ A mobile-first React frontend (future checkpoint) that will provide:
 - Repository selection and management
 - Plan browsing and execution
 - Live execution status updates via SSE
-- Codex session integration (future)
+- Codex thread integration (future)
 - Audio transcription support (future)
 
 ### Design Principles
@@ -386,7 +386,7 @@ The server exposes authenticated REST APIs for:
 - Repository registry management (add, list, update, remove repos)
 - Plan file discovery (list drafts and in-progress plans)
 - Workflow execution (start runs, stream events via SSE)
-- Codex session management (list, attach, fetch messages, send messages)
+- Codex thread management through the official Codex app-server protocol
 - Plan draft persistence (save, load, promote drafts to in-progress)
 
 ### Key Components
@@ -397,7 +397,7 @@ The server exposes authenticated REST APIs for:
 - Server bind settings (`bind_host`, `bind_port`)
 - Authentication (`auth_token`)
 - Repository registry path
-- Codex server settings (`codex_server_url`, `codex_server_token`)
+- Codex app-server settings (`codex_app_server_url`, `codex_app_server_token`)
 - Transcription settings (`transcription_url`, `transcription_token`)
 
 **`repo_registry.py`** — JSON-backed repository registry with validation. Stores repo metadata (id, name, path, git root status, registration timestamp). Validates that registered paths exist and are git roots or explicit user-chosen repo roots.
@@ -408,16 +408,22 @@ The server exposes authenticated REST APIs for:
 - Async workflow execution (calls `aflow.api.runner.execute_workflow()` in thread pool)
 - Event streaming (collects `ExecutionEvent` objects into asyncio queues for SSE)
 
-**`codex_backend.py`** — Adapter interface for Codex server integration. Defines:
-- `CodexBackend` protocol with `list_sessions()`, `get_session()`, `fetch_messages()`, `send_message()`
-- `HttpCodexBackend` implementation for HTTP-based Codex servers
-- Normalizes external session/message payloads into server-local models
+**`codex_backend.py`** — Compatibility exports for Codex thread gateway code.
+
+**`codex_thread_gateway.py`** — Thread-centric Codex gateway interface. Defines:
+- `CodexThreadGateway` protocol with `list_threads()`, `read_thread()`, `start_thread()`, `resume_thread()`, `fork_thread()`, `set_thread_name()`, `start_turn()`
+- Normalized thread, turn, and mutation-result models for the rest of the server
+
+**`codex_app_server_client.py`** — Websocket JSON-RPC client for the official Codex app-server thread protocol. It normalizes generated `thread/*` and `turn/start` payloads into the server-local thread models.
 
 **`codex_routes.py`** — FastAPI router for Codex and plan draft endpoints:
-- `GET /api/codex/sessions` — List available Codex sessions
-- `GET /api/codex/sessions/{session_id}` — Get specific session
-- `GET /api/codex/sessions/{session_id}/messages` — Fetch messages from session
-- `POST /api/codex/sessions/{session_id}/messages` — Send message to session
+- `GET /api/codex/threads` — List available Codex threads
+- `GET /api/codex/threads/{thread_id}` — Read a thread
+- `POST /api/codex/threads` — Start a thread
+- `POST /api/codex/threads/{thread_id}/resume` — Resume a thread
+- `POST /api/codex/threads/{thread_id}/fork` — Fork a thread
+- `PATCH /api/codex/threads/{thread_id}/name` — Rename a thread
+- `POST /api/codex/threads/{thread_id}/turns` — Send a user turn
 - `POST /api/codex/repos/{repo_id}/plans/drafts` — Save plan draft
 - `GET /api/codex/repos/{repo_id}/plans/drafts` — List drafts
 - `GET /api/codex/repos/{repo_id}/plans/drafts/{name}` — Load draft
@@ -445,7 +451,7 @@ The server exposes authenticated REST APIs for:
 
 ### Authentication
 
-All state-changing and session endpoints require bearer token authentication via `Authorization: Bearer <token>` header. The token is configured via `AFLOW_APP_TOKEN` environment variable or `server.auth_token` in config file.
+All state-changing and Codex thread endpoints require bearer token authentication via `Authorization: Bearer <token>` header. The token is configured via `AFLOW_APP_TOKEN` environment variable or `server.auth_token` in config file.
 
 ### Dependency Injection
 
@@ -453,7 +459,7 @@ The server uses FastAPI's dependency injection system with global state managed 
 
 ### External Integration
 
-**Codex Server:** The server expects a Codex server that exposes session listing, message fetching, and message sending APIs. The `HttpCodexBackend` adapter normalizes these into the server's internal models.
+**Codex Server:** The server now speaks the official app-server thread protocol. The websocket client normalizes `thread/list`, `thread/read`, `thread/start`, `thread/resume`, `thread/fork`, `thread/setName`, and `turn/start` responses into the server's internal models. When a project moves or is renamed, the app must preserve the association in app-managed metadata and continue work with `cwd` overrides on `thread/resume` or `thread/fork`, because the protocol supports `gitInfo` updates but not in-place `cwd` mutation.
 
 **Plan Drafts:** Draft plans are stored in the repository's `plans/drafts/` directory. Promoted plans are written to `plans/in-progress/`. The server does not modify the aflow library's plan parsing or execution logic.
 
@@ -461,7 +467,8 @@ The server uses FastAPI's dependency injection system with global state managed 
 
 The server includes comprehensive tests:
 - `test_transcription.py` — Tests for audio transcription client with mocked HTTP responses
-- `test_codex_backend.py` — Tests for Codex adapter with mocked HTTP client
+- `test_codex_backend.py` — Tests for the websocket Codex app-server client
+- `test_codex_thread_gateway.py` — Tests for the normalized thread gateway interface
 - `test_plan_store.py` — Tests for plan draft management
 - `test_api.py` — Integration tests for all API endpoints including transcription
 - `test_repo_registry.py` — Tests for repository registry
@@ -478,6 +485,6 @@ uv run --project apps/aflow_app/server aflow-app-server
 Or configure and run via uvicorn:
 ```bash
 export AFLOW_APP_TOKEN="your-secret-token"
-export AFLOW_CODEX_URL="http://localhost:9000"
+export AFLOW_CODEX_APP_SERVER_URL="ws://localhost:9000"
 uvicorn aflow_app_server.main:app --host 127.0.0.1 --port 8765
 ```

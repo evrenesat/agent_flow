@@ -1,4 +1,13 @@
-import type { RepoInfo, PlanInfo, CodexSession, CodexMessage, ExecutionStatus, ExecutionEvent } from './types'
+import type {
+  ExecutionEvent,
+  ExecutionStatus,
+  PlanInfo,
+  ProjectInfo,
+  ProjectThread,
+  ProjectThreadPage,
+  ThreadMutationResult,
+  ThreadUserInput,
+} from './types'
 
 const API_BASE = '/api'
 
@@ -72,94 +81,185 @@ async function fetchJson<T>(url: string, options: RequestInit = {}): Promise<T> 
   return response.json()
 }
 
-export async function listRepos(): Promise<RepoInfo[]> {
-  return fetchJson<RepoInfo[]>(`${API_BASE}/repos`)
+function buildQuery(params: Record<string, string | number | boolean | string[] | undefined>): string {
+  const search = new URLSearchParams()
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined) continue
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        search.append(key, item)
+      }
+      continue
+    }
+    search.set(key, String(value))
+  }
+  const query = search.toString()
+  return query ? `?${query}` : ''
 }
 
-export async function addRepo(path: string, name?: string): Promise<RepoInfo> {
-  return fetchJson<RepoInfo>(`${API_BASE}/repos`, {
-    method: 'POST',
-    body: JSON.stringify({ path, name }),
+export async function listProjects(): Promise<ProjectInfo[]> {
+  return fetchJson<ProjectInfo[]>(`${API_BASE}/projects`)
+}
+
+export async function getProject(projectId: string): Promise<ProjectInfo> {
+  return fetchJson<ProjectInfo>(`${API_BASE}/projects/${projectId}`)
+}
+
+export async function updateProject(
+  projectId: string,
+  request: { display_name?: string | null; current_path?: string | null; alias?: string | null }
+): Promise<ProjectInfo> {
+  return fetchJson<ProjectInfo>(`${API_BASE}/projects/${projectId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(request),
   })
 }
 
-export async function getRepo(repoId: string): Promise<RepoInfo> {
-  return fetchJson<RepoInfo>(`${API_BASE}/repos/${repoId}`)
+export async function listProjectPlans(projectId: string): Promise<PlanInfo[]> {
+  return fetchJson<PlanInfo[]>(`${API_BASE}/projects/${projectId}/plans`)
 }
 
-export async function updateRepo(repoId: string, name: string): Promise<RepoInfo> {
-  return fetchJson<RepoInfo>(`${API_BASE}/repos/${repoId}`, {
+export async function listProjectThreads(
+  projectId: string,
+  request: {
+    cwd?: string
+    search_term?: string
+    limit?: number
+    cursor?: string
+    source_kinds?: string[]
+    archived?: boolean
+  } = {}
+): Promise<ProjectThreadPage> {
+  const query = buildQuery(request)
+  return fetchJson<ProjectThreadPage>(`${API_BASE}/projects/${projectId}/threads${query}`)
+}
+
+export async function getProjectThread(
+  projectId: string,
+  threadId: string,
+  includeTurns = true
+): Promise<ProjectThread> {
+  const query = buildQuery({ include_turns: includeTurns })
+  return fetchJson<ProjectThread>(`${API_BASE}/projects/${projectId}/threads/${threadId}${query}`)
+}
+
+export async function startProjectThread(
+  projectId: string,
+  request: {
+    cwd?: string
+    model?: string
+    model_provider?: string
+    service_tier?: string
+    approval_policy?: string
+    experimental_raw_events?: boolean
+    persist_extended_history?: boolean
+  } = {}
+): Promise<ThreadMutationResult> {
+  return fetchJson<ThreadMutationResult>(`${API_BASE}/projects/${projectId}/threads`, {
+    method: 'POST',
+    body: JSON.stringify(request),
+  })
+}
+
+export async function resumeProjectThread(
+  projectId: string,
+  threadId: string,
+  request: {
+    cwd?: string
+    model?: string
+    model_provider?: string
+    service_tier?: string
+    approval_policy?: string
+    persist_extended_history?: boolean
+  } = {}
+): Promise<ThreadMutationResult> {
+  return fetchJson<ThreadMutationResult>(`${API_BASE}/projects/${projectId}/threads/${threadId}/resume`, {
+    method: 'POST',
+    body: JSON.stringify(request),
+  })
+}
+
+export async function forkProjectThread(
+  projectId: string,
+  threadId: string,
+  request: {
+    cwd?: string
+    model?: string
+    model_provider?: string
+    service_tier?: string
+    approval_policy?: string
+    persist_extended_history?: boolean
+  } = {}
+): Promise<ThreadMutationResult> {
+  return fetchJson<ThreadMutationResult>(`${API_BASE}/projects/${projectId}/threads/${threadId}/fork`, {
+    method: 'POST',
+    body: JSON.stringify(request),
+  })
+}
+
+export async function setProjectThreadName(projectId: string, threadId: string, name: string): Promise<void> {
+  return fetchJson<void>(`${API_BASE}/projects/${projectId}/threads/${threadId}/name`, {
     method: 'PATCH',
     body: JSON.stringify({ name }),
   })
 }
 
-export async function removeRepo(repoId: string): Promise<void> {
-  return fetchJson<void>(`${API_BASE}/repos/${repoId}`, {
-    method: 'DELETE',
-  })
-}
-
-export async function listPlans(repoId: string): Promise<PlanInfo[]> {
-  return fetchJson<PlanInfo[]>(`${API_BASE}/repos/${repoId}/plans`)
-}
-
-export async function listCodexSessions(repoPath?: string): Promise<CodexSession[]> {
-  const params = repoPath ? `?repo_path=${encodeURIComponent(repoPath)}` : ''
-  return fetchJson<CodexSession[]>(`${API_BASE}/codex/sessions${params}`)
-}
-
-export async function getCodexSession(sessionId: string): Promise<CodexSession> {
-  return fetchJson<CodexSession>(`${API_BASE}/codex/sessions/${sessionId}`)
-}
-
-export async function fetchCodexMessages(sessionId: string, limit?: number): Promise<CodexMessage[]> {
-  const params = limit ? `?limit=${limit}` : ''
-  return fetchJson<CodexMessage[]>(`${API_BASE}/codex/sessions/${sessionId}/messages${params}`)
-}
-
-export async function sendCodexMessage(sessionId: string, content: string): Promise<CodexMessage> {
-  return fetchJson<CodexMessage>(`${API_BASE}/codex/sessions/${sessionId}/messages`, {
-    method: 'POST',
-    body: JSON.stringify({ content }),
-  })
-}
-
-export async function listPlanDrafts(repoId: string): Promise<string[]> {
-  return fetchJson<string[]>(`${API_BASE}/codex/repos/${repoId}/plans/drafts`)
-}
-
-export async function savePlanDraft(repoId: string, filename: string, content: string): Promise<void> {
-  return fetchJson<void>(`${API_BASE}/codex/repos/${repoId}/plans/drafts`, {
-    method: 'POST',
-    body: JSON.stringify({ filename, content }),
-  })
-}
-
-export async function loadPlanDraft(repoId: string, filename: string): Promise<string> {
-  const response = await fetch(`${API_BASE}/codex/repos/${repoId}/plans/drafts/${filename}`, {
-    headers: getHeaders(),
-  })
-  if (!response.ok) {
-    throw new ApiError(response.status, await response.text())
+export async function startProjectTurn(
+  projectId: string,
+  threadId: string,
+  request: {
+    input: ThreadUserInput[]
+    cwd?: string
+    approval_policy?: string
+    model?: string
+    service_tier?: string
+    effort?: string
+    summary?: string
+    personality?: string
   }
-  return response.text()
-}
-
-export async function promotePlanDraft(repoId: string, filename: string): Promise<void> {
-  return fetchJson<void>(`${API_BASE}/codex/repos/${repoId}/plans/drafts/${filename}/promote`, {
+): Promise<Record<string, unknown>> {
+  return fetchJson<Record<string, unknown>>(`${API_BASE}/projects/${projectId}/threads/${threadId}/turns`, {
     method: 'POST',
+    body: JSON.stringify(request),
   })
 }
 
-export async function deletePlanDraft(repoId: string, filename: string): Promise<void> {
-  return fetchJson<void>(`${API_BASE}/codex/repos/${repoId}/plans/drafts/${filename}`, {
+export async function listPlanDrafts(projectId: string): Promise<string[]> {
+  return fetchJson<string[]>(`${API_BASE}/projects/${projectId}/plans/drafts`)
+}
+
+export async function savePlanDraft(
+  projectId: string,
+  request: { name: string; content: string }
+): Promise<{ name: string; path: string; status: 'draft' }> {
+  return fetchJson<{ name: string; path: string; status: 'draft' }>(`${API_BASE}/projects/${projectId}/plans/drafts`, {
+    method: 'POST',
+    body: JSON.stringify(request),
+  })
+}
+
+export async function loadPlanDraft(projectId: string, name: string): Promise<{ name: string; content: string }> {
+  return fetchJson<{ name: string; content: string }>(`${API_BASE}/projects/${projectId}/plans/drafts/${name}`)
+}
+
+export async function promotePlanDraft(
+  projectId: string,
+  request: { draft_name: string; target_name?: string | null }
+): Promise<{ name: string; path: string; status: 'in_progress' }> {
+  return fetchJson<{ name: string; path: string; status: 'in_progress' }>(`${API_BASE}/projects/${projectId}/plans/promote`, {
+    method: 'POST',
+    body: JSON.stringify(request),
+  })
+}
+
+export async function deletePlanDraft(projectId: string, name: string): Promise<void> {
+  return fetchJson<void>(`${API_BASE}/projects/${projectId}/plans/drafts/${name}`, {
     method: 'DELETE',
   })
 }
 
 export async function startExecution(request: {
-  repo_id: string
+  project_id: string
   plan_path: string
   workflow_name?: string
   team?: string

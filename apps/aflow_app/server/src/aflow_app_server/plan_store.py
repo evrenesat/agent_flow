@@ -14,15 +14,15 @@ class PlanStoreError(Exception):
 class PlanStore:
     """Manages plan drafts and promotions for a repository."""
 
-    def __init__(self, repo_path: Path) -> None:
+    def __init__(self, project_path: Path) -> None:
         """Initialize the plan store.
 
         Args:
-            repo_path: Path to the repository root.
+            project_path: Path to the project root.
         """
-        self.repo_path = repo_path
-        self.drafts_dir = repo_path / "plans" / "drafts"
-        self.in_progress_dir = repo_path / "plans" / "in-progress"
+        self.project_path = project_path
+        self.drafts_dir = project_path / "plans" / "drafts"
+        self.in_progress_dir = project_path / "plans" / "in-progress"
 
     def save_draft(self, name: str, content: str) -> Path:
         """Save a plan as a draft.

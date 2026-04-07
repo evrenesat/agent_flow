@@ -21,10 +21,14 @@ class ServerConfig:
     bind_port: int
     auth_token: str
     repo_registry_path: Path
-    codex_server_url: str | None
-    codex_server_token: str | None
+    codex_app_server_url: str | None
+    codex_app_server_token: str | None
     transcription_url: str | None
     transcription_token: str | None
+    projects_home: Path = field(default_factory=lambda: Path("~/code").expanduser())
+    project_overrides_path: Path = field(
+        default_factory=lambda: Path("~/.config/aflow-app/project_overrides.json").expanduser()
+    )
 
     @classmethod
     def from_env(cls) -> ServerConfig:
@@ -39,7 +43,8 @@ class ServerConfig:
                 file_config = tomllib.load(f)
 
         server_section = file_config.get("server", {})
-        codex_section = file_config.get("codex", {})
+        codex_section = file_config.get("codex_app_server", file_config.get("codex", {}))
+        projects_section = file_config.get("project_catalog", file_config.get("projects", {}))
         transcription_section = file_config.get("transcription", {})
 
         # Environment overrides file config
@@ -51,10 +56,35 @@ class ServerConfig:
                 "AFLOW_APP_REGISTRY_PATH",
                 server_section.get("repo_registry_path", str(config_dir / "repos.json"))
             )).expanduser(),
-            codex_server_url=os.environ.get("AFLOW_CODEX_URL", codex_section.get("server_url")),
-            codex_server_token=os.environ.get("AFLOW_CODEX_TOKEN", codex_section.get("server_token")),
+            codex_app_server_url=(
+                os.environ.get("AFLOW_CODEX_APP_SERVER_URL")
+                or os.environ.get("AFLOW_CODEX_URL")
+                or codex_section.get("server_url")
+                or codex_section.get("url")
+            ),
+            codex_app_server_token=(
+                os.environ.get("AFLOW_CODEX_APP_SERVER_TOKEN")
+                or os.environ.get("AFLOW_CODEX_TOKEN")
+                or codex_section.get("server_token")
+                or codex_section.get("token")
+            ),
             transcription_url=os.environ.get("AFLOW_TRANSCRIPTION_URL", transcription_section.get("server_url")),
             transcription_token=os.environ.get("AFLOW_TRANSCRIPTION_TOKEN", transcription_section.get("server_token")),
+            projects_home=Path(
+                os.environ.get(
+                    "AFLOW_APP_PROJECTS_HOME",
+                    projects_section.get("projects_home", "~/code"),
+                )
+            ).expanduser(),
+            project_overrides_path=Path(
+                os.environ.get(
+                    "AFLOW_APP_PROJECT_OVERRIDES_PATH",
+                    projects_section.get(
+                        "project_overrides_path",
+                        str(config_dir / "project_overrides.json"),
+                    ),
+                )
+            ).expanduser(),
         )
 
     def validate(self) -> list[str]:

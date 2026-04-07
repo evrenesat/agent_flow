@@ -20,10 +20,10 @@ def temp_registry_path(tmp_path: Path) -> Path:
 @pytest.fixture
 def temp_git_repo(tmp_path: Path) -> Path:
     """Create a temporary git repository."""
-    repo_path = tmp_path / "test_repo"
-    repo_path.mkdir()
-    (repo_path / ".git").mkdir()
-    return repo_path
+    project_path = tmp_path / "test_repo"
+    project_path.mkdir()
+    (project_path / ".git").mkdir()
+    return project_path
 
 
 @pytest.fixture

@@ -1,18 +1,18 @@
-import { useState, useEffect } from 'react'
-import type { RepoInfo } from './types'
-import { RepoPicker } from './components/RepoPicker'
-import { SessionPanel } from './components/SessionPanel'
+import { useEffect, useState } from 'react'
+import type { ProjectInfo } from './types'
+import { ProjectPicker } from './components/ProjectPicker'
+import { ThreadPanel } from './components/ThreadPanel'
 import { PlanPanel } from './components/PlanPanel'
 import { ExecutionPanel } from './components/ExecutionPanel'
 import * as api from './api'
 
-type View = 'repos' | 'sessions' | 'plans' | 'execution'
+type View = 'threads' | 'plans' | 'execution'
 
 export function App() {
   const [authToken, setAuthTokenState] = useState('')
   const [isAuthenticated, setIsAuthenticated] = useState(false)
-  const [selectedRepo, setSelectedRepo] = useState<RepoInfo | null>(null)
-  const [currentView, setCurrentView] = useState<View>('repos')
+  const [selectedProject, setSelectedProject] = useState<ProjectInfo | null>(null)
+  const [currentView, setCurrentView] = useState<View>('threads')
   const [executionPlanPath, setExecutionPlanPath] = useState<string | null>(null)
   const [savingPlan, setSavingPlan] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
@@ -35,24 +35,25 @@ export function App() {
     api.clearAuthToken()
     setIsAuthenticated(false)
     setAuthTokenState('')
-    setSelectedRepo(null)
-    setCurrentView('repos')
+    setSelectedProject(null)
+    setCurrentView('threads')
+    setExecutionPlanPath(null)
   }
 
-  function handleSelectRepo(repo: RepoInfo) {
-    setSelectedRepo(repo)
-    setCurrentView('sessions')
+  function handleSelectProject(project: ProjectInfo) {
+    setSelectedProject(project)
+    setCurrentView('threads')
   }
 
-  async function handleSavePlan(content: string) {
-    if (!selectedRepo) return
+  async function handleSavePlanDraft(content: string) {
+    if (!selectedProject) return
 
     try {
       setSavingPlan(true)
       setSaveError(null)
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5)
-      const filename = `plan-${timestamp}.md`
-      await api.savePlanDraft(selectedRepo.id, filename, content)
+      const name = `plan-${timestamp}`
+      await api.savePlanDraft(selectedProject.id, { name, content })
       setCurrentView('plans')
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : 'Failed to save plan')
@@ -103,7 +104,7 @@ export function App() {
   }
 
   return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+    <div style={{ minHeight: '100%', display: 'flex', flexDirection: 'column' }}>
       <header
         style={{
           padding: 'var(--spacing-md)',
@@ -111,75 +112,85 @@ export function App() {
           display: 'flex',
           justifyContent: 'space-between',
           alignItems: 'center',
+          gap: 'var(--spacing-md)',
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--spacing-md)' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
           <h1 style={{ fontSize: '1.25rem', fontWeight: 600 }}>aflow</h1>
-          {selectedRepo && (
-            <>
-              <span className="text-dim">•</span>
-              <span className="text-sm truncate" style={{ maxWidth: '200px' }}>
-                {selectedRepo.name}
-              </span>
-            </>
-          )}
+          <div className="text-xs text-dim truncate">Projects and Codex threads</div>
         </div>
         <button className="btn btn-secondary btn-sm" onClick={handleLogout}>
           Logout
         </button>
       </header>
 
-      {selectedRepo && (
-        <nav
-          style={{
-            display: 'flex',
-            borderBottom: '1px solid var(--color-border)',
-            overflowX: 'auto',
-          }}
-        >
-          <button
-            className="btn"
-            style={{
-              borderRadius: 0,
-              borderBottom: currentView === 'repos' ? '2px solid var(--color-primary)' : '2px solid transparent',
-              color: currentView === 'repos' ? 'var(--color-primary)' : 'var(--color-text-dim)',
-            }}
-            onClick={() => setCurrentView('repos')}
-          >
-            Repos
-          </button>
-          <button
-            className="btn"
-            style={{
-              borderRadius: 0,
-              borderBottom: currentView === 'sessions' ? '2px solid var(--color-primary)' : '2px solid transparent',
-              color: currentView === 'sessions' ? 'var(--color-primary)' : 'var(--color-text-dim)',
-            }}
-            onClick={() => setCurrentView('sessions')}
-          >
-            Sessions
-          </button>
-          <button
-            className="btn"
-            style={{
-              borderRadius: 0,
-              borderBottom: currentView === 'plans' ? '2px solid var(--color-primary)' : '2px solid transparent',
-              color: currentView === 'plans' ? 'var(--color-primary)' : 'var(--color-text-dim)',
-            }}
-            onClick={() => setCurrentView('plans')}
-          >
-            Plans
-          </button>
-        </nav>
-      )}
+      <main
+        style={{
+          flex: 1,
+          display: 'grid',
+          gridTemplateColumns: selectedProject ? 'minmax(280px, 360px) minmax(0, 1fr)' : 'minmax(0, 1fr)',
+          gap: 'var(--spacing-md)',
+          padding: 'var(--spacing-md)',
+          minHeight: 0,
+        }}
+      >
+        <aside style={{ minWidth: 0 }}>
+          <ProjectPicker selectedProjectId={selectedProject?.id ?? null} onSelectProject={handleSelectProject} />
+        </aside>
 
-      <main style={{ flex: 1, overflow: 'hidden' }}>
-        {currentView === 'repos' && <RepoPicker selectedRepoId={selectedRepo?.id || null} onSelectRepo={handleSelectRepo} />}
-        {currentView === 'sessions' && selectedRepo && <SessionPanel repo={selectedRepo} onSavePlan={handleSavePlan} />}
-        {currentView === 'plans' && selectedRepo && <PlanPanel repo={selectedRepo} onStartExecution={handleStartExecution} />}
-        {currentView === 'execution' && selectedRepo && executionPlanPath && (
-          <ExecutionPanel repo={selectedRepo} planPath={executionPlanPath} onClose={handleCloseExecution} />
-        )}
+        <section style={{ minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
+          {selectedProject ? (
+            <>
+              <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-sm)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 'var(--spacing-sm)', alignItems: 'flex-start' }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontWeight: 600 }}>{selectedProject.display_name}</div>
+                    <div className="text-xs text-dim mono truncate">{selectedProject.current_path}</div>
+                  </div>
+                  <div className="text-xs text-dim">{selectedProject.linked_thread_count} linked threads</div>
+                </div>
+
+                <div style={{ display: 'flex', gap: 'var(--spacing-sm)', flexWrap: 'wrap' }}>
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => setCurrentView('threads')}
+                    style={{
+                      borderBottom: currentView === 'threads' ? '2px solid var(--color-primary)' : undefined,
+                    }}
+                  >
+                    Threads
+                  </button>
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => setCurrentView('plans')}
+                    style={{
+                      borderBottom: currentView === 'plans' ? '2px solid var(--color-primary)' : undefined,
+                    }}
+                  >
+                    Plans
+                  </button>
+                </div>
+              </div>
+
+              <div style={{ minHeight: 0, flex: 1 }}>
+                {currentView === 'threads' && <ThreadPanel project={selectedProject} onSavePlanDraft={handleSavePlanDraft} />}
+                {currentView === 'plans' && <PlanPanel project={selectedProject} onStartExecution={handleStartExecution} />}
+                {currentView === 'execution' && executionPlanPath && (
+                  <ExecutionPanel project={selectedProject} planPath={executionPlanPath} onClose={handleCloseExecution} />
+                )}
+              </div>
+            </>
+          ) : (
+            <div className="card" style={{ minHeight: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: 'var(--spacing-lg)' }}>
+              <div style={{ maxWidth: '28rem' }}>
+                <div style={{ fontSize: '1.125rem', fontWeight: 600, marginBottom: 'var(--spacing-sm)' }}>Select a project</div>
+                <div className="text-sm text-dim">
+                  The project list is on the left. When you pick one, the thread list and plan tools appear here.
+                </div>
+              </div>
+            </div>
+          )}
+        </section>
       </main>
 
       {savingPlan && (

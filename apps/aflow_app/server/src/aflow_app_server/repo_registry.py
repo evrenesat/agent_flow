@@ -61,9 +61,9 @@ class RepoRegistry:
         """List all registered repositories."""
         return list(self._repos.values())
 
-    def get_repo(self, repo_id: str) -> RepoInfo | None:
+    def get_repo(self, project_id: str) -> RepoInfo | None:
         """Get a repository by ID."""
-        return self._repos.get(repo_id)
+        return self._repos.get(project_id)
 
     def add_repo(self, path: str, name: str | None = None) -> RepoInfo:
         """Add a repository to the registry.
@@ -78,63 +78,63 @@ class RepoRegistry:
         Raises:
             RepoRegistryError: If the path doesn't exist or is not a git root.
         """
-        repo_path = Path(path).expanduser().resolve()
+        project_path = Path(path).expanduser().resolve()
 
-        if not repo_path.exists():
-            raise RepoRegistryError(f"Path does not exist: {repo_path}")
+        if not project_path.exists():
+            raise RepoRegistryError(f"Path does not exist: {project_path}")
 
-        if not repo_path.is_dir():
-            raise RepoRegistryError(f"Path is not a directory: {repo_path}")
+        if not project_path.is_dir():
+            raise RepoRegistryError(f"Path is not a directory: {project_path}")
 
-        is_git = self._is_git_root(repo_path)
+        is_git = self._is_git_root(project_path)
 
         # Check for existing repo with same path
         for existing in self._repos.values():
-            if existing.path == repo_path:
+            if existing.path == project_path:
                 raise RepoRegistryError(f"Repository already registered with id: {existing.id}")
 
-        repo_id = str(uuid4())[:8]
-        repo_name = name or repo_path.name
+        project_id = str(uuid4())[:8]
+        repo_name = name or project_path.name
 
         repo = RepoInfo(
-            id=repo_id,
+            id=project_id,
             name=repo_name,
-            path=repo_path,
+            path=project_path,
             is_git_root=is_git,
             registered_at=datetime.now(timezone.utc),
         )
 
-        self._repos[repo_id] = repo
+        self._repos[project_id] = repo
         self._save()
 
         return repo
 
-    def remove_repo(self, repo_id: str) -> bool:
+    def remove_repo(self, project_id: str) -> bool:
         """Remove a repository from the registry.
 
         Args:
-            repo_id: ID of the repository to remove.
+            project_id: ID of the project to remove.
 
         Returns:
             True if the repo was removed, False if it didn't exist.
         """
-        if repo_id in self._repos:
-            del self._repos[repo_id]
+        if project_id in self._repos:
+            del self._repos[project_id]
             self._save()
             return True
         return False
 
-    def update_repo(self, repo_id: str, name: str | None = None) -> RepoInfo | None:
+    def update_repo(self, project_id: str, name: str | None = None) -> RepoInfo | None:
         """Update a repository's metadata.
 
         Args:
-            repo_id: ID of the repository to update.
+            project_id: ID of the project to update.
             name: New name for the repo.
 
         Returns:
             Updated RepoInfo or None if repo doesn't exist.
         """
-        repo = self._repos.get(repo_id)
+        repo = self._repos.get(project_id)
         if repo is None:
             return None
 
@@ -146,7 +146,7 @@ class RepoRegistry:
                 is_git_root=repo.is_git_root,
                 registered_at=repo.registered_at,
             )
-            self._repos[repo_id] = repo
+            self._repos[project_id] = repo
             self._save()
 
         return repo

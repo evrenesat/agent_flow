@@ -1,0 +1,258 @@
+"""Tests for project discovery, overrides, and Codex thread association."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from aflow_app_server.codex_thread_gateway import CodexThreadPage
+from aflow_app_server.models import CodexThread
+from aflow_app_server.project_catalog import ProjectCatalog
+from aflow_app_server.project_overrides import ProjectOverridesStore
+
+
+@dataclass
+class FakeThreadGateway:
+    """Minimal thread gateway used to surface thread cwd values."""
+
+    threads: list[CodexThread]
+
+    def list_threads(self, **kwargs: Any) -> CodexThreadPage:
+        return CodexThreadPage(threads=self.threads, next_cursor=None)
+
+
+def _make_git_repo(path: Path) -> Path:
+    path.mkdir(parents=True)
+    (path / ".git").mkdir()
+    return path
+
+
+def _make_thread(thread_id: str, cwd: Path) -> CodexThread:
+    return CodexThread(
+        id=thread_id,
+        preview="preview",
+        ephemeral=False,
+        model_provider="openai",
+        created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        updated_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        status={"type": "active"},
+        path=cwd / ".codex" / thread_id,
+        cwd=str(cwd),
+        cli_version="1.2.3",
+        source="app-server",
+        agent_nickname=None,
+        agent_role=None,
+        git_info=None,
+        name=thread_id,
+        turns=[],
+    )
+
+
+def test_discovers_local_git_roots_and_stabilizes_ids(tmp_path: Path) -> None:
+    projects_home = tmp_path / "code"
+    alpha = _make_git_repo(projects_home / "alpha")
+    bravo = _make_git_repo(projects_home / "bravo")
+    (projects_home / "notes").mkdir(parents=True)
+
+    store_path = tmp_path / "project_overrides.json"
+    catalog = ProjectCatalog(projects_home, store_path)
+
+    first_snapshot = catalog.list_projects()
+    assert [project.current_path for project in first_snapshot] == [alpha, bravo]
+    assert all(project.detection_source == "local_git_root" for project in first_snapshot)
+    assert all(project.linked_thread_count == 0 for project in first_snapshot)
+
+    first_ids = {project.current_path: project.id for project in first_snapshot}
+    second_snapshot = ProjectCatalog(projects_home, store_path).list_projects()
+    assert {project.current_path: project.id for project in second_snapshot} == first_ids
+
+
+def test_merges_thread_cwds_into_catalog(tmp_path: Path) -> None:
+    projects_home = tmp_path / "code"
+    alpha = _make_git_repo(projects_home / "alpha")
+    thread_only = tmp_path / "outside" / "thread-only"
+    thread_only.mkdir(parents=True)
+
+    gateway = FakeThreadGateway(
+        threads=[
+            _make_thread("thread-1", alpha),
+            _make_thread("thread-2", thread_only),
+        ]
+    )
+    catalog = ProjectCatalog(projects_home, tmp_path / "project_overrides.json")
+
+    projects = catalog.list_projects(thread_gateway=gateway)
+    by_path = {project.current_path: project for project in projects}
+
+    assert by_path[alpha].linked_thread_count == 1
+    assert by_path[alpha].detection_source == "local_git_root+codex_thread_cwd"
+    assert by_path[thread_only].linked_thread_count == 1
+    assert by_path[thread_only].detection_source == "codex_thread_cwd"
+    assert by_path[thread_only].is_git_root is False
+
+
+def test_moved_projects_keep_old_threads_visible(tmp_path: Path) -> None:
+    projects_home = tmp_path / "code"
+    old_path = _make_git_repo(projects_home / "legacy")
+    new_path = projects_home / "renamed"
+    thread = _make_thread("thread-1", old_path)
+
+    catalog = ProjectCatalog(projects_home, tmp_path / "project_overrides.json")
+    initial = catalog.list_projects(thread_gateway=FakeThreadGateway([thread]))
+    project = initial[0]
+
+    old_path.rename(new_path)
+    updated = catalog.update_project(project.id, display_name="Renamed project", current_path=new_path)
+    assert updated is not None
+    assert updated.current_path == new_path
+    assert old_path in updated.historical_aliases
+
+    refreshed = ProjectCatalog(projects_home, tmp_path / "project_overrides.json").list_projects(
+        thread_gateway=FakeThreadGateway([thread])
+    )
+    project_by_id = {project.id: project for project in refreshed}[project.id]
+    assert project_by_id.current_path == new_path
+    assert old_path in project_by_id.historical_aliases
+    assert project_by_id.linked_thread_count == 1
+
+    by_alias = ProjectCatalog(projects_home, tmp_path / "project_overrides.json").resolve_project_for_path(
+        old_path,
+        thread_gateway=FakeThreadGateway([thread]),
+    )
+    assert by_alias is not None
+    assert by_alias.id == project.id
+
+
+def test_reused_historical_path_creates_a_distinct_project(tmp_path: Path) -> None:
+    """A new repo at an old alias path should not get collapsed into the moved project."""
+    projects_home = tmp_path / "code"
+    legacy_path = _make_git_repo(projects_home / "legacy")
+    store_path = tmp_path / "project_overrides.json"
+    catalog = ProjectCatalog(projects_home, store_path)
+
+    initial = catalog.list_projects()
+    assert len(initial) == 1
+    moved_project = initial[0]
+
+    renamed_path = projects_home / "renamed"
+    legacy_path.rename(renamed_path)
+    updated = catalog.update_project(
+        moved_project.id,
+        display_name="Renamed project",
+        current_path=renamed_path,
+    )
+    assert updated is not None
+
+    _make_git_repo(legacy_path)
+    refreshed = ProjectCatalog(projects_home, store_path).list_projects()
+
+    assert {project.current_path for project in refreshed} == {renamed_path, legacy_path}
+    assert len({project.id for project in refreshed}) == 2
+
+    by_path = {project.current_path: project for project in refreshed}
+    assert by_path[renamed_path].id == moved_project.id
+    assert by_path[legacy_path].id != moved_project.id
+    assert legacy_path in by_path[renamed_path].historical_aliases
+
+
+def test_reused_historical_path_prefers_alias_owner_for_threads(tmp_path: Path) -> None:
+    projects_home = tmp_path / "code"
+    legacy_path = _make_git_repo(projects_home / "legacy")
+    store_path = tmp_path / "project_overrides.json"
+    catalog = ProjectCatalog(projects_home, store_path)
+
+    initial = catalog.list_projects()
+    moved_project = initial[0]
+
+    renamed_path = projects_home / "renamed"
+    legacy_path.rename(renamed_path)
+    updated = catalog.update_project(
+        moved_project.id,
+        display_name="Renamed project",
+        current_path=renamed_path,
+    )
+    assert updated is not None
+
+    _make_git_repo(legacy_path)
+    thread = _make_thread("thread-1", legacy_path)
+    gateway = FakeThreadGateway([thread])
+    refreshed_catalog = ProjectCatalog(projects_home, store_path)
+
+    resolved = refreshed_catalog.resolve_project_for_path(legacy_path, thread_gateway=gateway)
+    assert resolved is not None
+    assert resolved.id == moved_project.id
+
+    projects = {project.current_path: project for project in refreshed_catalog.list_projects(thread_gateway=gateway)}
+    assert projects[renamed_path].linked_thread_count == 1
+    assert projects[legacy_path].linked_thread_count == 0
+
+
+def test_project_ownership_helper_prefers_alias_owner(tmp_path: Path) -> None:
+    projects_home = tmp_path / "code"
+    legacy_path = _make_git_repo(projects_home / "legacy")
+    store_path = tmp_path / "project_overrides.json"
+    catalog = ProjectCatalog(projects_home, store_path)
+
+    initial = catalog.list_projects()
+    moved_project = initial[0]
+
+    renamed_path = projects_home / "renamed"
+    legacy_path.rename(renamed_path)
+    updated = catalog.update_project(
+        moved_project.id,
+        display_name="Renamed project",
+        current_path=renamed_path,
+    )
+    assert updated is not None
+
+    _make_git_repo(legacy_path)
+    thread = _make_thread("thread-1", legacy_path)
+    gateway = FakeThreadGateway([thread])
+    refreshed_catalog = ProjectCatalog(projects_home, store_path)
+    projects = refreshed_catalog.list_projects(thread_gateway=gateway)
+    by_path = {project.current_path: project for project in projects}
+
+    assert refreshed_catalog.project_owns_path(
+        by_path[renamed_path],
+        legacy_path,
+        projects=projects,
+    ) is True
+    assert refreshed_catalog.project_owns_path(
+        by_path[legacy_path],
+        legacy_path,
+        projects=projects,
+    ) is False
+
+
+def test_migrates_legacy_repo_registry_once(tmp_path: Path) -> None:
+    legacy_registry_path = tmp_path / "repos.json"
+    project_path = _make_git_repo(tmp_path / "code" / "legacy")
+    legacy_registry_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "repos": [
+                    {
+                        "id": "repo-legacy",
+                        "name": "Legacy project",
+                        "path": str(project_path),
+                        "is_git_root": True,
+                        "registered_at": "2024-01-01T00:00:00+00:00",
+                    }
+                ],
+            }
+        )
+    )
+
+    overrides_path = tmp_path / "project_overrides.json"
+    store = ProjectOverridesStore(overrides_path, legacy_registry_path=legacy_registry_path)
+
+    record = store.get("repo-legacy")
+    assert record is not None
+    assert record.display_name == "Legacy project"
+    assert record.current_path == project_path
+    assert record.registered_at.isoformat() == "2024-01-01T00:00:00+00:00"
+    assert overrides_path.exists()

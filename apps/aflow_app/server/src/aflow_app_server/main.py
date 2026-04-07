@@ -20,19 +20,20 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
-from .aflow_service import AflowService, AflowServiceError
-from .codex_backend import CodexBackend, HttpCodexBackend
+from .aflow_service import AflowService
+from .codex_app_server_client import CodexAppServerClient
+from .codex_thread_gateway import CodexThreadGateway
 import aflow_app_server.codex_routes as codex_routes_module
 from .config import ServerConfig
-from .models import ExecutionRequest, ExecutionStatus, PlanInfo, RepoInfo
+from .models import ExecutionRequest, ExecutionStatus
+from .project_catalog import ProjectCatalog
 from .plan_store import PlanStore
-from .repo_registry import RepoRegistry, RepoRegistryError
 from .transcription import TranscriptionClient, TranscriptionError, create_transcription_client
 
 
 # Global state
 _config: ServerConfig | None = None
-_registry: RepoRegistry | None = None
+_project_catalog: ProjectCatalog | None = None
 _service: AflowService | None = None
 _transcription_client: TranscriptionClient | None = None
 _seen_plugin_probe_fingerprints: set[str] = set()
@@ -109,11 +110,11 @@ def get_config() -> ServerConfig:
     return _config
 
 
-def get_registry() -> RepoRegistry:
-    """Get the repo registry."""
-    if _registry is None:
+def get_project_catalog() -> ProjectCatalog:
+    """Get the project catalog."""
+    if _project_catalog is None:
         raise RuntimeError("Server not initialized")
-    return _registry
+    return _project_catalog
 
 
 def get_service() -> AflowService:
@@ -151,30 +152,41 @@ async def verify_token(
     return provided_token
 
 
-def get_codex_backend(config: ServerConfig = Depends(get_config)) -> CodexBackend:
-    """Get or create a Codex backend instance."""
-    if not config.codex_server_url:
+def get_codex_backend(config: ServerConfig = Depends(get_config)) -> CodexAppServerClient:
+    """Get or create a Codex thread gateway instance."""
+    if not config.codex_app_server_url:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Codex server not configured",
+            detail="Codex app-server not configured",
         )
 
-    return HttpCodexBackend(
-        server_url=config.codex_server_url,
-        auth_token=config.codex_server_token,
+    return CodexAppServerClient(
+        server_url=config.codex_app_server_url,
+        auth_token=config.codex_app_server_token,
     )
 
 
-def get_plan_store_factory(registry: RepoRegistry = Depends(get_registry)):
+def _get_codex_thread_gateway(config: ServerConfig) -> CodexThreadGateway | None:
+    """Return a thread gateway when Codex is configured, otherwise None."""
+    if not config.codex_app_server_url:
+        return None
+
+    return CodexAppServerClient(
+        server_url=config.codex_app_server_url,
+        auth_token=config.codex_app_server_token,
+    )
+
+
+def get_plan_store_factory(project_catalog: ProjectCatalog = Depends(get_project_catalog)):
     """Factory for creating plan stores."""
-    def _get_plan_store(repo_id: str) -> PlanStore:
-        repo = registry.get_repo(repo_id)
-        if repo is None:
+    def _get_plan_store(project_id: str) -> PlanStore:
+        project = project_catalog.get_project(project_id)
+        if project is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Repository not found",
+                detail="Project not found",
             )
-        return PlanStore(repo.path)
+        return PlanStore(project.current_path)
     return _get_plan_store
 
 
@@ -214,14 +226,18 @@ def _build_uvicorn_log_config() -> dict[str, Any]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize server state on startup."""
-    global _config, _registry, _service, _transcription_client
+    global _config, _project_catalog, _service, _transcription_client
 
     _config = ServerConfig.from_env()
     errors = _config.validate()
     if errors:
         raise RuntimeError(f"Configuration errors: {', '.join(errors)}")
 
-    _registry = RepoRegistry(_config.repo_registry_path)
+    _project_catalog = ProjectCatalog(
+        _config.projects_home,
+        _config.project_overrides_path,
+        legacy_registry_path=_config.repo_registry_path,
+    )
     _service = AflowService()
     _transcription_client = create_transcription_client(
         _config.transcription_url,
@@ -232,7 +248,7 @@ async def lifespan(app: FastAPI):
 
     # Cleanup
     _config = None
-    _registry = None
+    _project_catalog = None
     _service = None
     _transcription_client = None
 
@@ -257,24 +273,21 @@ async def block_local_plugin_probe(request: Request, call_next):
 
 # Override codex_routes dependencies using FastAPI's dependency override system
 app.dependency_overrides[codex_routes_module._get_config] = get_config
-app.dependency_overrides[codex_routes_module._get_registry] = get_registry
+app.dependency_overrides[codex_routes_module._get_project_catalog] = get_project_catalog
 
 # Include Codex routes with auth
 app.include_router(codex_routes_module.router, dependencies=[Depends(verify_token)])
 
 
 # Request/Response models
-class AddRepoRequest(BaseModel):
-    path: str
-    name: str | None = None
-
-
-class UpdateRepoRequest(BaseModel):
-    name: str
+class UpdateProjectRequest(BaseModel):
+    display_name: str | None = None
+    current_path: str | None = None
+    alias: str | None = None
 
 
 class ExecuteRequest(BaseModel):
-    repo_id: str
+    project_id: str
     plan_path: str
     workflow_name: str | None = None
     team: str | None = None
@@ -290,83 +303,68 @@ class StartupResponse(BaseModel):
     run_id: str | None = None
 
 
-# Repository endpoints
-@app.get("/api/repos")
-async def list_repos(
+# Project endpoints
+@app.get("/api/projects")
+async def list_projects(
     _: str = Depends(verify_token),
-    registry: RepoRegistry = Depends(get_registry),
+    project_catalog: ProjectCatalog = Depends(get_project_catalog),
+    config: ServerConfig = Depends(get_config),
 ) -> list[dict[str, Any]]:
-    """List all registered repositories."""
-    repos = registry.list_repos()
-    return [repo.to_dict() for repo in repos]
+    """List all discovered projects."""
+    projects = project_catalog.list_projects(thread_gateway=_get_codex_thread_gateway(config))
+    return [project.to_dict() for project in projects]
 
 
-@app.post("/api/repos", status_code=status.HTTP_201_CREATED)
-async def add_repo(
-    request: AddRepoRequest,
+@app.get("/api/projects/{project_id}")
+async def get_project(
+    project_id: str,
     _: str = Depends(verify_token),
-    registry: RepoRegistry = Depends(get_registry),
+    project_catalog: ProjectCatalog = Depends(get_project_catalog),
+    config: ServerConfig = Depends(get_config),
 ) -> dict[str, Any]:
-    """Add a repository to the registry."""
-    try:
-        repo = registry.add_repo(request.path, request.name)
-        return repo.to_dict()
-    except RepoRegistryError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    """Get a specific project."""
+    project = project_catalog.get_project(
+        project_id,
+        thread_gateway=_get_codex_thread_gateway(config),
+    )
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    return project.to_dict()
 
 
-@app.get("/api/repos/{repo_id}")
-async def get_repo(
-    repo_id: str,
+@app.patch("/api/projects/{project_id}")
+async def update_project(
+    project_id: str,
+    request: UpdateProjectRequest,
     _: str = Depends(verify_token),
-    registry: RepoRegistry = Depends(get_registry),
+    project_catalog: ProjectCatalog = Depends(get_project_catalog),
 ) -> dict[str, Any]:
-    """Get a specific repository."""
-    repo = registry.get_repo(repo_id)
-    if repo is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
-    return repo.to_dict()
-
-
-@app.patch("/api/repos/{repo_id}")
-async def update_repo(
-    repo_id: str,
-    request: UpdateRepoRequest,
-    _: str = Depends(verify_token),
-    registry: RepoRegistry = Depends(get_registry),
-) -> dict[str, Any]:
-    """Update a repository's metadata."""
-    repo = registry.update_repo(repo_id, name=request.name)
-    if repo is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
-    return repo.to_dict()
-
-
-@app.delete("/api/repos/{repo_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def remove_repo(
-    repo_id: str,
-    _: str = Depends(verify_token),
-    registry: RepoRegistry = Depends(get_registry),
-) -> None:
-    """Remove a repository from the registry."""
-    if not registry.remove_repo(repo_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
+    """Update a project's override metadata."""
+    project = project_catalog.update_project(
+        project_id,
+        display_name=request.display_name,
+        current_path=request.current_path,
+        alias=request.alias,
+    )
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    return project.to_dict()
 
 
 # Plan endpoints
-@app.get("/api/repos/{repo_id}/plans")
+@app.get("/api/projects/{project_id}/plans")
 async def list_plans(
-    repo_id: str,
+    project_id: str,
     _: str = Depends(verify_token),
-    registry: RepoRegistry = Depends(get_registry),
+    project_catalog: ProjectCatalog = Depends(get_project_catalog),
     service: AflowService = Depends(get_service),
 ) -> list[dict[str, Any]]:
-    """List all plan files for a repository."""
-    repo = registry.get_repo(repo_id)
-    if repo is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
+    """List all plan files for a project."""
+    project = project_catalog.get_project(project_id)
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
-    plans = service.list_plans(repo.path)
+    plans = service.list_plans(project.current_path)
     return [plan.to_dict() for plan in plans]
 
 
@@ -375,16 +373,16 @@ async def list_plans(
 async def start_execution(
     request: ExecuteRequest,
     _: str = Depends(verify_token),
-    registry: RepoRegistry = Depends(get_registry),
+    project_catalog: ProjectCatalog = Depends(get_project_catalog),
     service: AflowService = Depends(get_service),
 ) -> StartupResponse:
     """Start a workflow execution."""
-    repo = registry.get_repo(request.repo_id)
-    if repo is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
+    project = project_catalog.get_project(request.project_id)
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
     exec_request = ExecutionRequest(
-        repo_id=request.repo_id,
+        project_id=request.project_id,
         plan_path=request.plan_path,
         workflow_name=request.workflow_name,
         team=request.team,
@@ -393,7 +391,7 @@ async def start_execution(
         extra_instructions=request.extra_instructions,
     )
 
-    result = service.prepare_execution(repo.path, exec_request)
+    result = service.prepare_execution(project.current_path, exec_request)
 
     if result.error:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result.error)
@@ -402,7 +400,7 @@ async def start_execution(
         return StartupResponse(prepared=False, question=result.question)
 
     if result.prepared_run:
-        run_id = await service.execute_workflow_async(result.prepared_run, request.repo_id)
+        run_id = await service.execute_workflow_async(result.prepared_run, request.project_id)
         return StartupResponse(prepared=True, run_id=run_id)
 
     raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Unexpected startup state")
@@ -504,12 +502,12 @@ async def transcribe_audio(
     client: TranscriptionClient = Depends(get_transcription_client),
 ) -> TranscriptionResponse:
     """Transcribe an uploaded audio file."""
-    if not file.filename:
+    if not file:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No file provided")
 
     temp_file = None
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as temp_file:
+        with tempfile.NamedTemporaryFile(delete=False) as temp_file:
             content = await file.read()
             temp_file.write(content)
             temp_path = Path(temp_file.name)

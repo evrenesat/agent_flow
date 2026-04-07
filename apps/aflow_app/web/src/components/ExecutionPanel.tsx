@@ -1,14 +1,14 @@
 import { useState, useEffect, useRef } from 'react'
-import type { ExecutionEvent, RepoInfo } from '../types'
+import type { ExecutionEvent, ProjectInfo } from '../types'
 import * as api from '../api'
 
 interface ExecutionPanelProps {
-  repo: RepoInfo
+  project: ProjectInfo
   planPath: string
   onClose: () => void
 }
 
-export function ExecutionPanel({ repo, planPath, onClose }: ExecutionPanelProps) {
+export function ExecutionPanel({ project, planPath, onClose }: ExecutionPanelProps) {
   const [runId, setRunId] = useState<string | null>(null)
   const [events, setEvents] = useState<ExecutionEvent[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -47,7 +47,7 @@ export function ExecutionPanel({ repo, planPath, onClose }: ExecutionPanelProps)
       setStarting(true)
       setError(null)
       const result = await api.startExecution({
-        repo_id: repo.id,
+        project_id: project.id,
         plan_path: planPath,
       })
       setRunId(result.run_id)

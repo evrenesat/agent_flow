@@ -1,230 +1,273 @@
-"""Tests for Codex backend adapter."""
+"""Tests for the Codex app-server thread client."""
 
 from __future__ import annotations
 
+import json
+from contextlib import AbstractContextManager
 from datetime import datetime, timezone
-from unittest.mock import Mock, patch
+from typing import Any
 
-import httpx
 import pytest
 
-from aflow_app_server.codex_backend import (
-    CodexBackendError,
-    CodexMessage,
-    CodexSession,
-    HttpCodexBackend,
-)
+from aflow_app_server.codex_app_server_client import CodexAppServerClient
+from aflow_app_server.codex_thread_gateway import UserInputText
 
 
-@pytest.fixture
-def mock_httpx_client():
-    """Mock httpx client for testing."""
-    with patch("aflow_app_server.codex_backend.httpx.Client") as mock_client_class:
-        mock_client = Mock()
-        mock_client_class.return_value = mock_client
-        yield mock_client
+class FakeWebSocket(AbstractContextManager["FakeWebSocket"]):
+    """Simple websocket double for JSON-RPC request/response tests."""
+
+    def __init__(self, responses: list[dict[str, Any]]) -> None:
+        self.responses = responses
+        self.sent_messages: list[dict[str, Any]] = []
+        self.uri: str | None = None
+        self.additional_headers: dict[str, str] | None = None
+
+    def send(self, payload: str) -> None:
+        self.sent_messages.append(json.loads(payload))
+
+    def recv(self) -> str:
+        if not self.responses:
+            raise AssertionError("Fake websocket received more reads than responses")
+        return json.dumps(self.responses.pop(0))
+
+    def __enter__(self) -> "FakeWebSocket":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
 
 
-def test_list_sessions_success(mock_httpx_client):
-    """Test listing sessions successfully."""
-    mock_response = Mock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = {
-        "sessions": [
+def make_factory(fake_socket: FakeWebSocket):
+    def factory(uri: str, **kwargs: Any) -> FakeWebSocket:
+        fake_socket.uri = uri
+        fake_socket.additional_headers = kwargs.get("additional_headers")
+        return fake_socket
+
+    return factory
+
+
+def thread_payload(*, thread_id: str = "thread-1", include_turns: bool = True) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "id": thread_id,
+        "preview": "hello world",
+        "ephemeral": False,
+        "modelProvider": "openai",
+        "createdAt": 1710000000,
+        "updatedAt": 1710000300,
+        "status": {"type": "active", "activeFlags": ["waitingOnUserInput"]},
+        "path": "/tmp/project/.codex/thread-1",
+        "cwd": "/tmp/project",
+        "cliVersion": "1.2.3",
+        "source": "app-server",
+        "agentNickname": None,
+        "agentRole": None,
+        "gitInfo": {"branch": "main"},
+        "name": "Example thread",
+        "turns": [],
+    }
+    if include_turns:
+        payload["turns"] = [
             {
-                "id": "session-1",
-                "name": "Test Session",
-                "repo_path": "/path/to/repo",
-                "created_at": "2024-01-01T00:00:00Z",
-                "updated_at": "2024-01-02T00:00:00Z",
-                "message_count": 5,
+                "id": "turn-1",
+                "status": "completed",
+                "items": [
+                    {
+                        "type": "userMessage",
+                        "id": "item-1",
+                        "content": [
+                            {"type": "text", "text": "hello", "text_elements": []}
+                        ],
+                    },
+                ],
+                "error": None,
             }
         ]
-    }
-    mock_httpx_client.get.return_value = mock_response
-
-    backend = HttpCodexBackend("http://localhost:8000", "test-token")
-    sessions = backend.list_sessions()
-
-    assert len(sessions) == 1
-    assert sessions[0].id == "session-1"
-    assert sessions[0].name == "Test Session"
-    assert sessions[0].repo_path == "/path/to/repo"
-    assert sessions[0].message_count == 5
+    return payload
 
 
-def test_list_sessions_with_repo_filter(mock_httpx_client):
-    """Test listing sessions with repo path filter."""
-    mock_response = Mock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = {"sessions": []}
-    mock_httpx_client.get.return_value = mock_response
-
-    backend = HttpCodexBackend("http://localhost:8000")
-    backend.list_sessions(repo_path="/path/to/repo")
-
-    mock_httpx_client.get.assert_called_once()
-    call_args = mock_httpx_client.get.call_args
-    assert call_args.kwargs["params"] == {"repo_path": "/path/to/repo"}
-
-
-def test_list_sessions_http_error(mock_httpx_client):
-    """Test listing sessions with HTTP error."""
-    mock_httpx_client.get.side_effect = httpx.HTTPError("Connection failed")
-
-    backend = HttpCodexBackend("http://localhost:8000")
-
-    with pytest.raises(CodexBackendError, match="Failed to list sessions"):
-        backend.list_sessions()
-
-
-def test_get_session_success(mock_httpx_client):
-    """Test getting a specific session."""
-    mock_response = Mock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = {
-        "id": "session-1",
-        "name": "Test Session",
-        "repo_path": None,
-        "created_at": "2024-01-01T00:00:00Z",
-        "updated_at": "2024-01-02T00:00:00Z",
-        "message_count": 3,
-    }
-    mock_httpx_client.get.return_value = mock_response
-
-    backend = HttpCodexBackend("http://localhost:8000")
-    session = backend.get_session("session-1")
-
-    assert session is not None
-    assert session.id == "session-1"
-    assert session.name == "Test Session"
-    assert session.repo_path is None
-
-
-def test_get_session_not_found(mock_httpx_client):
-    """Test getting a non-existent session."""
-    mock_response = Mock()
-    mock_response.status_code = 404
-    mock_httpx_client.get.return_value = mock_response
-
-    backend = HttpCodexBackend("http://localhost:8000")
-    session = backend.get_session("nonexistent")
-
-    assert session is None
-
-
-def test_fetch_messages_success(mock_httpx_client):
-    """Test fetching messages from a session."""
-    mock_response = Mock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = {
-        "messages": [
+def test_list_threads_request_shape_and_normalization() -> None:
+    fake = FakeWebSocket(
+        responses=[
             {
-                "id": "msg-1",
-                "role": "user",
-                "content": "Hello",
-                "timestamp": "2024-01-01T00:00:00Z",
-            },
-            {
-                "id": "msg-2",
-                "role": "assistant",
-                "content": "Hi there!",
-                "timestamp": "2024-01-01T00:00:01Z",
-            },
+            "jsonrpc": "2.0",
+            "id": "1",
+            "result": {
+                "data": [thread_payload()],
+                "nextCursor": "cursor-2",
+                },
+            }
         ]
-    }
-    mock_httpx_client.get.return_value = mock_response
+    )
+    client = CodexAppServerClient(
+        "ws://codex.example",
+        "secret-token",
+        connection_factory=make_factory(fake),
+    )
 
-    backend = HttpCodexBackend("http://localhost:8000")
-    messages = backend.fetch_messages("session-1")
+    page = client.list_threads(
+        cwd="/tmp/project",
+        search_term="thread",
+        limit=25,
+        cursor="cursor-1",
+        source_kinds=["interactive"],
+        archived=False,
+    )
 
-    assert len(messages) == 2
-    assert messages[0].role == "user"
-    assert messages[0].content == "Hello"
-    assert messages[1].role == "assistant"
-    assert messages[1].content == "Hi there!"
-
-
-def test_fetch_messages_with_limit(mock_httpx_client):
-    """Test fetching messages with a limit."""
-    mock_response = Mock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = {"messages": []}
-    mock_httpx_client.get.return_value = mock_response
-
-    backend = HttpCodexBackend("http://localhost:8000")
-    backend.fetch_messages("session-1", limit=10)
-
-    mock_httpx_client.get.assert_called_once()
-    call_args = mock_httpx_client.get.call_args
-    assert call_args.kwargs["params"] == {"limit": 10}
-
-
-def test_send_message_success(mock_httpx_client):
-    """Test sending a message to a session."""
-    mock_response = Mock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = {
-        "response": {
-            "id": "msg-3",
-            "role": "assistant",
-            "content": "Response text",
-            "timestamp": "2024-01-01T00:00:02Z",
+    assert fake.uri == "ws://codex.example"
+    assert fake.additional_headers == {"Authorization": "Bearer secret-token"}
+    assert fake.sent_messages == [
+        {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "thread/list",
+            "params": {
+                "cwd": "/tmp/project",
+                "searchTerm": "thread",
+                "limit": 25,
+                "cursor": "cursor-1",
+                "sourceKinds": ["interactive"],
+                "archived": False,
+            },
         }
+    ]
+    assert page.next_cursor == "cursor-2"
+    assert len(page.threads) == 1
+    thread = page.threads[0]
+    assert thread.id == "thread-1"
+    assert thread.cwd == "/tmp/project"
+    assert thread.status == {"type": "active", "activeFlags": ["waitingOnUserInput"]}
+    assert thread.created_at == datetime.fromtimestamp(1710000000, tz=timezone.utc)
+    assert thread.turns[0].id == "turn-1"
+
+
+def test_read_thread_includes_turn_history() -> None:
+    fake = FakeWebSocket(
+        responses=[
+            {
+                "jsonrpc": "2.0",
+                "id": "1",
+                "result": {"thread": thread_payload(include_turns=True)},
+            }
+        ]
+    )
+    client = CodexAppServerClient("ws://codex.example", connection_factory=make_factory(fake))
+
+    thread = client.read_thread("thread-1")
+
+    assert fake.sent_messages[0]["method"] == "thread/read"
+    assert fake.sent_messages[0]["params"] == {
+        "threadId": "thread-1",
+        "includeTurns": True,
     }
-    mock_httpx_client.post.return_value = mock_response
-
-    backend = HttpCodexBackend("http://localhost:8000")
-    response = backend.send_message("session-1", "Test message")
-
-    assert response.role == "assistant"
-    assert response.content == "Response text"
-    mock_httpx_client.post.assert_called_once()
+    assert thread.id == "thread-1"
+    assert thread.turns[0].items[0]["type"] == "userMessage"
+    assert thread.turns[0].items[0]["content"][0]["type"] == "text"
 
 
-def test_send_message_http_error(mock_httpx_client):
-    """Test sending a message with HTTP error."""
-    mock_httpx_client.post.side_effect = httpx.HTTPError("Connection failed")
+@pytest.mark.parametrize(
+    "method_name,call",
+    [
+        (
+            "thread/resume",
+            lambda client: client.resume_thread("thread-1", cwd="/tmp/new"),
+        ),
+        (
+            "thread/fork",
+            lambda client: client.fork_thread("thread-1", cwd="/tmp/new"),
+        ),
+    ],
+)
+def test_resume_and_fork_include_cwd_override(method_name: str, call) -> None:
+    fake = FakeWebSocket(
+        responses=[
+            {
+                "jsonrpc": "2.0",
+                "id": "1",
+                "result": {
+                    "thread": thread_payload(),
+                    "model": "o3",
+                    "modelProvider": "openai",
+                    "serviceTier": None,
+                    "cwd": "/tmp/new",
+                    "approvalPolicy": "auto",
+                    "approvalsReviewer": {"mode": "default"},
+                    "sandbox": {"mode": "workspace-write"},
+                    "reasoningEffort": "medium",
+                },
+            }
+        ]
+    )
+    client = CodexAppServerClient("ws://codex.example", connection_factory=make_factory(fake))
 
-    backend = HttpCodexBackend("http://localhost:8000")
+    result = call(client)
 
-    with pytest.raises(CodexBackendError, match="Failed to send message"):
-        backend.send_message("session-1", "Test message")
-
-
-def test_auth_headers():
-    """Test that auth headers are included when token is provided."""
-    with patch("aflow_app_server.codex_backend.httpx.Client") as mock_client_class:
-        mock_client = Mock()
-        mock_client_class.return_value = mock_client
-
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"sessions": []}
-        mock_client.get.return_value = mock_response
-
-        backend = HttpCodexBackend("http://localhost:8000", "secret-token")
-        backend.list_sessions()
-
-        call_args = mock_client.get.call_args
-        headers = call_args.kwargs["headers"]
-        assert headers["Authorization"] == "Bearer secret-token"
+    assert fake.sent_messages[0]["method"] == method_name
+    assert fake.sent_messages[0]["params"]["threadId"] == "thread-1"
+    assert fake.sent_messages[0]["params"]["cwd"] == "/tmp/new"
+    assert fake.sent_messages[0]["params"]["persistExtendedHistory"] is True
+    assert result.thread.cwd == "/tmp/project"
+    assert result.cwd == "/tmp/new"
+    assert result.model == "o3"
 
 
-def test_no_auth_headers():
-    """Test that no auth headers are included when token is not provided."""
-    with patch("aflow_app_server.codex_backend.httpx.Client") as mock_client_class:
-        mock_client = Mock()
-        mock_client_class.return_value = mock_client
+def test_start_turn_uses_turn_start_method() -> None:
+    fake = FakeWebSocket(
+        responses=[
+            {
+                "jsonrpc": "2.0",
+                "id": "1",
+                "result": {
+                        "turn": {
+                            "id": "turn-2",
+                        "status": "inProgress",
+                        "items": [],
+                        "error": None,
+                    }
+                },
+            }
+        ]
+    )
+    client = CodexAppServerClient("ws://codex.example", connection_factory=make_factory(fake))
 
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"sessions": []}
-        mock_client.get.return_value = mock_response
+    turn = client.start_turn(
+        "thread-1",
+        input=[UserInputText(type="text", text="hello", text_elements=[])],
+        cwd="/tmp/project",
+        approval_policy="never",
+        model="o3",
+        service_tier="default",
+        effort="high",
+        summary="short",
+        personality="concise",
+    )
 
-        backend = HttpCodexBackend("http://localhost:8000")
-        backend.list_sessions()
+    assert fake.sent_messages[0]["method"] == "turn/start"
+    assert fake.sent_messages[0]["params"]["threadId"] == "thread-1"
+    assert fake.sent_messages[0]["params"]["cwd"] == "/tmp/project"
+    assert fake.sent_messages[0]["params"]["input"] == [
+        {"type": "text", "text": "hello", "text_elements": []}
+    ]
+    assert "modelProvider" not in fake.sent_messages[0]["params"]
+    assert turn.id == "turn-2"
+    assert turn.status == "inProgress"
 
-        call_args = mock_client.get.call_args
-        headers = call_args.kwargs["headers"]
-        assert "Authorization" not in headers
+
+def test_set_thread_name_uses_set_name_method() -> None:
+    fake = FakeWebSocket(
+        responses=[
+            {
+                "jsonrpc": "2.0",
+                "id": "1",
+                "result": {},
+            }
+        ]
+    )
+    client = CodexAppServerClient("ws://codex.example", connection_factory=make_factory(fake))
+
+    client.set_thread_name("thread-1", "Renamed thread")
+
+    assert fake.sent_messages[0]["method"] == "thread/setName"
+    assert fake.sent_messages[0]["params"] == {
+        "threadId": "thread-1",
+        "name": "Renamed thread",
+    }
