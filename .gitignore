@@ -3,6 +3,6 @@ __pycache__/
 *.pyc
 temp/
 .aflow/
-/plans/backups/
 /skills/.system/*
 /codex-ralph-loop-plugin/ralph-loop-claude/*
+t   
