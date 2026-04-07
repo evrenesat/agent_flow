@@ -1,3 +1,21 @@
+## 2026-04-07 — Harness recovery docs and public analyze API (Checkpoint 5)
+
+### What changed
+
+- Documented config-driven harness recovery in README.md and ARCHITECTURE.md, including ordered recovery rules, `backup_team` chaining, progress gating, and the bundled `aflow-harness-recovery-lead` fallback skill.
+- Updated the bundled skill inventory docs to list `aflow-harness-recovery-lead` as part of the nine default bundled skills.
+- Added README coverage for the public `AnalyzeRequest` / `analyze_runs()` API so callers can use run analysis without shelling out to `aflow analyze`.
+
+### Why
+
+- Users need the documented recovery flow to match the runtime behavior that was added in earlier checkpoints.
+- The public library surface should describe analysis entry points alongside the CLI entry point.
+
+### Gotchas
+
+- Recovery only applies when the harness turn did not advance the plan snapshot.
+- The fallback recovery path expects the bundled skill contract, not ad hoc prose.
+
 ## 2026-04-07 — Audio transcription and documentation (Checkpoint 6)
 
 ### What changed

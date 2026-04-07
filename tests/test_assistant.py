@@ -501,6 +501,72 @@ class AflowAnalyzeCliTests(unittest.TestCase):
             assert payload["analysis_scope"]["run_count_considered"] == 2
             assert len(payload["runs"]) == 2
 
+    def test_aflow_analyze_surfaces_recovery_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            runs_root = repo_root / ".aflow" / "runs"
+            run_dir = runs_root / "20260401T000500Z-recovery"
+            _write_json(
+                run_dir / "run.json",
+                {
+                    "status": "failed",
+                    "workflow_name": "test",
+                    "turns_completed": 1,
+                    "failure_reason": "harness failure",
+                    "recovery_summary": {
+                        "action": "switch_to_backup_team_and_retry",
+                        "consecutive_count": 1,
+                        "delay_seconds": 0,
+                        "executed": True,
+                        "from_team": "team-a",
+                        "matched_terms": ["quota"],
+                        "match_terms": ["quota"],
+                        "reason": "switch to the backup team",
+                        "rejection_reason": None,
+                        "source": "team_lead",
+                        "suggested_action": "switch_to_backup_team_and_retry",
+                        "suggested_keywords": ["throttled", "quota"],
+                        "to_team": "team-b",
+                    },
+                    "recovery_history": [],
+                },
+            )
+            _write_turn(
+                run_dir,
+                1,
+                result={
+                    "turn_number": 1,
+                    "step_name": "implement",
+                    "status": "failed",
+                    "returncode": 1,
+                    "snapshot_before": _snapshot(),
+                    "snapshot_after": _snapshot(),
+                    "recovery_action": "switch_to_backup_team_and_retry",
+                    "recovery_consecutive_count": 1,
+                    "recovery_delay_seconds": 0,
+                    "recovery_executed": True,
+                    "recovery_from_team": "team-a",
+                    "recovery_matched_terms": ["quota"],
+                    "recovery_match_terms": ["quota"],
+                    "recovery_reason": "switch to the backup team",
+                    "recovery_rejection_reason": None,
+                    "recovery_source": "team_lead",
+                    "recovery_suggested_action": "switch_to_backup_team_and_retry",
+                    "recovery_suggested_keywords": ["throttled", "quota"],
+                    "recovery_to_team": "team-b",
+                },
+            )
+
+            payload = self._run_aflow_analyze("20260401T000500Z-recovery", "--repo-root", str(repo_root))
+            assert payload["analysis_scope"]["selection"] == "explicit_run_id"
+            assert payload["run"]["recovery_summary"]["action"] == "switch_to_backup_team_and_retry"
+            assert payload["run"]["recovery_summary"]["source"] == "team_lead"
+            assert payload["run"]["focus_turns"][0]["recovery"]["source"] == "team_lead"
+            assert payload["run"]["focus_turns"][0]["recovery"]["to_team"] == "team-b"
+            assert "harness_recovery_team_lead" in payload["run"]["failure"]["signals"]
+            assert "harness_recovery_team_switch" in payload["run"]["failure"]["signals"]
+            assert "harness_recovery_keyword_suggestions" in payload["run"]["failure"]["signals"]
+
     def test_aflow_analyze_env_var_takes_priority_over_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = Path(tmpdir)

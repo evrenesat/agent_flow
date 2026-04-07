@@ -15,21 +15,25 @@ from .events import (
     QuestionRequiredEvent,
 )
 from .models import (
+    AnalyzeRequest,
     PreparedRun,
     StartupContext,
     StartupQuestion,
     StartupQuestionKind,
     StartupRequest,
 )
+from .analyze import analyze_runs
 from .runner import RunnerConfig, WorkflowRunner, execute_workflow
 from .startup import prepare_startup, prepare_startup_with_answer, StartupError
 
 __all__ = [
     "PreparedRun",
+    "AnalyzeRequest",
     "StartupContext",
     "StartupQuestion",
     "StartupQuestionKind",
     "StartupRequest",
+    "analyze_runs",
     "prepare_startup",
     "prepare_startup_with_answer",
     "StartupError",

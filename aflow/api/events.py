@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Callable, Literal
 
 if TYPE_CHECKING:
     from aflow.plan import PlanSnapshot
-    from aflow.run_state import TurnRecord, WorkflowEndReason
+    from aflow.run_state import HarnessRecoveryContext, TurnRecord, WorkflowEndReason
 
 
 class ExecutionEventType(str, Enum):
@@ -136,6 +136,7 @@ class TurnFinishedEvent:
     stderr_artifact_path: str | None
     returncode: int | None
     error: str | None
+    recovery: HarnessRecoveryContext | None
 
     @classmethod
     def create(
@@ -149,6 +150,7 @@ class TurnFinishedEvent:
         stderr_artifact_path: str | None = None,
         returncode: int | None = None,
         error: str | None = None,
+        recovery: HarnessRecoveryContext | None = None,
     ) -> TurnFinishedEvent:
         return cls(
             event_type=ExecutionEventType.TURN_FINISHED,
@@ -161,6 +163,7 @@ class TurnFinishedEvent:
             stderr_artifact_path=stderr_artifact_path,
             returncode=returncode,
             error=error,
+            recovery=recovery,
         )
 
 
@@ -204,6 +207,8 @@ class RunCompletedEvent:
     final_snapshot: PlanSnapshot
     end_reason: WorkflowEndReason
     issues_accumulated: int
+    recovery_summary: HarnessRecoveryContext | None
+    recovery_history: tuple[HarnessRecoveryContext, ...]
 
     @classmethod
     def create(
@@ -213,6 +218,8 @@ class RunCompletedEvent:
         final_snapshot: PlanSnapshot,
         end_reason: WorkflowEndReason,
         issues_accumulated: int = 0,
+        recovery_summary: HarnessRecoveryContext | None = None,
+        recovery_history: tuple[HarnessRecoveryContext, ...] = (),
     ) -> RunCompletedEvent:
         return cls(
             event_type=ExecutionEventType.RUN_COMPLETED,
@@ -222,6 +229,8 @@ class RunCompletedEvent:
             final_snapshot=final_snapshot,
             end_reason=end_reason,
             issues_accumulated=issues_accumulated,
+            recovery_summary=recovery_summary,
+            recovery_history=recovery_history,
         )
 
 
@@ -236,6 +245,8 @@ class RunFailedEvent:
     failure_reason: str
     final_snapshot: PlanSnapshot | None
     issues_accumulated: int
+    recovery_summary: HarnessRecoveryContext | None
+    recovery_history: tuple[HarnessRecoveryContext, ...]
 
     @classmethod
     def create(
@@ -245,6 +256,8 @@ class RunFailedEvent:
         failure_reason: str,
         final_snapshot: PlanSnapshot | None = None,
         issues_accumulated: int = 0,
+        recovery_summary: HarnessRecoveryContext | None = None,
+        recovery_history: tuple[HarnessRecoveryContext, ...] = (),
     ) -> RunFailedEvent:
         return cls(
             event_type=ExecutionEventType.RUN_FAILED,
@@ -254,6 +267,8 @@ class RunFailedEvent:
             failure_reason=failure_reason,
             final_snapshot=final_snapshot,
             issues_accumulated=issues_accumulated,
+            recovery_summary=recovery_summary,
+            recovery_history=recovery_history,
         )
 
 

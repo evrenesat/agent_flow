@@ -24,6 +24,7 @@ BUNDLED_SKILL_METADATA = (
     BundledSkillMetadata(name="aflow-review-final", default=True),
     BundledSkillMetadata(name="aflow-merge", default=True),
     BundledSkillMetadata(name="aflow-init-repo", default=True),
+    BundledSkillMetadata(name="aflow-harness-recovery-lead", default=True),
     BundledSkillMetadata(name="aflow-assistant", default=False),
 )
 

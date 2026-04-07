@@ -40,7 +40,16 @@ from .plan import (
     plan_has_git_tracking,
     rewrite_git_tracking_field,
 )
-from .run_state import ControllerConfig, ControllerRunResult, ControllerState, ExecutionContext, RetryContext, ResumeContext, TurnRecord, WorkflowEndReason, format_harness_model_display
+from .recovery import (
+    build_recovery_context,
+    build_team_lead_recovery_prompt,
+    find_first_matching_rule,
+    recovery_made_progress,
+    parse_team_lead_recovery_decision,
+    resolve_backup_team,
+    TeamLeadRecoveryDecisionError,
+)
+from .run_state import ControllerConfig, ControllerRunResult, ControllerState, ExecutionContext, HarnessRecoveryAction, HarnessRecoveryContext, RetryContext, ResumeContext, TurnRecord, WorkflowEndReason, format_harness_model_display
 from .runlog import create_run_paths, finalize_turn_artifacts, prune_old_runs, write_run_metadata, write_turn_artifacts_start
 from .status import BannerRenderer
 from aflow.api.events import (
@@ -178,7 +187,7 @@ def resolve_role_selector(
         raise WorkflowError(
             f"workflow step references unknown team '{team_name}' in {step_path}"
         )
-    return team_config.get(role, selector)
+    return team_config.roles.get(role, selector)
 
 
 def _resolve_step_runtime(
@@ -1692,6 +1701,91 @@ def _execute_init_repo_handoff(
     )
 
 
+def _resolve_team_lead_profile(
+    workflow_config: WorkflowUserConfig,
+    *,
+    team_name: str | None,
+    step_path: str,
+) -> ResolvedProfile:
+    team_lead_role = workflow_config.aflow.team_lead
+    if not team_lead_role:
+        raise WorkflowError(f"{step_path} requires [aflow].team_lead to be configured")
+    team_lead_selector = resolve_role_selector(
+        team_lead_role,
+        team_name,
+        workflow_config,
+        step_path=step_path,
+    )
+    return resolve_profile(team_lead_selector, workflow_config, step_path=step_path)
+
+
+def _run_team_lead_recovery_handoff(
+    repo_root: Path,
+    workflow_config: WorkflowUserConfig,
+    *,
+    team_name: str | None,
+    adapter: HarnessAdapter | None,
+    runner: Callable[..., subprocess.CompletedProcess[str]] | None,
+    banner: BannerRenderer,
+    state: ControllerState,
+    step_path: str,
+    current_team: str | None,
+    active_selector: str,
+    harness_name: str,
+    model: str | None,
+    snapshot_before: PlanSnapshot,
+    snapshot_after: PlanSnapshot | None,
+    stdout: str | None,
+    stderr: str | None,
+    returncode: int,
+    recovery_reason: str,
+    recovery_cap: int,
+    consecutive_count: int,
+    matched_rule_action: str | None,
+    matched_terms: tuple[str, ...],
+    backup_team: str | None,
+) -> TeamLeadRecoveryDecision:
+    resolved = _resolve_team_lead_profile(workflow_config, team_name=team_name, step_path=step_path)
+    user_prompt = build_team_lead_recovery_prompt(
+        step_path=step_path,
+        current_team=current_team,
+        active_selector=active_selector,
+        harness_name=harness_name,
+        model=model,
+        returncode=returncode,
+        snapshot_before=snapshot_before,
+        snapshot_after=snapshot_after,
+        stdout=stdout,
+        stderr=stderr,
+        recovery_reason=recovery_reason,
+        recovery_cap=recovery_cap,
+        consecutive_count=consecutive_count,
+        matched_rule_action=matched_rule_action,
+        matched_terms=matched_terms,
+        backup_team=backup_team,
+    )
+    lead_adapter = adapter or get_adapter(resolved.harness_name)
+    invocation = lead_adapter.build_invocation(
+        repo_root=repo_root,
+        model=resolved.model,
+        system_prompt="",
+        user_prompt=user_prompt,
+        effort=resolved.effort,
+    )
+    if runner is None:
+        completed = _run_process(invocation, repo_root, banner, state)
+    else:
+        completed = runner(
+            list(invocation.argv),
+            cwd=str(repo_root),
+            env={**os.environ, **invocation.env},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    return parse_team_lead_recovery_decision(completed.stdout)
+
+
 _MERGE_BUILTIN_INSTRUCTION = "Use the `aflow-merge` skill to merge the feature branch into the target branch."
 
 
@@ -2079,6 +2173,8 @@ def run_workflow(
             failure_reason=summary,
             final_snapshot=PlanSnapshot(None, 0, 0, False),
             issues_accumulated=state.issues_accumulated,
+            recovery_summary=state.current_harness_recovery,
+            recovery_history=tuple(state.harness_recovery_history),
         ))
         raise WorkflowError(summary, run_dir=run_paths.run_dir) from exc
     except (PlanParseError, FileNotFoundError) as exc:
@@ -2101,6 +2197,8 @@ def run_workflow(
             failure_reason=summary,
             final_snapshot=PlanSnapshot(None, 0, 0, False),
             issues_accumulated=state.issues_accumulated,
+            recovery_summary=state.current_harness_recovery,
+            recovery_history=tuple(state.harness_recovery_history),
         ))
         raise WorkflowError(summary, run_dir=run_paths.run_dir) from exc
 
@@ -2216,6 +2314,8 @@ def run_workflow(
             final_snapshot=original_snapshot,
             issues_accumulated=state.issues_accumulated,
             end_reason=end_reason,
+            recovery_summary=state.current_harness_recovery,
+            recovery_history=tuple(state.harness_recovery_history),
         )
         write_run_metadata(
             run_paths, config, state, status="completed", last_snapshot=original_snapshot,
@@ -2231,6 +2331,8 @@ def run_workflow(
             final_snapshot=original_snapshot,
             end_reason=end_reason,
             issues_accumulated=state.issues_accumulated,
+            recovery_summary=state.current_harness_recovery,
+            recovery_history=tuple(state.harness_recovery_history),
         ))
 
         return result
@@ -2238,11 +2340,14 @@ def run_workflow(
     use_popen = runner is None
     new_plan_path: Path | None = None
     retry_limit = _effective_retry_limit(wf, workflow_config.aflow)
-    team_name = config.team if config.team is not None else wf.team
-    if team_name is not None and team_name not in workflow_config.teams:
+    active_team_name = config.team if config.team is not None else wf.team
+    if active_team_name is not None and active_team_name not in workflow_config.teams:
         raise WorkflowError(
-            f"workflow '{workflow_name}' references unknown team '{team_name}'"
+            f"workflow '{workflow_name}' references unknown team '{active_team_name}'"
         )
+    baseline_team_name = active_team_name
+    state.current_team = active_team_name
+    state.current_team_override = None
 
     if resume is not None:
         try:
@@ -2289,7 +2394,7 @@ def run_workflow(
                 bootstrap_result = _execute_init_repo_handoff(
                     config.repo_root,
                     workflow_config,
-                    team_name=team_name,
+                    team_name=active_team_name,
                     adapter=adapter,
                     runner=runner,
                     main_branch=lifecycle_plan.main_branch,
@@ -2493,6 +2598,7 @@ def run_workflow(
         retry_reason: str | None = None,
         retry_next_turn: bool | None = None,
         was_retry: bool | None = None,
+        recovery: HarnessRecoveryContext | None = None,
     ) -> None:
         finalize_turn_artifacts(
             turn_dir,
@@ -2520,6 +2626,7 @@ def run_workflow(
             retry_reason=retry_reason,
             retry_next_turn=retry_next_turn,
             was_retry=was_retry,
+            recovery=recovery,
         )
         record = state.turn_history[-1]
         record.turn_dir = turn_dir
@@ -2538,10 +2645,776 @@ def run_workflow(
             stderr_artifact_path=record.stderr_artifact_path,
             returncode=returncode,
             error=error,
+            recovery=recovery,
         ))
+
+    def _handle_harness_recovery(
+        *,
+        turn_number: int,
+        step_name: str,
+        step: WorkflowStepConfig,
+        step_path: str,
+        active_team_name: str | None,
+        selector: str,
+        resolved: ResolvedProfile,
+        invocation: HarnessInvocation,
+        turn_dir: Path,
+        started_at: datetime,
+        snapshot_before: PlanSnapshot,
+        snapshot_after: PlanSnapshot,
+        stdout: str,
+        stderr: str,
+        returncode: int,
+    ) -> bool:
+        recovery_config = workflow_config.error_handling.harness_error_recovery
+        team_lead_role = workflow_config.aflow.team_lead
+
+        def _finalize_team_lead_failure(
+            *,
+            action: HarnessRecoveryAction,
+            reason: str,
+            delay_seconds: int | None,
+            to_team: str | None,
+            suggested_keywords: tuple[str, ...],
+            suggested_action: HarnessRecoveryAction | None,
+            rejection_reason: str | None,
+            executed: bool,
+        ) -> None:
+            recovery = build_recovery_context(
+                source="team_lead",
+                action=action,
+                reason=reason,
+                match_terms=(),
+                matched_terms=(),
+                delay_seconds=delay_seconds,
+                from_team=active_team_name,
+                to_team=to_team,
+                consecutive_count=state.consecutive_harness_recoveries + 1,
+                suggested_keywords=suggested_keywords,
+                suggested_action=suggested_action,
+                executed=executed,
+                rejection_reason=rejection_reason,
+            )
+            state.current_harness_recovery = recovery
+            state.harness_recovery_history.append(recovery)
+            state.consecutive_harness_recoveries = recovery.consecutive_count
+            state.issues_accumulated += 1
+            state.status_message = "failed"
+            _finalize_turn_record(
+                status="recovery-failed",
+                started_at=started_at,
+                snapshot_before=snapshot_before,
+                snapshot_after=snapshot_after,
+                invocation=invocation,
+                turn_dir=turn_dir,
+                stdout=stdout,
+                stderr=stderr,
+                returncode=returncode,
+                error=reason,
+                step_name=step_name,
+                step_role=step.role,
+                selector=selector,
+                active_path=active_plan_path,
+                new_path=new_plan_path,
+                conditions={
+                    "DONE": snapshot_after.is_complete,
+                    "NEW_PLAN_EXISTS": False,
+                    "MAX_TURNS_REACHED": turn_number >= config.max_turns,
+                },
+                recovery=recovery,
+            )
+            summary = _format_failure(
+                reason=reason,
+                run_dir=run_paths.run_dir,
+                snapshot=snapshot_after,
+            )
+            write_run_metadata(
+                run_paths,
+                config,
+                state,
+                status="failed",
+                failure_reason=summary,
+                turns_completed=state.turns_completed,
+                last_snapshot=snapshot_after,
+                execution_context=exec_ctx,
+                workflow_name=workflow_name,
+                original_plan_path=original_plan_path,
+                current_step_name=current_step_name,
+                active_plan_path=active_plan_path,
+                new_plan_path=new_plan_path,
+                resumed_from_run_id=resumed_from_run_id,
+            )
+            banner.stop(state)
+            raise WorkflowError(summary, run_dir=run_paths.run_dir)
+
+        def _schedule_team_lead_recovery(
+            *,
+            decision: TeamLeadRecoveryDecision,
+            to_team: str | None,
+            reason: str,
+            rejection_reason: str | None = None,
+        ) -> bool:
+            delay = decision.delay_seconds
+            recovery = build_recovery_context(
+                source="team_lead",
+                action=decision.action,
+                reason=reason,
+                match_terms=matched_rule.match if matched_rule is not None else (),
+                matched_terms=matched_terms,
+                delay_seconds=delay,
+                from_team=active_team_name,
+                to_team=to_team,
+                consecutive_count=state.consecutive_harness_recoveries + 1,
+                suggested_keywords=decision.suggested_keywords,
+                suggested_action=decision.suggested_action,
+                executed=True,
+                rejection_reason=rejection_reason,
+            )
+            state.current_harness_recovery = recovery
+            state.harness_recovery_history.append(recovery)
+            state.consecutive_harness_recoveries = recovery.consecutive_count
+            state.issues_accumulated += 1
+            state.turns_completed += 1
+            state.last_snapshot = snapshot_after
+            if delay is not None and delay > 0:
+                time.sleep(delay)
+            _finalize_turn_record(
+                status="recovery-scheduled",
+                started_at=started_at,
+                snapshot_before=snapshot_before,
+                snapshot_after=snapshot_after,
+                invocation=invocation,
+                turn_dir=turn_dir,
+                stdout=stdout,
+                stderr=stderr,
+                returncode=returncode,
+                error=reason,
+                step_name=step_name,
+                step_role=step.role,
+                selector=selector,
+                active_path=active_plan_path,
+                new_path=new_plan_path,
+                conditions={
+                    "DONE": snapshot_after.is_complete,
+                    "NEW_PLAN_EXISTS": False,
+                    "MAX_TURNS_REACHED": turn_number >= config.max_turns,
+                },
+                recovery=recovery,
+            )
+            write_run_metadata(
+                run_paths,
+                config,
+                state,
+                status="running",
+                turns_completed=state.turns_completed,
+                last_snapshot=state.last_snapshot,
+                execution_context=exec_ctx,
+                workflow_name=workflow_name,
+                original_plan_path=original_plan_path,
+                current_step_name=current_step_name,
+                active_plan_path=active_plan_path,
+                new_plan_path=new_plan_path,
+                resumed_from_run_id=resumed_from_run_id,
+            )
+            banner.update(state)
+            return True
+
+        matched_rule, matched_terms = find_first_matching_rule(
+            recovery_config,
+            stdout=stdout,
+            stderr=stderr,
+            error=None,
+        )
+        if recovery_made_progress(snapshot_before, snapshot_after):
+            return False
+        if matched_rule is None:
+            if returncode == 0:
+                return False
+            if team_lead_role is None:
+                return False
+            fallback_reason = (
+                f"no deterministic harness recovery rule matched in {step_path}; "
+                "escalating to the team lead"
+            )
+            backup_team, _ = resolve_backup_team(active_team_name, workflow_config.teams)
+            try:
+                recovery_repo_root = exec_ctx.primary_repo_root if exec_ctx is not None else run_paths.repo_root
+                decision = _run_team_lead_recovery_handoff(
+                    recovery_repo_root,
+                    workflow_config,
+                    team_name=active_team_name,
+                    adapter=adapter,
+                    runner=runner,
+                    banner=banner,
+                    state=state,
+                    step_path=f"harness recovery for {step_path}",
+                    current_team=active_team_name,
+                    active_selector=selector,
+                    harness_name=resolved.harness_name,
+                    model=resolved.model,
+                    snapshot_before=snapshot_before,
+                    snapshot_after=snapshot_after,
+                    stdout=stdout,
+                    stderr=stderr,
+                    returncode=returncode,
+                    recovery_reason=fallback_reason,
+                    recovery_cap=recovery_config.max_consecutive_recoveries,
+                    consecutive_count=state.consecutive_harness_recoveries,
+                    matched_rule_action=None,
+                    matched_terms=(),
+                    backup_team=backup_team,
+                )
+            except TeamLeadRecoveryDecisionError as exc:
+                state.status_message = "failed"
+                state.issues_accumulated += 1
+                _finalize_turn_record(
+                    status="recovery-failed",
+                    started_at=started_at,
+                    snapshot_before=snapshot_before,
+                    snapshot_after=snapshot_after,
+                    invocation=invocation,
+                    turn_dir=turn_dir,
+                    stdout=stdout,
+                    stderr=stderr,
+                    returncode=returncode,
+                    error=str(exc),
+                    step_name=step_name,
+                    step_role=step.role,
+                    selector=selector,
+                    active_path=active_plan_path,
+                    new_path=new_plan_path,
+                    conditions={
+                        "DONE": snapshot_after.is_complete,
+                        "NEW_PLAN_EXISTS": False,
+                        "MAX_TURNS_REACHED": turn_number >= config.max_turns,
+                    },
+                )
+                summary = _format_failure(
+                    reason=str(exc),
+                    run_dir=run_paths.run_dir,
+                    snapshot=snapshot_after,
+                )
+                write_run_metadata(
+                    run_paths,
+                    config,
+                    state,
+                    status="failed",
+                    failure_reason=summary,
+                    turns_completed=state.turns_completed,
+                    last_snapshot=snapshot_after,
+                    execution_context=exec_ctx,
+                    workflow_name=workflow_name,
+                    original_plan_path=original_plan_path,
+                    current_step_name=current_step_name,
+                    active_plan_path=active_plan_path,
+                    new_plan_path=new_plan_path,
+                    resumed_from_run_id=resumed_from_run_id,
+                )
+                banner.stop(state)
+                raise WorkflowError(summary, run_dir=run_paths.run_dir) from exc
+            if decision.action == "retry_same_team_after_delay":
+                return _schedule_team_lead_recovery(
+                    decision=decision,
+                    to_team=active_team_name,
+                    reason=decision.reason,
+                )
+            if decision.action == "switch_to_backup_team_and_retry":
+                backup_team, backup_reason = resolve_backup_team(active_team_name, workflow_config.teams)
+                if backup_team is None:
+                    return _finalize_team_lead_failure(
+                        action=decision.action,
+                        reason=f"{decision.reason}; {backup_reason or 'team lead requested a backup team that is not configured'}",
+                        delay_seconds=decision.delay_seconds,
+                        to_team=None,
+                        suggested_keywords=decision.suggested_keywords,
+                        suggested_action=decision.suggested_action,
+                        rejection_reason=backup_reason,
+                        executed=False,
+                    )
+                state.current_team_override = backup_team
+                return _schedule_team_lead_recovery(
+                    decision=decision,
+                    to_team=backup_team,
+                    reason=(
+                        f"{decision.reason}; switching from team '{active_team_name}' to '{backup_team}'"
+                    ),
+                )
+            if decision.action == "fail_immediately":
+                return _finalize_team_lead_failure(
+                    action=decision.action,
+                    reason=decision.reason,
+                    delay_seconds=decision.delay_seconds,
+                    to_team=None,
+                    suggested_keywords=decision.suggested_keywords,
+                    suggested_action=decision.suggested_action,
+                    rejection_reason=None,
+                    executed=True,
+                )
+
+        if state.consecutive_harness_recoveries >= recovery_config.max_consecutive_recoveries:
+            if team_lead_role is None:
+                cap_reason = (
+                    f"matched harness recovery rule in {step_path}: "
+                    f"{matched_rule.action} on {', '.join(matched_terms)}; "
+                    f"maximum consecutive recoveries "
+                    f"({recovery_config.max_consecutive_recoveries}) reached"
+                )
+                recovery = build_recovery_context(
+                    source="deterministic",
+                    action=matched_rule.action,
+                    reason=cap_reason,
+                    match_terms=matched_rule.match,
+                    matched_terms=matched_terms,
+                    delay_seconds=matched_rule.delay_seconds,
+                    from_team=active_team_name,
+                    to_team=None,
+                    consecutive_count=state.consecutive_harness_recoveries,
+                )
+                state.current_harness_recovery = recovery
+                state.harness_recovery_history.append(recovery)
+                state.issues_accumulated += 1
+                state.status_message = "failed"
+                _finalize_turn_record(
+                    status="recovery-failed",
+                    started_at=started_at,
+                    snapshot_before=snapshot_before,
+                    snapshot_after=snapshot_after,
+                    invocation=invocation,
+                    turn_dir=turn_dir,
+                    stdout=stdout,
+                    stderr=stderr,
+                    returncode=returncode,
+                    error=recovery.reason,
+                    step_name=step_name,
+                    step_role=step.role,
+                    selector=selector,
+                    active_path=active_plan_path,
+                    new_path=new_plan_path,
+                    conditions={
+                        "DONE": snapshot_after.is_complete,
+                        "NEW_PLAN_EXISTS": False,
+                        "MAX_TURNS_REACHED": turn_number >= config.max_turns,
+                    },
+                    recovery=recovery,
+                )
+                summary = _format_failure(
+                    reason=recovery.reason,
+                    run_dir=run_paths.run_dir,
+                    snapshot=snapshot_after,
+                )
+                write_run_metadata(
+                    run_paths,
+                    config,
+                    state,
+                    status="failed",
+                    failure_reason=summary,
+                    turns_completed=state.turns_completed,
+                    last_snapshot=snapshot_after,
+                    execution_context=exec_ctx,
+                    workflow_name=workflow_name,
+                    original_plan_path=original_plan_path,
+                    current_step_name=current_step_name,
+                    active_plan_path=active_plan_path,
+                    new_plan_path=new_plan_path,
+                    resumed_from_run_id=resumed_from_run_id,
+                )
+                banner.stop(state)
+                raise WorkflowError(summary, run_dir=run_paths.run_dir)
+
+            cap_reason = (
+                f"matched harness recovery rule in {step_path}: "
+                f"{matched_rule.action} on {', '.join(matched_terms)}; "
+                f"maximum consecutive recoveries "
+                f"({recovery_config.max_consecutive_recoveries}) reached"
+            )
+            backup_team, _ = resolve_backup_team(active_team_name, workflow_config.teams)
+            try:
+                recovery_repo_root = exec_ctx.primary_repo_root if exec_ctx is not None else run_paths.repo_root
+                decision = _run_team_lead_recovery_handoff(
+                    recovery_repo_root,
+                    workflow_config,
+                    team_name=active_team_name,
+                    adapter=adapter,
+                    runner=runner,
+                    banner=banner,
+                    state=state,
+                    step_path=f"harness recovery for {step_path}",
+                    current_team=active_team_name,
+                    active_selector=selector,
+                    harness_name=resolved.harness_name,
+                    model=resolved.model,
+                    snapshot_before=snapshot_before,
+                    snapshot_after=snapshot_after,
+                    stdout=stdout,
+                    stderr=stderr,
+                    returncode=returncode,
+                    recovery_reason=cap_reason,
+                    recovery_cap=recovery_config.max_consecutive_recoveries,
+                    consecutive_count=state.consecutive_harness_recoveries,
+                    matched_rule_action=matched_rule.action,
+                    matched_terms=matched_terms,
+                    backup_team=backup_team,
+                )
+            except TeamLeadRecoveryDecisionError as exc:
+                state.status_message = "failed"
+                state.issues_accumulated += 1
+                _finalize_turn_record(
+                    status="recovery-failed",
+                    started_at=started_at,
+                    snapshot_before=snapshot_before,
+                    snapshot_after=snapshot_after,
+                    invocation=invocation,
+                    turn_dir=turn_dir,
+                    stdout=stdout,
+                    stderr=stderr,
+                    returncode=returncode,
+                    error=str(exc),
+                    step_name=step_name,
+                    step_role=step.role,
+                    selector=selector,
+                    active_path=active_plan_path,
+                    new_path=new_plan_path,
+                    conditions={
+                        "DONE": snapshot_after.is_complete,
+                        "NEW_PLAN_EXISTS": False,
+                        "MAX_TURNS_REACHED": turn_number >= config.max_turns,
+                    },
+                )
+                summary = _format_failure(
+                    reason=str(exc),
+                    run_dir=run_paths.run_dir,
+                    snapshot=snapshot_after,
+                )
+                write_run_metadata(
+                    run_paths,
+                    config,
+                    state,
+                    status="failed",
+                    failure_reason=summary,
+                    turns_completed=state.turns_completed,
+                    last_snapshot=snapshot_after,
+                    execution_context=exec_ctx,
+                    workflow_name=workflow_name,
+                    original_plan_path=original_plan_path,
+                    current_step_name=current_step_name,
+                    active_plan_path=active_plan_path,
+                    new_plan_path=new_plan_path,
+                    resumed_from_run_id=resumed_from_run_id,
+                )
+                banner.stop(state)
+                raise WorkflowError(summary, run_dir=run_paths.run_dir) from exc
+            if decision.action == "retry_same_team_after_delay":
+                return _schedule_team_lead_recovery(
+                    decision=decision,
+                    to_team=active_team_name,
+                    reason=decision.reason,
+                )
+            if decision.action == "switch_to_backup_team_and_retry":
+                backup_team, backup_reason = resolve_backup_team(active_team_name, workflow_config.teams)
+                if backup_team is None:
+                    return _finalize_team_lead_failure(
+                        action=decision.action,
+                        reason=f"{decision.reason}; {backup_reason or 'team lead requested a backup team that is not configured'}",
+                        delay_seconds=decision.delay_seconds,
+                        to_team=None,
+                        suggested_keywords=decision.suggested_keywords,
+                        suggested_action=decision.suggested_action,
+                        rejection_reason=backup_reason,
+                        executed=False,
+                    )
+                state.current_team_override = backup_team
+                return _schedule_team_lead_recovery(
+                    decision=decision,
+                    to_team=backup_team,
+                    reason=(
+                        f"{decision.reason}; switching from team '{active_team_name}' to '{backup_team}'"
+                    ),
+                )
+            if decision.action == "fail_immediately":
+                return _finalize_team_lead_failure(
+                    action=decision.action,
+                    reason=decision.reason,
+                    delay_seconds=decision.delay_seconds,
+                    to_team=None,
+                    suggested_keywords=decision.suggested_keywords,
+                    suggested_action=decision.suggested_action,
+                    rejection_reason=None,
+                    executed=True,
+                )
+
+        reason = (
+            f"matched harness recovery rule in {step_path}: "
+            f"{matched_rule.action} on {', '.join(matched_terms)}"
+        )
+        base_count = state.consecutive_harness_recoveries + 1
+        recovery_source_team = active_team_name
+
+        if matched_rule.action == "retry_same_team_after_delay":
+            recovery = build_recovery_context(
+                source="deterministic",
+                action=matched_rule.action,
+                reason=reason,
+                match_terms=matched_rule.match,
+                matched_terms=matched_terms,
+                delay_seconds=matched_rule.delay_seconds,
+                from_team=active_team_name,
+                to_team=active_team_name,
+                consecutive_count=base_count,
+            )
+            state.current_harness_recovery = recovery
+            state.harness_recovery_history.append(recovery)
+            state.consecutive_harness_recoveries = base_count
+            state.issues_accumulated += 1
+            state.turns_completed += 1
+            state.last_snapshot = snapshot_after
+            if matched_rule.delay_seconds > 0:
+                time.sleep(matched_rule.delay_seconds)
+            _finalize_turn_record(
+                status="recovery-scheduled",
+                started_at=started_at,
+                snapshot_before=snapshot_before,
+                snapshot_after=snapshot_after,
+                invocation=invocation,
+                turn_dir=turn_dir,
+                stdout=stdout,
+                stderr=stderr,
+                returncode=returncode,
+                error=reason,
+                step_name=step_name,
+                step_role=step.role,
+                selector=selector,
+                active_path=active_plan_path,
+                new_path=new_plan_path,
+                conditions={
+                    "DONE": snapshot_after.is_complete,
+                    "NEW_PLAN_EXISTS": False,
+                    "MAX_TURNS_REACHED": turn_number >= config.max_turns,
+                },
+                recovery=recovery,
+            )
+            write_run_metadata(
+                run_paths,
+                config,
+                state,
+                status="running",
+                turns_completed=state.turns_completed,
+                last_snapshot=state.last_snapshot,
+                execution_context=exec_ctx,
+                workflow_name=workflow_name,
+                original_plan_path=original_plan_path,
+                current_step_name=current_step_name,
+                active_plan_path=active_plan_path,
+                new_plan_path=new_plan_path,
+                resumed_from_run_id=resumed_from_run_id,
+            )
+            banner.update(state)
+            return True
+
+        if matched_rule.action == "switch_to_backup_team_and_retry":
+            backup_team, backup_reason = resolve_backup_team(active_team_name, workflow_config.teams)
+            if backup_team is None:
+                failure_reason = backup_reason or (
+                    f"team '{active_team_name}' does not configure a backup_team"
+                )
+                recovery = build_recovery_context(
+                    source="deterministic",
+                    action=matched_rule.action,
+                    reason=failure_reason,
+                    match_terms=matched_rule.match,
+                    matched_terms=matched_terms,
+                    delay_seconds=matched_rule.delay_seconds,
+                    from_team=active_team_name,
+                    to_team=None,
+                    consecutive_count=base_count,
+                )
+                state.current_harness_recovery = recovery
+                state.harness_recovery_history.append(recovery)
+                state.consecutive_harness_recoveries = base_count
+                state.issues_accumulated += 1
+                state.status_message = "failed"
+                _finalize_turn_record(
+                    status="recovery-failed",
+                    started_at=started_at,
+                    snapshot_before=snapshot_before,
+                    snapshot_after=snapshot_after,
+                    invocation=invocation,
+                    turn_dir=turn_dir,
+                    stdout=stdout,
+                    stderr=stderr,
+                    returncode=returncode,
+                    error=failure_reason,
+                    step_name=step_name,
+                    step_role=step.role,
+                    selector=selector,
+                    active_path=active_plan_path,
+                    new_path=new_plan_path,
+                    conditions={
+                        "DONE": snapshot_after.is_complete,
+                        "NEW_PLAN_EXISTS": False,
+                        "MAX_TURNS_REACHED": turn_number >= config.max_turns,
+                    },
+                    recovery=recovery,
+                )
+                summary = _format_failure(
+                    reason=failure_reason,
+                    run_dir=run_paths.run_dir,
+                    snapshot=snapshot_after,
+                )
+                write_run_metadata(
+                    run_paths,
+                    config,
+                    state,
+                    status="failed",
+                    failure_reason=summary,
+                    turns_completed=state.turns_completed,
+                    last_snapshot=snapshot_after,
+                    execution_context=exec_ctx,
+                    workflow_name=workflow_name,
+                    original_plan_path=original_plan_path,
+                    current_step_name=current_step_name,
+                    active_plan_path=active_plan_path,
+                    new_plan_path=new_plan_path,
+                    resumed_from_run_id=resumed_from_run_id,
+                )
+                banner.stop(state)
+                raise WorkflowError(summary, run_dir=run_paths.run_dir)
+
+            state.current_team_override = backup_team
+            if matched_rule.delay_seconds > 0:
+                time.sleep(matched_rule.delay_seconds)
+            recovery = build_recovery_context(
+                source="deterministic",
+                action=matched_rule.action,
+                reason=(
+                    f"{reason}; switching from team '{recovery_source_team}' to '{backup_team}'"
+                ),
+                match_terms=matched_rule.match,
+                matched_terms=matched_terms,
+                delay_seconds=matched_rule.delay_seconds,
+                from_team=recovery_source_team,
+                to_team=backup_team,
+                consecutive_count=base_count,
+            )
+            state.current_harness_recovery = recovery
+            state.harness_recovery_history.append(recovery)
+            state.consecutive_harness_recoveries = base_count
+            state.issues_accumulated += 1
+            state.turns_completed += 1
+            state.last_snapshot = snapshot_after
+            _finalize_turn_record(
+                status="recovery-scheduled",
+                started_at=started_at,
+                snapshot_before=snapshot_before,
+                snapshot_after=snapshot_after,
+                invocation=invocation,
+                turn_dir=turn_dir,
+                stdout=stdout,
+                stderr=stderr,
+                returncode=returncode,
+                error=recovery.reason,
+                step_name=step_name,
+                step_role=step.role,
+                selector=selector,
+                active_path=active_plan_path,
+                new_path=new_plan_path,
+                conditions={
+                    "DONE": snapshot_after.is_complete,
+                    "NEW_PLAN_EXISTS": False,
+                    "MAX_TURNS_REACHED": turn_number >= config.max_turns,
+                },
+                recovery=recovery,
+            )
+            write_run_metadata(
+                run_paths,
+                config,
+                state,
+                status="running",
+                turns_completed=state.turns_completed,
+                last_snapshot=state.last_snapshot,
+                execution_context=exec_ctx,
+                workflow_name=workflow_name,
+                original_plan_path=original_plan_path,
+                current_step_name=current_step_name,
+                active_plan_path=active_plan_path,
+                new_plan_path=new_plan_path,
+                resumed_from_run_id=resumed_from_run_id,
+            )
+            banner.update(state)
+            return True
+
+        if matched_rule.action == "fail_immediately":
+            recovery = build_recovery_context(
+                source="deterministic",
+                action=matched_rule.action,
+                reason=reason,
+                match_terms=matched_rule.match,
+                matched_terms=matched_terms,
+                delay_seconds=matched_rule.delay_seconds,
+                from_team=active_team_name,
+                to_team=None,
+                consecutive_count=base_count,
+            )
+            state.current_harness_recovery = recovery
+            state.harness_recovery_history.append(recovery)
+            state.consecutive_harness_recoveries = base_count
+            state.issues_accumulated += 1
+            state.status_message = "failed"
+            _finalize_turn_record(
+                status="recovery-failed",
+                started_at=started_at,
+                snapshot_before=snapshot_before,
+                snapshot_after=snapshot_after,
+                invocation=invocation,
+                turn_dir=turn_dir,
+                stdout=stdout,
+                stderr=stderr,
+                returncode=returncode,
+                error=recovery.reason,
+                step_name=step_name,
+                step_role=step.role,
+                selector=selector,
+                active_path=active_plan_path,
+                new_path=new_plan_path,
+                conditions={
+                    "DONE": snapshot_after.is_complete,
+                    "NEW_PLAN_EXISTS": False,
+                    "MAX_TURNS_REACHED": turn_number >= config.max_turns,
+                },
+                recovery=recovery,
+            )
+            summary = _format_failure(
+                reason=recovery.reason,
+                run_dir=run_paths.run_dir,
+                snapshot=snapshot_after,
+            )
+            write_run_metadata(
+                run_paths,
+                config,
+                state,
+                status="failed",
+                failure_reason=summary,
+                turns_completed=state.turns_completed,
+                last_snapshot=snapshot_after,
+                execution_context=exec_ctx,
+                workflow_name=workflow_name,
+                original_plan_path=original_plan_path,
+                current_step_name=current_step_name,
+                active_plan_path=active_plan_path,
+                new_plan_path=new_plan_path,
+                resumed_from_run_id=resumed_from_run_id,
+            )
+            banner.stop(state)
+            raise WorkflowError(summary, run_dir=run_paths.run_dir)
+
+        return False
 
     for turn_number in range(1, config.max_turns + 1):
         retry_ctx = state.pending_retry
+        active_team_name = (
+            state.current_team_override
+            if state.current_team_override is not None
+            else state.current_team
+        )
         followup_candidates_before: set[Path] = set()
 
         if retry_ctx is not None:
@@ -2566,7 +3439,7 @@ def run_workflow(
             selector, resolved = _resolve_step_runtime(
                 step,
                 workflow_config,
-                team_name=team_name,
+                team_name=active_team_name,
                 step_path=step_path,
             )
             step_adapter = adapter or get_adapter(resolved.harness_name)
@@ -2629,7 +3502,7 @@ def run_workflow(
             selector, resolved = _resolve_step_runtime(
                 step,
                 workflow_config,
-                team_name=team_name,
+                team_name=active_team_name,
                 step_path=step_path,
             )
 
@@ -2871,6 +3744,27 @@ def run_workflow(
 
         state.pending_retry = None
 
+        if _handle_harness_recovery(
+            turn_number=turn_number,
+            step_name=current_step_name,
+            step=step,
+            step_path=step_path,
+            active_team_name=active_team_name,
+            selector=selector,
+            resolved=resolved,
+            invocation=invocation,
+            turn_dir=turn_dir,
+            started_at=turn_started_at,
+            snapshot_before=snapshot_before,
+            snapshot_after=post_snapshot,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            returncode=completed.returncode,
+        ):
+            continue
+
+        state.consecutive_harness_recoveries = 0
+
         if completed.returncode != 0:
             state.status_message = "failed"
             state.issues_accumulated += 1
@@ -3005,6 +3899,8 @@ def run_workflow(
             retry_attempt=retry_ctx.attempt if retry_ctx is not None else None,
         )
 
+        if transition_target != "END":
+            state.current_team_override = None
         if not new_plan_exists and active_plan_path != original_plan_path:
             active_plan_path = original_plan_path
 
@@ -3032,6 +3928,10 @@ def run_workflow(
                 max_turns_reached=max_turns_reached,
             )
             state.end_reason = end_reason
+            recovered_turn = state.current_team_override is not None
+            if recovered_turn:
+                state.current_team_override = None
+            merge_team_name = baseline_team_name if recovered_turn else active_team_name
 
             merge_status: str | None = None
             merge_failure_reason: str | None = None
@@ -3049,7 +3949,7 @@ def run_workflow(
                     )
                     merge_completed = _execute_merge_handoff(
                         exec_ctx, wf, workflow_config,
-                        team_name=team_name,
+                        team_name=merge_team_name,
                         adapter=adapter,
                         runner=runner,
                         config_dir=config_dir,
@@ -3141,6 +4041,8 @@ def run_workflow(
                 final_snapshot=post_snapshot,
                 issues_accumulated=state.issues_accumulated,
                 end_reason=end_reason,
+                recovery_summary=state.current_harness_recovery,
+                recovery_history=tuple(state.harness_recovery_history),
             )
             write_run_metadata(
                 run_paths, config, state, status="completed",
@@ -3163,6 +4065,8 @@ def run_workflow(
                 final_snapshot=post_snapshot,
                 end_reason=end_reason,
                 issues_accumulated=state.issues_accumulated,
+                recovery_summary=state.current_harness_recovery,
+                recovery_history=tuple(state.harness_recovery_history),
             ))
 
             return result
@@ -3228,6 +4132,8 @@ def run_workflow(
         failure_reason=summary,
         final_snapshot=state.last_snapshot,
         issues_accumulated=state.issues_accumulated,
+        recovery_summary=state.current_harness_recovery,
+        recovery_history=tuple(state.harness_recovery_history),
     ))
     prune_old_runs(run_paths.runs_root, config.keep_runs)
     banner.stop(state)

@@ -52,6 +52,17 @@ class StartupRequest:
 
 
 @dataclass(frozen=True)
+class AnalyzeRequest:
+    """Input request for run analysis."""
+
+    repo_root: Path
+    run_id: str | None = None
+    all: bool = False
+    limit: int = 20
+    include_noise: bool = False
+
+
+@dataclass(frozen=True)
 class StartupContext:
     """Intermediate state during startup preparation."""
 

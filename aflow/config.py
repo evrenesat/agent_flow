@@ -104,6 +104,33 @@ class WorkflowHarnessConfig:
 
 
 @dataclass(frozen=True)
+class TeamConfig:
+    roles: dict[str, str] = field(default_factory=dict)
+    backup_team: str | None = None
+
+
+@dataclass(frozen=True)
+class HarnessErrorRecoveryRuleConfig:
+    action: str
+    match: tuple[str, ...] = ()
+    delay_seconds: int = 0
+
+
+@dataclass(frozen=True)
+class HarnessErrorRecoveryConfig:
+    rules: tuple[HarnessErrorRecoveryRuleConfig, ...] = ()
+    max_consecutive_recoveries: int = 3
+    team_lead_skill: str = "aflow-harness-recovery-lead"
+
+
+@dataclass(frozen=True)
+class ErrorHandlingConfig:
+    harness_error_recovery: HarnessErrorRecoveryConfig = field(
+        default_factory=HarnessErrorRecoveryConfig
+    )
+
+
+@dataclass(frozen=True)
 class GoTransition:
     to: str
     when: str | None = None
@@ -136,7 +163,8 @@ class WorkflowUserConfig:
     aflow: AflowSection = field(default_factory=AflowSection)
     harnesses: dict[str, WorkflowHarnessConfig] = field(default_factory=dict)
     roles: dict[str, str] = field(default_factory=dict)
-    teams: dict[str, dict[str, str]] = field(default_factory=dict)
+    teams: dict[str, TeamConfig] = field(default_factory=dict)
+    error_handling: ErrorHandlingConfig = field(default_factory=ErrorHandlingConfig)
     workflows: dict[str, WorkflowConfig] = field(default_factory=dict)
     prompts: dict[str, str] = field(default_factory=dict)
 
@@ -275,6 +303,30 @@ def _parse_workflow_harness(
     return WorkflowHarnessConfig(profiles=profiles)
 
 
+def _parse_team_config(raw: Mapping[str, object], *, path: str) -> TeamConfig:
+    reserved_keys = {"roles", "backup_team"}
+    inline_role_keys = [key for key in raw if key not in reserved_keys]
+    roles_value = raw.get("roles")
+    if roles_value is not None and inline_role_keys:
+        inline_roles = ", ".join(sorted(inline_role_keys))
+        raise ConfigError(
+            f"mixed legacy inline role keys and [roles] table in {path}: {inline_roles}"
+        )
+    roles: dict[str, str] = {}
+    if roles_value is not None:
+        roles_table = _require_table(roles_value, path=f"{path}.roles")
+        roles = _parse_role_map(roles_table, path=f"{path}.roles")
+    else:
+        for role_name in inline_role_keys:
+            roles[role_name] = _parse_selector_value(
+                raw[role_name], path=f"{path}.{role_name}"
+            )
+    return TeamConfig(
+        roles=roles,
+        backup_team=_optional_text(raw.get("backup_team"), path=f"{path}.backup_team"),
+    )
+
+
 def _parse_role_map(
     raw: Mapping[str, object], *, path: str
 ) -> dict[str, str]:
@@ -285,6 +337,111 @@ def _parse_role_map(
             value, path=f"{path}.{role_name}"
         )
     return mapping
+
+
+def _parse_harness_error_recovery_rule(
+    raw: Mapping[str, object], *, path: str
+) -> HarnessErrorRecoveryRuleConfig:
+    allowed = {"action", "match", "delay_seconds"}
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise ConfigError(f"unsupported keys in {path}: {', '.join(unknown)}")
+    if "action" not in raw:
+        raise ConfigError(f"missing 'action' in {path}")
+    action = _require_text(raw["action"], path=f"{path}.action")
+    allowed_actions = {
+        "retry_same_team_after_delay",
+        "switch_to_backup_team_and_retry",
+        "fail_immediately",
+    }
+    if action not in allowed_actions:
+        actions = ", ".join(sorted(allowed_actions))
+        raise ConfigError(
+            f"{path}.action must be one of: {actions}"
+        )
+    if "match" not in raw:
+        raise ConfigError(f"missing 'match' in {path}")
+    match_value = raw["match"]
+    if not isinstance(match_value, list):
+        raise ConfigError(f"expected {path}.match to be an array")
+    match = tuple(
+        _require_text(item, path=f"{path}.match[{i}]")
+        for i, item in enumerate(match_value)
+    )
+    if not match:
+        raise ConfigError(f"{path}.match must not be empty")
+    delay_seconds = 0
+    if "delay_seconds" in raw:
+        if action == "fail_immediately":
+            raise ConfigError(
+                f"{path}.delay_seconds is only allowed for retry and switch actions"
+            )
+        value = raw["delay_seconds"]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ConfigError(f"{path}.delay_seconds must be a non-negative integer")
+        delay_seconds = value
+    return HarnessErrorRecoveryRuleConfig(
+        action=action,
+        match=match,
+        delay_seconds=delay_seconds,
+    )
+
+
+def _parse_harness_error_recovery_config(
+    raw: Mapping[str, object], *, path: str
+) -> HarnessErrorRecoveryConfig:
+    allowed = {"rules", "max_consecutive_recoveries", "team_lead_skill"}
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise ConfigError(f"unsupported keys in {path}: {', '.join(unknown)}")
+    rules: list[HarnessErrorRecoveryRuleConfig] = []
+    rules_value = raw.get("rules")
+    if rules_value is not None:
+        if not isinstance(rules_value, list):
+            raise ConfigError(f"expected {path}.rules to be an array of tables")
+        for i, rule_value in enumerate(rules_value):
+            rule_path = f"{path}.rules[{i}]"
+            rule_table = _require_table(rule_value, path=rule_path)
+            rules.append(
+                _parse_harness_error_recovery_rule(rule_table, path=rule_path)
+            )
+    max_consecutive_recoveries = 3
+    if "max_consecutive_recoveries" in raw:
+        value = raw["max_consecutive_recoveries"]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ConfigError(
+                f"{path}.max_consecutive_recoveries must be a non-negative integer"
+            )
+        max_consecutive_recoveries = value
+    team_lead_skill = _optional_text(
+        raw.get("team_lead_skill"), path=f"{path}.team_lead_skill"
+    )
+    if team_lead_skill is None:
+        team_lead_skill = "aflow-harness-recovery-lead"
+    return HarnessErrorRecoveryConfig(
+        rules=tuple(rules),
+        max_consecutive_recoveries=max_consecutive_recoveries,
+        team_lead_skill=team_lead_skill,
+    )
+
+
+def _parse_error_handling_config(
+    raw: Mapping[str, object], *, path: str
+) -> ErrorHandlingConfig:
+    allowed = {"harness_error_recovery"}
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise ConfigError(f"unsupported keys in {path}: {', '.join(unknown)}")
+    recovery = HarnessErrorRecoveryConfig()
+    recovery_value = raw.get("harness_error_recovery")
+    if recovery_value is not None:
+        recovery_table = _require_table(
+            recovery_value, path=f"{path}.harness_error_recovery"
+        )
+        recovery = _parse_harness_error_recovery_config(
+            recovery_table, path=f"{path}.harness_error_recovery"
+        )
+    return ErrorHandlingConfig(harness_error_recovery=recovery)
 
 
 def _parse_go_transitions(
@@ -593,13 +750,21 @@ def _parse_workflow_user_config(
     if "roles" in raw:
         roles_table = _require_table(raw["roles"], path=f"{path}.roles")
         roles = _parse_role_map(roles_table, path=f"{path}.roles")
-    teams: dict[str, dict[str, str]] = {}
+    error_handling = ErrorHandlingConfig()
+    if "error_handling" in raw:
+        error_handling_table = _require_table(
+            raw["error_handling"], path=f"{path}.error_handling"
+        )
+        error_handling = _parse_error_handling_config(
+            error_handling_table, path=f"{path}.error_handling"
+        )
+    teams: dict[str, TeamConfig] = {}
     if "teams" in raw:
         teams_table = _require_table(raw["teams"], path=f"{path}.teams")
         for team_name, team_value in teams_table.items():
             team_key = _require_text(team_name, path=f"{path}.teams key")
             team_table = _require_table(team_value, path=f"{path}.teams.{team_key}")
-            teams[team_key] = _parse_role_map(
+            teams[team_key] = _parse_team_config(
                 team_table, path=f"{path}.teams.{team_key}"
             )
     workflows: dict[str, WorkflowConfig] = {}
@@ -628,6 +793,7 @@ def _parse_workflow_user_config(
         harnesses=harnesses,
         roles=roles,
         teams=teams,
+        error_handling=error_handling,
         workflows=workflows,
         prompts=prompts,
     )
@@ -647,7 +813,7 @@ def load_workflow_config(
     except OSError as exc:
         raise ConfigError(f"unable to read config file {path}: {exc}") from exc
     sibling_path = path.with_name("workflows.toml")
-    aflow_allowed_top_level_keys = {"aflow", "harness", "roles", "teams", "prompts"}
+    aflow_allowed_top_level_keys = {"aflow", "harness", "roles", "teams", "prompts", "error_handling"}
     if sibling_path.exists():
         config = _parse_workflow_user_config(
             raw, path=path, allowed_top_level_keys=aflow_allowed_top_level_keys
@@ -671,6 +837,7 @@ def load_workflow_config(
             harnesses=config.harnesses,
             roles=config.roles,
             teams=config.teams,
+            error_handling=config.error_handling,
             workflows={**config.workflows, **sibling_config.workflows},
             prompts={**config.prompts, **sibling_config.prompts},
         )
@@ -750,8 +917,8 @@ def validate_workflow_config(
                 f"roles.{role_name} references unknown profile '{profile_name}' "
                 f"for harness '{harness_name}'"
             )
-    for team_name, role_map in config.teams.items():
-        for role_key, selector in role_map.items():
+    for team_name, team_config in config.teams.items():
+        for role_key, selector in team_config.roles.items():
             if role_key not in config.roles:
                 errors.append(
                     f"teams.{team_name}.{role_key} references unknown role '{role_key}'"
@@ -771,6 +938,36 @@ def validate_workflow_config(
                     f"teams.{team_name}.{role_key} references unknown profile '{profile_name}' "
                     f"for harness '{harness_name}'"
                 )
+    for team_name, team_config in config.teams.items():
+        backup_team = team_config.backup_team
+        if backup_team is not None and backup_team not in config.teams:
+            errors.append(
+                f"teams.{team_name}.backup_team references unknown team '{backup_team}'"
+            )
+    visited: set[str] = set()
+    visiting: set[str] = set()
+
+    def walk_backup_chain(team_name: str, chain: list[str]) -> None:
+        if team_name in visiting:
+            cycle_start = chain.index(team_name)
+            cycle = chain[cycle_start:] + [team_name]
+            errors.append(
+                f"teams.{team_name}.backup_team forms a cycle: {' -> '.join(cycle)}"
+            )
+            return
+        if team_name in visited:
+            return
+        visiting.add(team_name)
+        chain.append(team_name)
+        backup_team = config.teams[team_name].backup_team
+        if backup_team is not None and backup_team in config.teams:
+            walk_backup_chain(backup_team, chain)
+        chain.pop()
+        visiting.remove(team_name)
+        visited.add(team_name)
+
+    for team_name in config.teams:
+        walk_backup_chain(team_name, [])
     for wf_name, wf_config in config.workflows.items():
         if wf_config.extends is not None:
             errors.append(
@@ -814,7 +1011,7 @@ def validate_workflow_config(
             else:
                 effective_team = wf_config.team
                 if effective_team is not None and effective_team in config.teams:
-                    team_roles = config.teams[effective_team]
+                    team_roles = config.teams[effective_team].roles
                     if team_lead_role not in team_roles and team_lead_role not in config.roles:
                         errors.append(
                             f"workflow.{wf_name} uses merge but team_lead role "

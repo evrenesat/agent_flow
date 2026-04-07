@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -11,11 +12,13 @@ import unittest
 from unittest.mock import patch
 
 from aflow.api import (
+    AnalyzeRequest,
     PreparedRun,
     StartupError,
     StartupQuestion,
     StartupQuestionKind,
     StartupRequest,
+    analyze_runs,
     prepare_startup,
     prepare_startup_with_answer,
 )
@@ -45,6 +48,44 @@ def _write_config(home_dir: Path, text: str) -> Path:
     config_path.write_text("".join(aflow_lines), encoding="utf-8")
     config_path.with_name("workflows.toml").write_text("".join(workflow_lines), encoding="utf-8")
     return config_path
+
+
+def _write_json(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _snapshot(
+    *,
+    checkpoint_index: int = 1,
+    checkpoint_name: str = "Checkpoint 1: First",
+    unchecked_steps: int = 2,
+    unchecked_checkpoints: int = 1,
+    is_complete: bool = False,
+) -> dict[str, object]:
+    return {
+        "current_checkpoint_index": checkpoint_index,
+        "current_checkpoint_name": checkpoint_name,
+        "current_checkpoint_unchecked_step_count": unchecked_steps,
+        "is_complete": is_complete,
+        "total_checkpoint_count": 1,
+        "unchecked_checkpoint_count": unchecked_checkpoints,
+    }
+
+
+def _write_turn(
+    run_dir: Path,
+    turn_number: int,
+    *,
+    result: dict[str, object],
+    stdout: str = "",
+    stderr: str = "",
+) -> None:
+    turn_dir = run_dir / "turns" / f"turn-{turn_number:03d}"
+    turn_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(turn_dir / "result.json", result)
+    (turn_dir / "stdout.txt").write_text(stdout, encoding="utf-8")
+    (turn_dir / "stderr.txt").write_text(stderr, encoding="utf-8")
 
 
 class LibraryStartupTests(unittest.TestCase):
@@ -606,8 +647,13 @@ class LibraryRunnerTests(unittest.TestCase):
             def build_invocation(self, repo_root, model, system_prompt, user_prompt, effort=None):
                 from aflow.harnesses.base import HarnessInvocation
                 return HarnessInvocation(
-                    argv=[sys.executable, "-c", "print('done')"],
+                    label="fake",
+                    argv=(sys.executable, "-c", "print('done')"),
                     env={},
+                    prompt_mode="text",
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    effective_prompt=user_prompt,
                 )
 
         execute_workflow(
@@ -622,6 +668,84 @@ class LibraryRunnerTests(unittest.TestCase):
 
         self.assertIn(RunStartedEvent, event_types)
         self.assertTrue(any(isinstance(e, RunCompletedEvent) for e in events))
+
+    def test_execute_workflow_emits_recovery_metadata_in_events(self) -> None:
+        from aflow.api import CollectingObserver, RunCompletedEvent, TurnFinishedEvent, execute_workflow
+        from aflow.harnesses.base import HarnessAdapter
+
+        config_text = (
+            '[aflow]\ndefault_workflow = "test"\n\n'
+            '[workflow.test.steps.step1]\nrole = "architect"\nprompts = ["p"]\ngo = [{to = "END", when = "DONE"}, {to = "step1"}]\n\n'
+            '[harness.opencode.profiles.default]\nmodel = "m"\n\n'
+            '[roles]\narchitect = "opencode.default"\n\n'
+            '[prompts]\np = "do it"\n\n'
+            '[error_handling.harness_error_recovery]\n'
+            '[[error_handling.harness_error_recovery.rules]]\n'
+            'action = "retry_same_team_after_delay"\n'
+            'match = ["throttled"]\n'
+        )
+        config_path = _write_config(self.home_dir, config_text)
+        workflow_config = load_workflow_config(config_path)
+        plan_path = self.repo_root / "plan.md"
+        plan_path.write_text("# Plan\n\n### [ ] Checkpoint 1: Test\n- [ ] step one\n")
+
+        request = StartupRequest(
+            repo_root=self.repo_root,
+            plan_path=plan_path,
+            config_path=config_path,
+            workflow_config=workflow_config,
+            workflow_name="test",
+            start_step=None,
+            max_turns=5,
+            team=None,
+            extra_instructions=(),
+        )
+
+        result = prepare_startup(request)
+        self.assertIsInstance(result, PreparedRun)
+
+        observer = CollectingObserver()
+
+        class FakeAdapter(HarnessAdapter):
+            name = "fake"
+            supports_effort = False
+
+            def build_invocation(self, repo_root, model, system_prompt, user_prompt, effort=None):
+                from aflow.harnesses.base import HarnessInvocation
+                return HarnessInvocation(
+                    label="fake",
+                    argv=(sys.executable, "-c", "print('done')"),
+                    env={},
+                    prompt_mode="text",
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    effective_prompt=user_prompt,
+                )
+
+        call_count = {"count": 0}
+
+        def runner(argv, **kwargs):
+            call_count["count"] += 1
+            if call_count["count"] == 1:
+                return subprocess.CompletedProcess(argv, 1, "", "throttled\n")
+            plan_path.write_text("# Plan\n\n### [x] Checkpoint 1: Test\n- [x] step one\n", encoding="utf-8")
+            return subprocess.CompletedProcess(argv, 0, "done\n", "")
+
+        execute_workflow(
+            result,
+            observer=observer,
+            adapter=FakeAdapter(),
+            runner=runner,
+        )
+
+        turn_finished_events = [e for e in observer.events if isinstance(e, TurnFinishedEvent)]
+        self.assertTrue(turn_finished_events)
+        self.assertIsNotNone(turn_finished_events[0].recovery)
+        self.assertEqual(turn_finished_events[0].recovery.action, "retry_same_team_after_delay")
+        run_completed_events = [e for e in observer.events if isinstance(e, RunCompletedEvent)]
+        self.assertTrue(run_completed_events)
+        self.assertEqual(run_completed_events[0].recovery_summary.action, "retry_same_team_after_delay")
+        self.assertEqual(len(run_completed_events[0].recovery_history), 1)
 
     def test_collecting_observer_collects_events(self) -> None:
         """Test that CollectingObserver properly collects events."""
@@ -653,3 +777,184 @@ class LibraryRunnerTests(unittest.TestCase):
         self.assertEqual(len(collected), 1)
         self.assertIsInstance(collected[0], RunStartedEvent)
         self.assertEqual(collected[0].workflow_name, "test")
+
+
+class LibraryAnalyzeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.home_dir = Path(self.temp_dir.name)
+        self.repo_root = self.home_dir / "repo"
+        self.repo_root.mkdir()
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_analyze_runs_explicit_run_id_surfaces_recovery_metadata(self) -> None:
+        runs_root = self.repo_root / ".aflow" / "runs"
+        run_dir = runs_root / "20260401T000100Z-fail"
+        _write_json(
+            run_dir / "run.json",
+            {
+                "status": "failed",
+                "workflow_name": "test",
+                "turns_completed": 1,
+                "failure_reason": "harness failure",
+                "recovery_summary": {
+                    "action": "fail_immediately",
+                    "consecutive_count": 1,
+                    "delay_seconds": 0,
+                    "executed": True,
+                    "from_team": "team-a",
+                    "matched_terms": ["throttled"],
+                    "match_terms": ["throttled"],
+                    "reason": "stop immediately",
+                    "rejection_reason": None,
+                    "source": "deterministic",
+                    "suggested_action": None,
+                    "suggested_keywords": [],
+                    "to_team": "team-a",
+                },
+                "recovery_history": [],
+            },
+        )
+        _write_turn(
+            run_dir,
+            1,
+            result={
+                "turn_number": 1,
+                "step_name": "implement",
+                "status": "failed",
+                "returncode": 1,
+                "snapshot_before": _snapshot(),
+                "snapshot_after": _snapshot(),
+                "recovery_action": "fail_immediately",
+                "recovery_consecutive_count": 1,
+                "recovery_delay_seconds": 0,
+                "recovery_executed": True,
+                "recovery_from_team": "team-a",
+                "recovery_matched_terms": ["throttled"],
+                "recovery_match_terms": ["throttled"],
+                "recovery_reason": "stop immediately",
+                "recovery_rejection_reason": None,
+                "recovery_source": "deterministic",
+                "recovery_suggested_action": None,
+                "recovery_suggested_keywords": [],
+                "recovery_to_team": "team-a",
+            },
+        )
+
+        payload = analyze_runs(AnalyzeRequest(repo_root=self.repo_root, run_id="20260401T000100Z-fail"))
+
+        self.assertEqual(payload["analysis_scope"]["selection"], "explicit_run_id")
+        self.assertEqual(payload["run"]["recovery_summary"]["action"], "fail_immediately")
+        self.assertEqual(payload["run"]["recovery_summary"]["source"], "deterministic")
+        self.assertEqual(payload["run"]["focus_turns"][0]["recovery"]["action"], "fail_immediately")
+        self.assertIn("harness_recovery_fail_immediately", payload["run"]["failure"]["signals"])
+        self.assertIn("harness_recovery_present", payload["run"]["failure"]["signals"])
+
+    def test_analyze_runs_last_run_fallback_uses_last_run_file(self) -> None:
+        runs_root = self.repo_root / ".aflow" / "runs"
+        run_dir = runs_root / "20260401T000200Z-last"
+        _write_json(
+            run_dir / "run.json",
+            {
+                "status": "completed",
+                "workflow_name": "test",
+                "turns_completed": 1,
+            },
+        )
+        _write_turn(
+            run_dir,
+            1,
+            result={
+                "turn_number": 1,
+                "step_name": "implement",
+                "status": "completed",
+                "returncode": 0,
+                "snapshot_before": _snapshot(),
+                "snapshot_after": _snapshot(),
+            },
+        )
+        aflow_dir = self.repo_root / ".aflow"
+        aflow_dir.mkdir(parents=True, exist_ok=True)
+        (aflow_dir / "last_run_id").write_text("20260401T000200Z-last", encoding="utf-8")
+
+        payload = analyze_runs(AnalyzeRequest(repo_root=self.repo_root))
+
+        self.assertEqual(payload["analysis_scope"]["selection"], "last_run_id_file")
+        self.assertEqual(payload["run"]["run_id"], "20260401T000200Z-last")
+
+    def test_analyze_runs_corpus_mode_surfaces_recovery_counts(self) -> None:
+        runs_root = self.repo_root / ".aflow" / "runs"
+
+        run1 = runs_root / "20260401T000300Z-team-lead"
+        _write_json(
+            run1 / "run.json",
+            {
+                "status": "failed",
+                "workflow_name": "test",
+                "turns_completed": 1,
+                "recovery_summary": {
+                    "action": "switch_to_backup_team_and_retry",
+                    "consecutive_count": 1,
+                    "delay_seconds": 0,
+                    "executed": True,
+                    "from_team": "team-a",
+                    "matched_terms": ["quota"],
+                    "match_terms": ["quota"],
+                    "reason": "switch teams",
+                    "rejection_reason": None,
+                    "source": "team_lead",
+                    "suggested_action": "switch_to_backup_team_and_retry",
+                    "suggested_keywords": ["throttled", "quota"],
+                    "to_team": "team-b",
+                },
+                "recovery_history": [],
+            },
+        )
+        _write_turn(
+            run1,
+            1,
+            result={
+                "turn_number": 1,
+                "step_name": "implement",
+                "status": "failed",
+                "returncode": 1,
+                "snapshot_before": _snapshot(),
+                "snapshot_after": _snapshot(),
+                "recovery_action": "switch_to_backup_team_and_retry",
+                "recovery_consecutive_count": 1,
+                "recovery_delay_seconds": 0,
+                "recovery_executed": True,
+                "recovery_from_team": "team-a",
+                "recovery_matched_terms": ["quota"],
+                "recovery_match_terms": ["quota"],
+                "recovery_reason": "switch teams",
+                "recovery_rejection_reason": None,
+                "recovery_source": "team_lead",
+                "recovery_suggested_action": "switch_to_backup_team_and_retry",
+                "recovery_suggested_keywords": ["throttled", "quota"],
+                "recovery_to_team": "team-b",
+            },
+        )
+
+        run2 = runs_root / "20260401T000400Z-noise"
+        _write_json(
+            run2 / "run.json",
+            {
+                "status": "completed",
+                "workflow_name": "other",
+                "turns_completed": 0,
+                "end_reason": "already_complete",
+            },
+        )
+
+        payload = analyze_runs(AnalyzeRequest(repo_root=self.repo_root, all=True))
+
+        self.assertEqual(payload["analysis_scope"]["mode"], "corpus")
+        self.assertEqual(payload["analysis_scope"]["run_count_considered"], 1)
+        self.assertEqual(payload["analysis_scope"]["run_count_skipped_as_noise"], 1)
+        self.assertEqual(payload["runs"][0]["recovery_summary"]["source"], "team_lead")
+        self.assertEqual(payload["runs"][0]["recovery_summary"]["suggested_keywords"], ["throttled", "quota"])
+        self.assertIn("harness_recovery_team_lead", payload["signal_counts"])
+        self.assertIn("harness_recovery_keyword_suggestions", payload["signal_counts"])

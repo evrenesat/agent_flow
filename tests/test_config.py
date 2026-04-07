@@ -103,7 +103,7 @@ class WorkflowConfigTests(unittest.TestCase):
             home_dir = Path(tmpdir)
             config_path = home_dir / '.config' / 'aflow' / 'aflow.toml'
             config_path.parent.mkdir(parents=True, exist_ok=True)
-            config_path.write_text('[aflow]\ndefault_workflow = "review_loop"\n\n[harness.claude.profiles.opus]\nmodel = "claude-opus-4"\n\n[harness.opencode.profiles.turbo]\nmodel = "glm-5-turbo"\n\n[harness.codex.profiles.high]\nmodel = "gpt-5.4"\neffort = "high"\n\n[roles]\narchitect = "claude.opus"\nworker = "opencode.turbo"\nreviewer = "codex.high"\n\n[teams.reviewers]\nreviewer = "claude.opus"\n\n[prompts]\nreview_prompt = "Review the plan."\nimplementation_prompt = "Implement from {ACTIVE_PLAN_PATH}."\nfix_plan_prompt = "Write new plan to {NEW_PLAN_PATH}."\n', encoding='utf-8')
+            config_path.write_text('[aflow]\ndefault_workflow = "review_loop"\n\n[harness.claude.profiles.opus]\nmodel = "claude-opus-4"\n\n[harness.opencode.profiles.turbo]\nmodel = "glm-5-turbo"\n\n[harness.codex.profiles.high]\nmodel = "gpt-5.4"\neffort = "high"\n\n[roles]\narchitect = "claude.opus"\nworker = "opencode.turbo"\nreviewer = "codex.high"\n\n[teams.reviewers]\nbackup_team = "codex1"\n\n[teams.reviewers.roles]\nreviewer = "claude.opus"\n\n[teams.codex1.roles]\nreviewer = "codex.high"\n\n[prompts]\nreview_prompt = "Review the plan."\nimplementation_prompt = "Implement from {ACTIVE_PLAN_PATH}."\nfix_plan_prompt = "Write new plan to {NEW_PLAN_PATH}."\n', encoding='utf-8')
             (config_path.parent / 'workflows.toml').write_text('[workflow.review_loop.steps.review_plan]\nrole = "architect"\nprompts = ["review_prompt"]\ngo = [{ to = "implement_plan" }]\n\n[workflow.review_loop.steps.implement_plan]\nrole = "worker"\nprompts = ["implementation_prompt"]\ngo = [{ to = "review_implementation" }]\n\n[workflow.review_loop.steps.review_implementation]\nrole = "reviewer"\nprompts = ["review_prompt", "fix_plan_prompt"]\ngo = [\n  { to = "END", when = "DONE || MAX_TURNS_REACHED" },\n  { to = "implement_plan" },\n]\n', encoding='utf-8')
             config = load_workflow_config(config_path)
             wf = config.workflows['review_loop']
@@ -111,6 +111,58 @@ class WorkflowConfigTests(unittest.TestCase):
             assert len(wf.steps) == 3
             assert wf.steps['review_plan'].role == 'architect'
             assert wf.steps['review_implementation'].prompts == ('review_prompt', 'fix_plan_prompt')
+
+    def test_parse_legacy_inline_team_roles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                '[aflow]\ndefault_workflow = "simple"\n\n'
+                '[workflow.simple.steps.s]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n'
+                '[harness.opencode.profiles.default]\nmodel = "gpt-5.4"\n\n'
+                '[roles]\narchitect = "opencode.default"\nsenior_architect = "opencode.default"\n\n'
+                '[teams.legacy]\narchitect = "opencode.default"\nsenior_architect = "opencode.default"\n\n'
+                '[prompts]\np = "do it"\n',
+            )
+            config = load_workflow_config(config_path)
+            assert config.teams['legacy'].roles == {
+                'architect': 'opencode.default',
+                'senior_architect': 'opencode.default',
+            }
+            assert config.teams['legacy'].backup_team is None
+
+    def test_parse_nested_team_roles_and_backup_team(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                '[aflow]\ndefault_workflow = "simple"\n\n'
+                '[workflow.simple.steps.s]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n'
+                '[harness.opencode.profiles.default]\nmodel = "gpt-5.4"\n\n'
+                '[roles]\narchitect = "opencode.default"\n\n'
+                '[teams.primary]\nbackup_team = "backup"\n\n'
+                '[teams.primary.roles]\narchitect = "opencode.default"\n\n'
+                '[teams.backup.roles]\narchitect = "opencode.default"\n\n'
+                '[prompts]\np = "do it"\n',
+            )
+            config = load_workflow_config(config_path)
+            assert config.teams['primary'].backup_team == 'backup'
+            assert config.teams['primary'].roles == {'architect': 'opencode.default'}
+
+    def test_parse_rejects_mixed_inline_and_nested_team_roles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                '[aflow]\ndefault_workflow = "simple"\n\n'
+                '[workflow.simple.steps.s]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n'
+                '[harness.opencode.profiles.default]\nmodel = "gpt-5.4"\n\n'
+                '[roles]\narchitect = "opencode.default"\n\n'
+                '[teams.mixed]\narchitect = "opencode.default"\n\n'
+                '[teams.mixed.roles]\nsenior_architect = "opencode.default"\n\n'
+                '[prompts]\np = "do it"\n',
+            )
+            with pytest.raises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            assert 'mixed legacy inline role keys' in str(ctx.value)
+            assert 'teams.mixed' in str(ctx.value)
 
     def test_parse_rejects_legacy_default_harness(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -246,7 +298,8 @@ class WorkflowConfigTests(unittest.TestCase):
         assert config.aflow.max_turns == 15
         assert config.aflow.team_lead == 'senior_architect'
         assert config.roles['architect'] == 'claude.opus'
-        assert config.teams['7teen']['worker'] == 'codex.nano'
+        assert config.teams['7teen'].roles['worker'] == 'codex.nano'
+        assert config.teams['codex1'].backup_team == '7teen'
         assert config.workflows['ralph'].steps['implement_plan'].role == 'worker'
         assert config.workflows['ralph'].setup == ('worktree', 'branch')
         assert config.workflows['ralph'].teardown == ('merge', 'rm_worktree')
@@ -275,7 +328,10 @@ class WorkflowConfigTests(unittest.TestCase):
         assert 'workflows.toml' in architecture
         assert '# Default workflow used when the CLI does not name one.' in aflow_text
         assert '# Harness profiles map a harness name to the model and effort values it should run.' in aflow_text
-        assert '# Team-specific role overrides. Missing roles fall back to the global [roles] map.' in aflow_text
+        assert '# Team-specific role overrides live under [teams.<name>.roles]. Missing roles fall back' in aflow_text
+        assert "backup_team = '7teen'" in aflow_text
+        assert '# [error_handling.harness_error_recovery]' in aflow_text
+        assert 'retry_same_team_after_delay' in aflow_text
         assert '# Named prompt templates that workflow steps reference by key.' in aflow_text
         assert '# Alias workflow, inherits `ralph` steps but runs branch-only lifecycle with a per-workflow merge prompt.' in workflows_text
         assert '# The step runs under a role. The selected team decides which selector that role maps to at runtime.' in workflows_text
@@ -293,6 +349,10 @@ class WorkflowConfigTests(unittest.TestCase):
         assert '--include-optional' in readme
         assert '--only' in readme
         assert 'aflow analyze' in readme
+        assert 'AnalyzeRequest' in readme
+        assert 'error_handling.harness_error_recovery' in readme
+        assert 'backup_team' in readme
+        assert 'aflow-harness-recovery-lead' in readme
         assert 'AFLOW_LAST_RUN_ID' in readme
         assert 'last_run_ids' in readme
         assert 'resume' in readme
@@ -304,6 +364,10 @@ class WorkflowConfigTests(unittest.TestCase):
         assert 'aflow-merge' in architecture
         assert 'aflow-assistant' in architecture
         assert 'aflow analyze' in architecture
+        assert 'aflow.api.analyze' in architecture
+        assert 'AnalyzeRequest' in architecture
+        assert 'backup_team' in architecture
+        assert 'aflow-harness-recovery-lead' in architecture
         assert 'AFLOW_LAST_RUN_ID' in architecture
         assert '.aflow/last_run_id' in architecture
         assert 'last_run_ids' in architecture
@@ -312,6 +376,8 @@ class WorkflowConfigTests(unittest.TestCase):
         assert 'optional bundled' in architecture
 
         assert 'resume' in devlog
+        assert 'Harness recovery docs and public analyze API' in devlog
+        assert 'AnalyzeRequest' in devlog
         assert 'AFLOW_LAST_RUN_ID' in devlog
         assert 'last_run_ids' in devlog
 
@@ -580,7 +646,7 @@ class WorkflowConfigTests(unittest.TestCase):
                 '[workflow.simple.steps.s1]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n'
                 '[harness.opencode.profiles.default]\nmodel = "m"\n\n'
                 '[roles]\narchitect = "opencode.default"\n\n'
-                '[teams.7teen]\narchitect = "opencode.default"\n\n'
+                '[teams.7teen]\n\n[teams.7teen.roles]\narchitect = "opencode.default"\n\n'
                 '[prompts]\np = "do it"\n',
             )
             with pytest.raises(ConfigError) as ctx:
@@ -597,7 +663,7 @@ class WorkflowConfigTests(unittest.TestCase):
                 '[workflow.simple.steps.s1]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n'
                 '[harness.opencode.profiles.default]\nmodel = "m"\n\n'
                 '[roles]\narchitect = "opencode.default"\nsenior_architect = "opencode.default"\n\n'
-                '[teams.7teen]\narchitect = "opencode.default"\n\n'
+                '[teams.7teen]\n\n[teams.7teen.roles]\narchitect = "opencode.default"\n\n'
                 '[prompts]\np = "do it"\n',
             )
             config = load_workflow_config(config_path)
@@ -650,6 +716,128 @@ class WorkflowConfigTests(unittest.TestCase):
             assert wf.setup == ('worktree', 'branch')
             assert wf.teardown == ('merge', 'rm_worktree')
             assert validate_workflow_config(config) == []
+
+
+class HarnessErrorRecoveryConfigTests(unittest.TestCase):
+
+    def _write_workflow_config(self, tmpdir: str, text: str) -> Path:
+        home_dir = Path(tmpdir)
+        return _write_config(home_dir, text)
+
+    def _minimal_config(self, extra: str = '') -> str:
+        return (
+            '[aflow]\ndefault_workflow = "simple"\n\n'
+            '[workflow.simple.steps.s]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n'
+            '[harness.codex.profiles.default]\nmodel = "gpt-5.4"\n\n'
+            '[roles]\narchitect = "codex.default"\n\n'
+            '[teams.primary]\nbackup_team = "backup"\n\n'
+            '[teams.primary.roles]\narchitect = "codex.default"\n\n'
+            '[teams.backup.roles]\narchitect = "codex.default"\n\n'
+            f'{extra}'
+            '[prompts]\np = "do it"\n'
+        )
+
+    def test_parse_harness_error_recovery_rules_and_backup_team(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                self._minimal_config(
+                    '[error_handling.harness_error_recovery]\n'
+                    'max_consecutive_recoveries = 4\n'
+                    'team_lead_skill = "aflow-harness-recovery-lead"\n\n'
+                    '[[error_handling.harness_error_recovery.rules]]\n'
+                    'action = "retry_same_team_after_delay"\n'
+                    'match = ["throttled", "rate limit"]\n'
+                    'delay_seconds = 30\n\n'
+                    '[[error_handling.harness_error_recovery.rules]]\n'
+                    'action = "switch_to_backup_team_and_retry"\n'
+                    'match = ["quota exceeded", "account exhausted"]\n\n'
+                    '[[error_handling.harness_error_recovery.rules]]\n'
+                    'action = "fail_immediately"\n'
+                    'match = ["invalid prompt payload"]\n'
+                ),
+            )
+            config = load_workflow_config(config_path)
+            recovery = config.error_handling.harness_error_recovery
+            assert config.teams['primary'].backup_team == 'backup'
+            assert recovery.max_consecutive_recoveries == 4
+            assert recovery.team_lead_skill == 'aflow-harness-recovery-lead'
+            assert len(recovery.rules) == 3
+            assert recovery.rules[0].action == 'retry_same_team_after_delay'
+            assert recovery.rules[0].match == ('throttled', 'rate limit')
+            assert recovery.rules[0].delay_seconds == 30
+            assert recovery.rules[1].action == 'switch_to_backup_team_and_retry'
+            assert recovery.rules[1].delay_seconds == 0
+            assert recovery.rules[2].action == 'fail_immediately'
+
+    def test_rejects_invalid_recovery_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                self._minimal_config(
+                    '[error_handling.harness_error_recovery]\n'
+                    '[[error_handling.harness_error_recovery.rules]]\n'
+                    'action = "not_an_action"\n'
+                    'match = ["throttled"]\n'
+                ),
+            )
+            with pytest.raises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            assert 'retry_same_team_after_delay' in str(ctx.value)
+            assert 'switch_to_backup_team_and_retry' in str(ctx.value)
+            assert 'fail_immediately' in str(ctx.value)
+
+    def test_rejects_unknown_backup_team(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                '[aflow]\ndefault_workflow = "simple"\n\n'
+                '[workflow.simple.steps.s]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n'
+                '[harness.codex.profiles.default]\nmodel = "gpt-5.4"\n\n'
+                '[roles]\narchitect = "codex.default"\n\n'
+                '[teams.primary]\nbackup_team = "missing"\n\n'
+                '[teams.primary.roles]\narchitect = "codex.default"\n\n'
+                '[prompts]\np = "do it"\n',
+            )
+            with pytest.raises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            assert 'backup_team' in str(ctx.value)
+            assert 'missing' in str(ctx.value)
+
+    def test_rejects_backup_team_cycles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                '[aflow]\ndefault_workflow = "simple"\n\n'
+                '[workflow.simple.steps.s]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n\n'
+                '[harness.codex.profiles.default]\nmodel = "gpt-5.4"\n\n'
+                '[roles]\narchitect = "codex.default"\n\n'
+                '[teams.a]\nbackup_team = "b"\n\n'
+                '[teams.a.roles]\narchitect = "codex.default"\n\n'
+                '[teams.b]\nbackup_team = "a"\n\n'
+                '[teams.b.roles]\narchitect = "codex.default"\n\n'
+                '[prompts]\np = "do it"\n',
+            )
+            with pytest.raises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            assert 'cycle' in str(ctx.value)
+            assert 'teams.a.backup_team' in str(ctx.value) or 'teams.b.backup_team' in str(ctx.value)
+
+    def test_rejects_delay_seconds_for_fail_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_workflow_config(
+                tmpdir,
+                self._minimal_config(
+                    '[error_handling.harness_error_recovery]\n'
+                    '[[error_handling.harness_error_recovery.rules]]\n'
+                    'action = "fail_immediately"\n'
+                    'match = ["throttled"]\n'
+                    'delay_seconds = 1\n'
+                ),
+            )
+            with pytest.raises(ConfigError) as ctx:
+                load_workflow_config(config_path)
+            assert 'delay_seconds' in str(ctx.value)
 
 
 class RetryInconsistentCheckpointConfigTests(unittest.TestCase):

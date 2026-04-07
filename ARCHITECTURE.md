@@ -51,11 +51,11 @@ Entry point. Exposes three subcommands:
   - Two positionals are resolved intelligently by file existence and workflow name validity; one positional is always treated as the plan path.
   - `--start-step`/`-ss` accepts either a workflow step name or a 1-based numeric index into the declared workflow step order.
 - **`aflow install-skills [destination]`** -- copies bundled skills into harness skill directories.
-  - The default install set is the eight default bundled skills.
+  - The default install set is the nine default bundled skills, including `aflow-harness-recovery-lead`.
   - `--include-optional` adds optional bundled skills such as `aflow-assistant`.
   - `--only` installs exactly the named skill(s).
 - **`aflow analyze [RUN_ID] [--all]`** -- analyzes run logs from `.aflow/runs/`.
-  - Single-run mode resolves the target run in `analyzer.py`, not in the installer path.
+  - Single-run mode resolves the target run in `analyzer.py`, and the CLI delegates to `aflow.api.analyze.analyze_runs()` so library callers get the same behavior.
 
 `main()` resolves `aflow run` startup in this order:
 
@@ -83,7 +83,8 @@ Analyzes `.aflow/runs/` artifacts and powers `aflow analyze`.
 Loads `~/.config/aflow/aflow.toml` plus sibling `workflows.toml` (bootstrapped from the bundled defaults on first run). Parses and validates:
 - **`[aflow]`** section: `default_workflow`, `keep_runs`, `max_turns`, `retry_inconsistent_checkpoint_state`, `banner_files_limit`, `max_same_step_turns`, `team_lead`, `branch_prefix`, `worktree_prefix`, `worktree_root`.
 - **`[harness.<name>.profiles.<profile>]`** tables: `model`, optional `effort` per harness profile.
-- **`[roles]`** and **`[teams.<name>]`** tables: role-to-selector mappings, with team tables allowed to override a subset of the global map.
+- **`[roles]`** and **`[teams.<name>]`** tables: role-to-selector mappings, with team tables allowed to override a subset of the global map and optionally name a `backup_team` for harness recovery chaining.
+- **`[error_handling.harness_error_recovery]`**: ordered recovery rules, `max_consecutive_recoveries`, and the bundled fallback skill name used when deterministic matching cannot decide safely.
 - **`[prompts]`** section: named prompt templates.
 - Bare **`[workflow]`** table in `workflows.toml`: lifecycle defaults (`setup`, `teardown`, `main_branch`, `merge_prompt`) inherited by all workflows that don't override them. Not a runnable workflow.
 - **`[workflow.<name>]`** tables in `workflows.toml`: concrete workflows define `steps`, alias workflows use `extends` and optional `team`. Both may override lifecycle defaults with `setup`, `teardown`, `main_branch`, and `merge_prompt`.
@@ -123,6 +124,8 @@ The core engine. `run_workflow()` executes the turn loop:
    j. Evaluate `go` transitions using condition symbols (`DONE`, `NEW_PLAN_EXISTS`, `MAX_TURNS_REACHED`).
    k. Log turn artifacts and update run metadata.
    l. If transition target is `END`, return. For multi-step workflows, check the same-step cap: if the same step has been selected consecutively `max_same_step_turns` times, fail the run before starting the next turn. Otherwise, advance to the next step.
+
+   Harness error recovery is inserted after the harness returns and before normal transition handling. If the turn made no plan progress and a configured error-handling rule matches the harness output, the engine applies the first deterministic rule in order. Rules can keep the same team, switch to a configured `backup_team`, or fail immediately. When no deterministic rule matches, the engine escalates to the configured team lead through the bundled `aflow-harness-recovery-lead` skill and expects a strict machine-readable decision. Progress-gated turns skip recovery entirely and continue on the normal transition path.
 5. After normal workflow completion, if `teardown` includes `merge`, execute the merge handoff: resolve `[aflow].team_lead` through the effective team, build a merge prompt (built-in `aflow-merge` instruction plus rendered `merge_prompt` entries), and run the `team_lead` agent from the primary checkout. After the agent returns, verify: no unmerged index entries, clean working tree, HEAD on `main_branch`, and feature branch is an ancestor of the target. Only after all checks pass does `rm_worktree` (if configured) remove the linked worktree. Any verification failure leaves the feature branch and worktree intact and fails the run with the specific failed check.
 6. If the workflow uses the worktree+branch lifecycle, `aflow` resolves the previous run id through the current shell's `.aflow/last_run_ids/<shell-id>` entry when it can detect one, then `AFLOW_LAST_RUN_ID`, then `.aflow/last_run_id`, and loads the recorded `run.json`. When that run is unfinished, the resolved invocation matches on repo root, workflow name, absolute plan path, effective team, selected start step, max turns, extra instructions, and lifecycle setup, and stdin/stdout are TTYs, `aflow` asks whether to resume. Accepted resume builds a `ResumeContext` from the recorded branch and worktree, validates that worktree before execution, and starts `run_workflow()` directly in the reused execution context instead of provisioning a fresh one. Declining the prompt, or running non-interactively, falls back to the existing fresh-run path. The plan file on disk still remains the durable checkpoint state.
 
@@ -179,10 +182,10 @@ Rich-based live banner rendered to stderr during a run. Shows elapsed time, work
 `BannerRenderer` owns a background daemon thread that rebuilds and pushes the panel every `refresh_interval_seconds` (default 1 s) and polls for a new `GitSummary` every `git_poll_interval_seconds` (default 10 s). This keeps the elapsed timer alive between step transitions without requiring external pushes. `set_context(...)` is used to update mutable banner fields instead of directly writing private attributes.
 
 ### `skill_installer.py`
-Discovers the default bundled skills plus the optional bundled skills from package resources, and copies the selected set into harness-specific skill directories. `BUNDLED_SKILL_NAMES` is the full sorted inventory of valid bundled skill names, while `DEFAULT_BUNDLED_SKILL_NAMES` and `OPTIONAL_BUNDLED_SKILL_NAMES` preserve install behavior. Supports auto-detection (looks for harness CLIs on PATH) and manual mode (explicit destination path). Handles duplicate destinations when multiple harnesses share a path (e.g., codex, copilot, gemini, and pi all use `~/.agents/skills`).
+Discovers the nine default bundled skills plus the optional bundled skills from package resources, and copies the selected set into harness-specific skill directories. `BUNDLED_SKILL_NAMES` is the full sorted inventory of valid bundled skill names, while `DEFAULT_BUNDLED_SKILL_NAMES` and `OPTIONAL_BUNDLED_SKILL_NAMES` preserve install behavior. The default inventory includes `aflow-harness-recovery-lead`. Supports auto-detection (looks for harness CLIs on PATH) and manual mode (explicit destination path). Handles duplicate destinations when multiple harnesses share a path (e.g., codex, copilot, gemini, and pi all use `~/.agents/skills`).
 
 ### `bundled_skills/`
-Eight default Markdown-based skill definitions plus one optional shipped skill installed into harness skill directories:
+Nine default Markdown-based skill definitions plus one optional shipped skill installed into harness skill directories:
 
 | Skill                       | Purpose                                                        |
 |-----------------------------|----------------------------------------------------------------|
@@ -194,10 +197,15 @@ Eight default Markdown-based skill definitions plus one optional shipped skill i
 | `aflow-review-final`        | Final review without squash; approve or create follow-up plan  |
 | `aflow-merge`               | Local-only merge handoff; preserves commits, resolves conflicts, emits `AFLOW_STOP:` for irrecoverable states |
 | `aflow-init-repo`           | Pre-lifecycle bootstrap; initializes a local repo and creates the initial commit from the plan preamble       |
+| `aflow-harness-recovery-lead` | Team-lead fallback for harness recovery; returns a strict machine-readable recovery decision |
 | `aflow-assistant`           | Optional evidence-first debugging and setup helper              |
 
 ### `api/`
 Public library API for startup preparation and workflow execution. Re-exported from `aflow/__init__.py` for stable imports.
+
+**Run analysis (`analyze.py`):**
+- `AnalyzeRequest` -- immutable request parameters for public run analysis. Supports single-run mode via `run_id` and corpus mode via `all=True`.
+- `analyze_runs(request: AnalyzeRequest) -> dict[str, object]` -- shared helper used by both the CLI and library callers. It mirrors `aflow analyze` resolution and output shape.
 
 **Startup preparation (`startup.py`):**
 - `prepare_startup(request: StartupRequest) -> PreparedRun | StartupQuestion` — Main entry point for startup preparation. Returns either a `PreparedRun` (ready to execute) or a `StartupQuestion` (needs user input).
