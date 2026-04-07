@@ -31,7 +31,7 @@ uv run python -m aflow run path/to/plan.md
 
 ## Install Skills
 
-`aflow install-skills` copies the eight default bundled skills into harness skill directories. The optional `aflow-assistant` skill is not installed unless you ask for it.
+`aflow install-skills` copies the nine default bundled skills, including `aflow-harness-recovery-lead`, into harness skill directories. The optional `aflow-assistant` skill is not installed unless you ask for it.
 
 `aflow-assistant` is for setup help, aflow concepts, and evidence-first run debugging.
 
@@ -113,6 +113,17 @@ config = RunnerConfig(
 runner = WorkflowRunner(config)
 run_result = runner.run()
 ```
+
+Run analysis is also available through the public Python API, so callers do not need to shell out to `aflow analyze`:
+
+```python
+from pathlib import Path
+from aflow.api import AnalyzeRequest, analyze_runs
+
+payload = analyze_runs(AnalyzeRequest(repo_root=Path("."), run_id="20260407-121715"))
+```
+
+`AnalyzeRequest` uses the same single-run and corpus behavior as the CLI. Set `all=True` for corpus mode.
 
 When startup preparation returns a `StartupQuestion`, the caller decides how to present it. The CLI renders questions as TTY prompts; non-CLI callers can present them in any UI or answer programmatically through `prepare_startup_with_answer()`.
 
@@ -288,8 +299,23 @@ worker = "codex.high"
 reviewer = "codex.high"
 senior_architect = "codex.high"
 
+[teams.codex1]
+backup_team = "7teen"
+
+[teams.codex1.roles]
+worker = "codex.high"
+
 [teams.7teen]
 worker = "codex.nano"
+
+[error_handling.harness_error_recovery]
+max_consecutive_recoveries = 3
+team_lead_skill = "aflow-harness-recovery-lead"
+
+[[error_handling.harness_error_recovery.rules]]
+action = "retry_same_team_after_delay"
+match = ["throttled", "rate limit"]
+delay_seconds = 30
 
 [prompts]
 simple_implementation = "Work from {ACTIVE_PLAN_PATH}. Use 'aflow-execute-plan' skill."
@@ -328,6 +354,7 @@ Config rules that matter in practice:
 - `harness.<name>.profiles.<profile>` tables set `model` and optional `effort`.
 - Global roles map to fully qualified `harness.profile` selectors.
 - Team tables override a subset of global roles, and any missing role falls back to `[roles]`.
+- Team tables can also set `backup_team`, which names the next team to try when harness recovery switches away from the current team.
 - `workflows.toml` holds concrete workflows, and `[workflow.<name>]` can use `extends` plus an optional `team` override for aliases.
 - Bare `[workflow]` in `workflows.toml` is the lifecycle defaults table, not a runnable workflow. Concrete workflows and aliases inherit from it and can override `setup`, `teardown`, `main_branch`, and `merge_prompt`.
 - Supported lifecycle combinations are validated as `(setup, teardown)` tuples. The only accepted pairs in v1 are: `([], [])` (no lifecycle), `(["branch"], ["merge"])` (branch-only), `(["worktree", "branch"], ["merge", "rm_worktree"])` (worktree flow).
@@ -339,6 +366,15 @@ Config rules that matter in practice:
 - Supported condition symbols are `DONE`, `NEW_PLAN_EXISTS`, and `MAX_TURNS_REACHED`.
 - Boolean expressions support `&&`, `||`, `!`, and parentheses.
 - A transition without `when` is an unconditional fallback.
+
+Harness error recovery lives under `[error_handling.harness_error_recovery]`:
+
+- `rules` are checked in declaration order and the first match wins.
+- Supported actions are `retry_same_team_after_delay`, `switch_to_backup_team_and_retry`, and `fail_immediately`.
+- `delay_seconds` is accepted only for the retry and switch actions, and defaults to `0` when omitted.
+- `max_consecutive_recoveries` caps repeated recovery attempts for a run and defaults to `3`.
+- `team_lead_skill` names the bundled fallback skill used when deterministic rules do not produce a decision. The bundled default is `aflow-harness-recovery-lead`.
+- Recovery only runs when the turn did not advance the plan snapshot. If the snapshot changed, `aflow` skips recovery and continues through the normal transition path.
 
 Condition symbols mean exactly this at transition-evaluation time:
 
@@ -372,7 +408,7 @@ At a high level:
 2. If the workflow has a non-empty `setup`, `aflow` inspects the git state at the repo root. If the directory has no git repository yet, or has a git repository with no commits, `aflow` auto-bootstraps it: the team lead agent (resolved from `[aflow].team_lead`) initializes a local repository on `main_branch`, writes a `README.md` derived from the plan preamble, and creates the initial commit. Before lifecycle setup starts, `aflow` also checks live `## Git Tracking` metadata when the original plan contains it. If `Pre-Handoff Base HEAD` is empty or stale on a pristine handoff, interactive startup can ask whether to refresh that field to the current `git rev-parse HEAD` value. If the handoff already has checkpoint or review progress, the same mismatch fails instead of offering a refresh. After bootstrap verification passes, `aflow` continues into normal lifecycle preflight and, if approved, applies the base-HEAD refresh after lifecycle setup but before the first prompt. For this to work, git must be installed locally. If git is unavailable, the run fails with a clear error. Existing committed repositories are not affected: no re-initialization, no automatic branch creation, no remote interaction. After bootstrap (or for repos that already have commits), `aflow` runs lifecycle preflight checks and creates the execution environment (a local feature branch for branch-only flows, a linked worktree plus feature branch for worktree flows). For worktree flows, normal steps run inside the created worktree while run artifacts stay under the primary checkout.
 3. It starts at the workflow's first declared step.
 4. It renders the step prompts, resolves the step role through the selected team and global `[roles]` map, and runs the harness CLI once for that step.
-5. After the harness returns, it re-reads the original plan file and evaluates the step's `go` transitions.
+5. After the harness returns, it re-reads the original plan file. If the turn did not advance the plan and a configured recovery rule matches, `aflow` applies deterministic recovery first and only falls back to the team-lead recovery skill when no deterministic rule can decide safely. If the turn did advance the plan, recovery is skipped and the normal transition path continues.
 6. The next matching transition decides whether to continue with another step or stop at `END`.
 7. After normal workflow completion, if `teardown` includes `merge`, `aflow` invokes a merge handoff: the agent resolved from `[aflow].team_lead` is given the built-in `aflow-merge` instruction plus any configured `merge_prompt` entries. The merge runs locally against the primary checkout. After successful merge verification, `rm_worktree` (if configured) removes the linked worktree.
 

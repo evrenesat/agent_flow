@@ -152,6 +152,53 @@ def summarize_reason_text(reason: str | None) -> list[str]:
     return [lines[0]]
 
 
+def _normalize_recovery_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+
+    normalized = {
+        "source": payload.get("source", payload.get("recovery_source")),
+        "action": payload.get("action", payload.get("recovery_action")),
+        "match_terms": list(payload.get("match_terms", payload.get("recovery_match_terms", [])) or []),
+        "matched_terms": list(payload.get("matched_terms", payload.get("recovery_matched_terms", [])) or []),
+        "delay_seconds": payload.get("delay_seconds", payload.get("recovery_delay_seconds")),
+        "from_team": payload.get("from_team", payload.get("recovery_from_team")),
+        "to_team": payload.get("to_team", payload.get("recovery_to_team")),
+        "reason": payload.get("reason", payload.get("recovery_reason")),
+        "consecutive_count": payload.get("consecutive_count", payload.get("recovery_consecutive_count")),
+        "suggested_keywords": list(payload.get("suggested_keywords", payload.get("recovery_suggested_keywords", [])) or []),
+        "suggested_action": payload.get("suggested_action", payload.get("recovery_suggested_action")),
+        "executed": payload.get("executed", payload.get("recovery_executed")),
+        "rejection_reason": payload.get("rejection_reason", payload.get("recovery_rejection_reason")),
+    }
+    if not any(value is not None and value != [] for value in normalized.values()):
+        return None
+    return normalized
+
+
+def _recovery_signal_names(recovery: dict[str, Any] | None) -> list[str]:
+    if recovery is None:
+        return []
+
+    signals: list[str] = ["harness_recovery_present"]
+    source = recovery.get("source")
+    action = recovery.get("action")
+    if source == "deterministic":
+        signals.append("harness_recovery_deterministic")
+    elif source == "team_lead":
+        signals.append("harness_recovery_team_lead")
+
+    if action == "switch_to_backup_team_and_retry" or recovery.get("from_team") != recovery.get("to_team"):
+        signals.append("harness_recovery_team_switch")
+    if action == "fail_immediately":
+        signals.append("harness_recovery_fail_immediately")
+    if recovery.get("suggested_keywords"):
+        signals.append("harness_recovery_keyword_suggestions")
+    if recovery.get("suggested_action"):
+        signals.append("harness_recovery_suggested_action")
+    return signals
+
+
 def analyze_progress_tail(turns: list[dict[str, Any]]) -> dict[str, Any]:
     finalized_turns = list(turns)
     while finalized_turns and (
@@ -198,10 +245,16 @@ def analyze_turn(turn: dict[str, Any]) -> dict[str, Any]:
     if turn.get("returncode") not in (None, 0):
         signals.add("nonzero_returncode")
 
+    recovery = _normalize_recovery_payload(turn)
+    if recovery is not None:
+        signals.update(_recovery_signal_names(recovery))
+
     aflow_stop_messages = extract_aflow_stop(stdout_text) + extract_aflow_stop(stderr_text)
     highlights = summarize_text_lines(combined_text)
     if turn.get("error"):
         highlights = summarize_reason_text(str(turn.get("error"))) + highlights
+    if recovery is not None and recovery.get("reason"):
+        highlights = summarize_reason_text(str(recovery["reason"])) + highlights
 
     before_sig = snapshot_signature(turn.get("snapshot_before"))
     after_sig = snapshot_signature(turn.get("snapshot_after"))
@@ -220,6 +273,7 @@ def analyze_turn(turn: dict[str, Any]) -> dict[str, Any]:
         "error": turn.get("error"),
         "finished_at": turn.get("finished_at"),
         "highlights": highlights,
+        "recovery": recovery,
         "returncode": turn.get("returncode"),
         "selector": turn.get("selector"),
         "signals": sorted(signals),
@@ -309,6 +363,7 @@ def compact_turn(turn: dict[str, Any]) -> dict[str, Any]:
         "error": turn["error"],
         "finished_at": turn["finished_at"],
         "highlights": turn["highlights"],
+        "recovery": turn["recovery"],
         "returncode": turn["returncode"],
         "selector": turn["selector"],
         "signals": turn["signals"],
@@ -323,6 +378,15 @@ def summarize_run(run_dir: Path, run_json: dict[str, Any], turns: list[dict[str,
     signals: set[str] = set()
     notes: list[str] = []
     aflow_stop_messages: list[str] = []
+    recovery_summary = _normalize_recovery_payload(
+        run_json.get("recovery_summary") if isinstance(run_json.get("recovery_summary"), dict) else run_json
+    )
+    recovery_history_raw = run_json.get("recovery_history")
+    recovery_history = [
+        normalized
+        for item in recovery_history_raw
+        if (normalized := _normalize_recovery_payload(item)) is not None
+    ] if isinstance(recovery_history_raw, list) else []
 
     if run_json.get("failure_reason"):
         signals.add("workflow_failure")
@@ -336,6 +400,18 @@ def summarize_run(run_dir: Path, run_json: dict[str, Any], turns: list[dict[str,
 
     if "inconsistent checkpoint state" in str(run_json.get("startup_recovery_reason", "")).lower():
         signals.add("inconsistent_checkpoint_state")
+    if recovery_summary is not None:
+        signals.update(_recovery_signal_names(recovery_summary))
+        notes.append(f"recovery {recovery_summary.get('source')}:{recovery_summary.get('action')}")
+        if recovery_summary.get("from_team") or recovery_summary.get("to_team"):
+            notes.append(
+                f"recovery team switch {recovery_summary.get('from_team')} -> {recovery_summary.get('to_team')}"
+            )
+        if recovery_summary.get("suggested_keywords"):
+            notes.append(
+                "recovery suggested keywords: "
+                + ", ".join(str(keyword) for keyword in recovery_summary.get("suggested_keywords", []))
+            )
 
     last_turn_status = turns[-1].get("status") if turns else None
     if last_turn_status == "starting":
@@ -416,6 +492,8 @@ def summarize_run(run_dir: Path, run_json: dict[str, Any], turns: list[dict[str,
             "tail_turn_numbers": progress["tail_turn_numbers"],
             "unchanged_snapshot_turns": progress["unchanged_snapshot_turns"],
         },
+        "recovery_history": recovery_history,
+        "recovery_summary": recovery_summary,
         "run_id": run_dir.name,
         "selected_start_step": run_json.get("selected_start_step"),
         "signal_turns": signal_turns,
@@ -436,6 +514,8 @@ def summarize_run_compact(run_dir: Path, run_json: dict[str, Any], turns: list[d
         },
         "last_turn_status": detailed["last_turn_status"],
         "outcome": detailed["outcome"],
+        "recovery_history": detailed["recovery_history"],
+        "recovery_summary": detailed["recovery_summary"],
         "paths": {
             "run_dir": detailed["paths"]["run_dir"],
             "run_json": detailed["paths"]["run_json"],

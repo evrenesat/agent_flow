@@ -159,7 +159,8 @@ def _resolve_effective_team(request: StartupRequest, workflow_name: str) -> str 
     """Resolve effective team from request or workflow config."""
     workflow = request.workflow_config.workflows[workflow_name]
     team = request.team if request.team is not None else workflow.team
-    if team is not None and team not in request.workflow_config.teams:
+    team_config = request.workflow_config.teams.get(team) if team is not None else None
+    if team is not None and team_config is None:
         known_teams = ", ".join(sorted(request.workflow_config.teams)) or "none"
         raise StartupError(
             f"Workflow '{workflow_name}' references unknown team '{team}'. "

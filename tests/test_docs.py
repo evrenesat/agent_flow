@@ -5,7 +5,7 @@ class SkillDocsTests(unittest.TestCase):
     def test_skill_files_do_not_contain_workflow_placeholders(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         placeholders = ('{ORIGINAL_PLAN_PATH}', '{ACTIVE_PLAN_PATH}', '{NEW_PLAN_PATH}')
-        for skill_name in ('aflow-plan', 'aflow-execute-plan', 'aflow-execute-checkpoint', 'aflow-review-squash', 'aflow-review-checkpoint', 'aflow-review-final', 'aflow-merge', 'aflow-assistant'):
+        for skill_name in ('aflow-plan', 'aflow-execute-plan', 'aflow-execute-checkpoint', 'aflow-review-squash', 'aflow-review-checkpoint', 'aflow-review-final', 'aflow-merge', 'aflow-harness-recovery-lead', 'aflow-assistant'):
             skill_path = repo_root / 'aflow' / 'bundled_skills' / skill_name / 'SKILL.md'
             text = skill_path.read_text(encoding='utf-8')
             for placeholder in placeholders:
@@ -21,6 +21,7 @@ class SkillDocsTests(unittest.TestCase):
             'aflow-review-checkpoint',
             'aflow-review-final',
             'aflow-merge',
+            'aflow-harness-recovery-lead',
             'aflow-assistant',
         ):
             skill_path = repo_root / 'aflow' / 'bundled_skills' / skill_name / 'SKILL.md'

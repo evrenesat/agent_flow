@@ -15,6 +15,13 @@ WorkflowEndReason = Literal[
     "transition_end",
 ]
 
+HarnessRecoverySource = Literal["deterministic", "team_lead"]
+HarnessRecoveryAction = Literal[
+    "retry_same_team_after_delay",
+    "switch_to_backup_team_and_retry",
+    "fail_immediately",
+]
+
 
 def describe_end_reason(end_reason: WorkflowEndReason) -> str:
     if end_reason == "already_complete":
@@ -52,6 +59,23 @@ class RetryContext:
     parse_error_str: str
     attempt: int
     retry_limit: int
+
+
+@dataclass(frozen=True)
+class HarnessRecoveryContext:
+    source: HarnessRecoverySource
+    action: HarnessRecoveryAction
+    reason: str
+    match_terms: tuple[str, ...] = ()
+    matched_terms: tuple[str, ...] = ()
+    delay_seconds: int | None = 0
+    from_team: str | None = None
+    to_team: str | None = None
+    consecutive_count: int = 0
+    suggested_keywords: tuple[str, ...] = ()
+    suggested_action: HarnessRecoveryAction | None = None
+    executed: bool = True
+    rejection_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -106,6 +130,11 @@ class ControllerState:
     startup_recovery_reason: str | None = None
     end_reason: WorkflowEndReason | None = None
     pending_retry: RetryContext | None = None
+    current_team: str | None = None
+    current_team_override: str | None = None
+    current_harness_recovery: HarnessRecoveryContext | None = None
+    harness_recovery_history: list[HarnessRecoveryContext] = field(default_factory=list)
+    consecutive_harness_recoveries: int = 0
     turn_history: list[TurnRecord] = field(default_factory=list)
     consec_step_name: str | None = None
     consec_step_count: int = 0
@@ -130,6 +159,8 @@ class ControllerRunResult:
     status: str = "completed"
     issues_accumulated: int = 0
     end_reason: WorkflowEndReason = "transition_end"
+    recovery_summary: HarnessRecoveryContext | None = None
+    recovery_history: tuple[HarnessRecoveryContext, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         from dataclasses import asdict
@@ -140,4 +171,6 @@ class ControllerRunResult:
             "status": self.status,
             "issues_accumulated": self.issues_accumulated,
             "end_reason": self.end_reason,
+            "recovery_summary": asdict(self.recovery_summary) if self.recovery_summary is not None else None,
+            "recovery_history": [asdict(item) for item in self.recovery_history],
         }

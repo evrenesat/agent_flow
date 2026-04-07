@@ -1,4 +1,5 @@
 from aflow._test_support import *  # noqa: F401,F403
+from aflow.config import ErrorHandlingConfig, HarnessErrorRecoveryConfig, HarnessErrorRecoveryRuleConfig
 
 class WorkflowRuntimeTests(unittest.TestCase):
 
@@ -305,13 +306,35 @@ class WorkflowRuntimeTests(unittest.TestCase):
                 'senior_architect': 'opencode.default',
             },
             teams={
-                '7teen': {
-                    'architect': 'gemini.fast',
-                },
+                '7teen': TeamConfig(roles={'architect': 'gemini.fast'}),
             },
         )
         assert resolve_role_selector('architect', '7teen', config, step_path='workflow.w.steps.review') == 'gemini.fast'
         assert resolve_role_selector('senior_architect', '7teen', config, step_path='workflow.w.steps.review') == 'opencode.default'
+
+    def test_load_workflow_config_accepts_legacy_inline_team_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir)
+            config_path = home_dir / '.config' / 'aflow' / 'aflow.toml'
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                '[aflow]\ndefault_workflow = "simple"\n\n'
+                '[harness.opencode.profiles.default]\nmodel = "m"\n\n'
+                '[roles]\narchitect = "opencode.default"\nsenior_architect = "opencode.default"\n\n'
+                '[teams.legacy]\narchitect = "opencode.default"\nsenior_architect = "opencode.default"\n\n'
+                '[prompts]\np = "Work."\n',
+                encoding='utf-8',
+            )
+            (config_path.parent / 'workflows.toml').write_text(
+                '[workflow.simple.steps.impl]\nrole = "architect"\nprompts = ["p"]\ngo = [{ to = "END" }]\n',
+                encoding='utf-8',
+            )
+            config = load_workflow_config(config_path)
+            assert config.workflows['simple'].first_step == 'impl'
+            assert config.teams['legacy'].roles == {
+                'architect': 'opencode.default',
+                'senior_architect': 'opencode.default',
+            }
 
     def test_resolve_role_selector_unknown_team_raises(self) -> None:
         config = WorkflowUserConfig(roles={'architect': 'codex.default'})
@@ -1131,6 +1154,792 @@ class WorkflowArtifactTests(unittest.TestCase):
             assert result_json['stderr'] == 'err'
             assert (turn_dir / 'stdout.txt').read_text(encoding='utf-8') == 'bad'
             assert (turn_dir / 'stderr.txt').read_text(encoding='utf-8') == 'err'
+
+    def test_harness_recovery_retries_same_step_after_delay_and_records_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            wf_config = WorkflowUserConfig(
+                roles={'architect': 'codex.default'},
+                harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})},
+                workflows={'simple': WorkflowConfig(
+                    steps={'implement_plan': WorkflowStepConfig(
+                        role='architect',
+                        prompts=('p',),
+                        go=(GoTransition(to='END', when='DONE'), GoTransition(to='implement_plan')),
+                    )},
+                    first_step='implement_plan',
+                )},
+                prompts={'p': 'Work.'},
+                error_handling=ErrorHandlingConfig(
+                    harness_error_recovery=HarnessErrorRecoveryConfig(
+                        rules=(HarnessErrorRecoveryRuleConfig(
+                            action='retry_same_team_after_delay',
+                            match=('throttled',),
+                            delay_seconds=0,
+                        ),),
+                    ),
+                ),
+            )
+
+            call_count = {'count': 0}
+
+            def runner(argv, **kwargs):
+                call_count['count'] += 1
+                if call_count['count'] == 1:
+                    return subprocess.CompletedProcess(argv, 1, '', 'throttled\n')
+                _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n')
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            result = run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=4),
+                wf_config,
+                'simple',
+                config_dir=repo_root,
+                adapter=CodexAdapter(),
+                runner=runner,
+            )
+
+            assert result.turns_completed == 2
+            run_json = json.loads((result.run_dir / 'run.json').read_text(encoding='utf-8'))
+            assert run_json['recovery_summary']['action'] == 'retry_same_team_after_delay'
+            assert run_json['recovery_summary']['source'] == 'deterministic'
+            assert run_json['recovery_history'][0]['match_terms'] == ['throttled']
+            turn1_result = json.loads((result.run_dir / 'turns' / 'turn-001' / 'result.json').read_text(encoding='utf-8'))
+            assert turn1_result['status'] == 'recovery-scheduled'
+            assert turn1_result['recovery_action'] == 'retry_same_team_after_delay'
+            assert turn1_result['recovery_source'] == 'deterministic'
+            assert turn1_result['recovery_match_terms'] == ['throttled']
+            turn2_result = json.loads((result.run_dir / 'turns' / 'turn-002' / 'result.json').read_text(encoding='utf-8'))
+            assert turn2_result['status'] == 'completed'
+
+    def test_zero_exit_matched_error_with_progress_does_not_recover(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            wf_config = WorkflowUserConfig(
+                roles={'architect': 'codex.default'},
+                harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})},
+                workflows={'simple': WorkflowConfig(
+                    steps={'implement_plan': WorkflowStepConfig(
+                        role='architect',
+                        prompts=('p',),
+                        go=(GoTransition(to='END', when='DONE'), GoTransition(to='implement_plan')),
+                    )},
+                    first_step='implement_plan',
+                )},
+                prompts={'p': 'Work.'},
+                error_handling=ErrorHandlingConfig(
+                    harness_error_recovery=HarnessErrorRecoveryConfig(
+                        rules=(HarnessErrorRecoveryRuleConfig(
+                            action='retry_same_team_after_delay',
+                            match=('please try again',),
+                            delay_seconds=0,
+                        ),),
+                    ),
+                ),
+            )
+
+            def runner(argv, **kwargs):
+                _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n')
+                return subprocess.CompletedProcess(argv, 0, 'please try again\n', '')
+
+            result = run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                wf_config,
+                'simple',
+                config_dir=repo_root,
+                adapter=CodexAdapter(),
+                runner=runner,
+            )
+
+            assert result.turns_completed == 1
+            run_json = json.loads((result.run_dir / 'run.json').read_text(encoding='utf-8'))
+            assert 'recovery_summary' not in run_json
+            turn_result = json.loads((result.run_dir / 'turns' / 'turn-001' / 'result.json').read_text(encoding='utf-8'))
+            assert turn_result['status'] == 'completed'
+            assert 'recovery_action' not in turn_result
+
+    def test_fail_immediately_recovery_fails_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            wf_config = WorkflowUserConfig(
+                roles={'architect': 'codex.default'},
+                harnesses={'codex': WorkflowHarnessConfig(profiles={'default': HarnessProfileConfig(model='gpt-5.4')})},
+                workflows={'simple': WorkflowConfig(
+                    steps={'implement_plan': WorkflowStepConfig(
+                        role='architect',
+                        prompts=('p',),
+                        go=(GoTransition(to='END', when='DONE'), GoTransition(to='implement_plan')),
+                    )},
+                    first_step='implement_plan',
+                )},
+                prompts={'p': 'Work.'},
+                error_handling=ErrorHandlingConfig(
+                    harness_error_recovery=HarnessErrorRecoveryConfig(
+                        rules=(HarnessErrorRecoveryRuleConfig(
+                            action='fail_immediately',
+                            match=('quota exhausted',),
+                        ),),
+                    ),
+                ),
+            )
+
+            def runner(argv, **kwargs):
+                return subprocess.CompletedProcess(argv, 1, '', 'quota exhausted\n')
+
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                    wf_config,
+                    'simple',
+                    config_dir=repo_root,
+                    adapter=CodexAdapter(),
+                    runner=runner,
+                )
+
+            run_json = json.loads((ctx.value.run_dir / 'run.json').read_text(encoding='utf-8'))
+            assert run_json['status'] == 'failed'
+            assert run_json['recovery_summary']['action'] == 'fail_immediately'
+            assert 'quota exhausted' in run_json['failure_reason']
+            turn_result = json.loads((ctx.value.run_dir / 'turns' / 'turn-001' / 'result.json').read_text(encoding='utf-8'))
+            assert turn_result['status'] == 'recovery-failed'
+            assert turn_result['recovery_action'] == 'fail_immediately'
+
+    def test_team_lead_recovery_executes_valid_json_decision_and_records_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            wf_config = WorkflowUserConfig(
+                aflow=AflowSection(team_lead='senior_architect'),
+                roles={'architect': 'codex.primary', 'senior_architect': 'codex.lead'},
+                teams={
+                    'primary': TeamConfig(roles={'architect': 'codex.primary', 'senior_architect': 'codex.lead'}),
+                },
+                harnesses={'codex': WorkflowHarnessConfig(profiles={'primary': HarnessProfileConfig(model='gpt-5.4'), 'lead': HarnessProfileConfig(model='gpt-5.4')})},
+                workflows={'simple': WorkflowConfig(
+                    steps={'implement_plan': WorkflowStepConfig(
+                        role='architect',
+                        prompts=('p',),
+                        go=(GoTransition(to='END', when='DONE'), GoTransition(to='implement_plan')),
+                    )},
+                    first_step='implement_plan',
+                    team='primary',
+                )},
+                prompts={'p': 'Work.'},
+                error_handling=ErrorHandlingConfig(
+                    harness_error_recovery=HarnessErrorRecoveryConfig(
+                        rules=(),
+                    ),
+                ),
+            )
+
+            prompts: list[str] = []
+            call_count = {'count': 0}
+
+            class TrackingAdapter(CodexAdapter):
+                def build_invocation(self, repo_root, model, system_prompt, user_prompt, effort=None):
+                    prompts.append(user_prompt)
+                    return super().build_invocation(
+                        repo_root=repo_root,
+                        model=model,
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        effort=effort,
+                    )
+
+            def runner(argv, **kwargs):
+                call_count['count'] += 1
+                if call_count['count'] == 1:
+                    return subprocess.CompletedProcess(argv, 1, '', 'mystery failure\n')
+                if call_count['count'] == 2:
+                    assert 'aflow-harness-recovery-lead' in prompts[-1]
+                    assert 'Return exactly one JSON object' in prompts[-1]
+                    return subprocess.CompletedProcess(
+                        argv,
+                        0,
+                        json.dumps({
+                            'action': 'retry_same_team_after_delay',
+                            'delay_seconds': None,
+                            'reason': 'retry the same team once after inspecting the failure',
+                            'suggested_keywords': ['mystery failure', 'retry after failure'],
+                            'suggested_action': None,
+                        }) + '\n',
+                        '',
+                    )
+                _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n')
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            result = run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=4),
+                wf_config,
+                'simple',
+                config_dir=repo_root,
+                adapter=TrackingAdapter(),
+                runner=runner,
+            )
+
+            assert call_count['count'] == 3
+            assert result.turns_completed == 2
+            run_json = json.loads((result.run_dir / 'run.json').read_text(encoding='utf-8'))
+            assert run_json['recovery_summary']['source'] == 'team_lead'
+            assert run_json['recovery_summary']['action'] == 'retry_same_team_after_delay'
+            assert run_json['recovery_summary']['delay_seconds'] is None
+            assert run_json['recovery_summary']['suggested_keywords'] == ['mystery failure', 'retry after failure']
+            assert run_json['recovery_summary']['suggested_action'] is None
+            assert run_json['recovery_summary']['executed'] is True
+            turn1_result = json.loads((result.run_dir / 'turns' / 'turn-001' / 'result.json').read_text(encoding='utf-8'))
+            assert turn1_result['status'] == 'recovery-scheduled'
+            assert turn1_result['recovery_source'] == 'team_lead'
+            assert turn1_result['recovery_action'] == 'retry_same_team_after_delay'
+            assert turn1_result['recovery_suggested_keywords'] == ['mystery failure', 'retry after failure']
+            assert turn1_result['recovery_executed'] is True
+            turn2_result = json.loads((result.run_dir / 'turns' / 'turn-002' / 'result.json').read_text(encoding='utf-8'))
+            assert turn2_result['status'] == 'completed'
+
+    def test_zero_exit_no_match_no_progress_does_not_escalate_to_team_lead_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            wf_config = WorkflowUserConfig(
+                aflow=AflowSection(team_lead='senior_architect'),
+                roles={'architect': 'codex.primary', 'senior_architect': 'codex.lead'},
+                teams={
+                    'primary': TeamConfig(roles={'architect': 'codex.primary', 'senior_architect': 'codex.lead'}),
+                },
+                harnesses={'codex': WorkflowHarnessConfig(profiles={'primary': HarnessProfileConfig(model='gpt-5.4'), 'lead': HarnessProfileConfig(model='gpt-5.4')})},
+                workflows={'simple': WorkflowConfig(
+                    steps={'implement_plan': WorkflowStepConfig(
+                        role='architect',
+                        prompts=('p',),
+                        go=(GoTransition(to='END', when='DONE'), GoTransition(to='implement_plan')),
+                    )},
+                    first_step='implement_plan',
+                    team='primary',
+                )},
+                prompts={'p': 'Work.'},
+                error_handling=ErrorHandlingConfig(
+                    harness_error_recovery=HarnessErrorRecoveryConfig(rules=()),
+                ),
+            )
+
+            prompts: list[str] = []
+            call_count = {'count': 0}
+
+            class TrackingAdapter(CodexAdapter):
+                def build_invocation(self, repo_root, model, system_prompt, user_prompt, effort=None):
+                    prompts.append(user_prompt)
+                    return super().build_invocation(
+                        repo_root=repo_root,
+                        model=model,
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        effort=effort,
+                    )
+
+            def runner(argv, **kwargs):
+                call_count['count'] += 1
+                if call_count['count'] == 1:
+                    return subprocess.CompletedProcess(argv, 0, 'steady but unchanged\n', '')
+                if call_count['count'] == 2:
+                    _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n')
+                    return subprocess.CompletedProcess(argv, 0, 'ok\n', '')
+                raise AssertionError(f'unexpected harness invocation #{call_count["count"]}')
+
+            result = run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=4),
+                wf_config,
+                'simple',
+                config_dir=repo_root,
+                adapter=TrackingAdapter(),
+                runner=runner,
+            )
+
+            assert call_count['count'] == 2
+            assert result.turns_completed == 2
+            assert all('aflow-harness-recovery-lead' not in prompt for prompt in prompts)
+            run_json = json.loads((result.run_dir / 'run.json').read_text(encoding='utf-8'))
+            assert run_json['status'] == 'completed'
+            assert 'recovery_summary' not in run_json
+            turn1_result = json.loads((result.run_dir / 'turns' / 'turn-001' / 'result.json').read_text(encoding='utf-8'))
+            assert turn1_result['status'] == 'running'
+            assert 'recovery_source' not in turn1_result
+            turn2_result = json.loads((result.run_dir / 'turns' / 'turn-002' / 'result.json').read_text(encoding='utf-8'))
+            assert turn2_result['status'] == 'completed'
+            assert 'recovery_source' not in turn2_result
+
+    def test_team_lead_recovery_rejects_invalid_json_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            wf_config = WorkflowUserConfig(
+                aflow=AflowSection(team_lead='senior_architect'),
+                roles={'architect': 'codex.primary', 'senior_architect': 'codex.lead'},
+                teams={
+                    'primary': TeamConfig(roles={'architect': 'codex.primary', 'senior_architect': 'codex.lead'}),
+                },
+                harnesses={'codex': WorkflowHarnessConfig(profiles={'primary': HarnessProfileConfig(model='gpt-5.4'), 'lead': HarnessProfileConfig(model='gpt-5.4')})},
+                workflows={'simple': WorkflowConfig(
+                    steps={'implement_plan': WorkflowStepConfig(
+                        role='architect',
+                        prompts=('p',),
+                        go=(GoTransition(to='END', when='DONE'), GoTransition(to='implement_plan')),
+                    )},
+                    first_step='implement_plan',
+                    team='primary',
+                )},
+                prompts={'p': 'Work.'},
+                error_handling=ErrorHandlingConfig(
+                    harness_error_recovery=HarnessErrorRecoveryConfig(
+                        rules=(HarnessErrorRecoveryRuleConfig(
+                            action='retry_same_team_after_delay',
+                            match=('throttled',),
+                        ),),
+                    ),
+                ),
+            )
+
+            call_count = {'count': 0}
+
+            class TrackingAdapter(CodexAdapter):
+                def build_invocation(self, repo_root, model, system_prompt, user_prompt, effort=None):
+                    return super().build_invocation(
+                        repo_root=repo_root,
+                        model=model,
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        effort=effort,
+                    )
+
+            def runner(argv, **kwargs):
+                call_count['count'] += 1
+                if call_count['count'] == 1:
+                    return subprocess.CompletedProcess(argv, 1, '', 'mystery failure\n')
+                return subprocess.CompletedProcess(argv, 0, 'this is not json\n', '')
+
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                    wf_config,
+                    'simple',
+                    config_dir=repo_root,
+                    adapter=TrackingAdapter(),
+                    runner=runner,
+                )
+
+            assert call_count['count'] == 2
+            assert 'team lead recovery response was not valid JSON' in str(ctx.value)
+            run_json = json.loads((ctx.value.run_dir / 'run.json').read_text(encoding='utf-8'))
+            assert run_json['status'] == 'failed'
+            turn1_result = json.loads((ctx.value.run_dir / 'turns' / 'turn-001' / 'result.json').read_text(encoding='utf-8'))
+            assert turn1_result['status'] == 'recovery-failed'
+            assert 'team lead recovery response was not valid JSON' in turn1_result['error']
+
+    def test_team_lead_recovery_rejects_extra_json_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            wf_config = WorkflowUserConfig(
+                aflow=AflowSection(team_lead='senior_architect'),
+                roles={'architect': 'codex.primary', 'senior_architect': 'codex.lead'},
+                teams={
+                    'primary': TeamConfig(roles={'architect': 'codex.primary', 'senior_architect': 'codex.lead'}),
+                },
+                harnesses={'codex': WorkflowHarnessConfig(profiles={'primary': HarnessProfileConfig(model='gpt-5.4'), 'lead': HarnessProfileConfig(model='gpt-5.4')})},
+                workflows={'simple': WorkflowConfig(
+                    steps={'implement_plan': WorkflowStepConfig(
+                        role='architect',
+                        prompts=('p',),
+                        go=(GoTransition(to='END', when='DONE'), GoTransition(to='implement_plan')),
+                    )},
+                    first_step='implement_plan',
+                    team='primary',
+                )},
+                prompts={'p': 'Work.'},
+                error_handling=ErrorHandlingConfig(
+                    harness_error_recovery=HarnessErrorRecoveryConfig(
+                        rules=(HarnessErrorRecoveryRuleConfig(
+                            action='retry_same_team_after_delay',
+                            match=('throttled',),
+                        ),),
+                    ),
+                ),
+            )
+
+            call_count = {'count': 0}
+
+            class TrackingAdapter(CodexAdapter):
+                def build_invocation(self, repo_root, model, system_prompt, user_prompt, effort=None):
+                    return super().build_invocation(
+                        repo_root=repo_root,
+                        model=model,
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        effort=effort,
+                    )
+
+            def runner(argv, **kwargs):
+                call_count['count'] += 1
+                if call_count['count'] == 1:
+                    return subprocess.CompletedProcess(argv, 1, '', 'mystery failure\n')
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    json.dumps({
+                        'action': 'retry_same_team_after_delay',
+                        'delay_seconds': None,
+                        'reason': 'retry the same team once after inspecting the failure',
+                        'suggested_keywords': ['mystery failure', 'retry after failure'],
+                        'suggested_action': None,
+                        'extra_field': 'not allowed',
+                    }) + '\n',
+                    '',
+                )
+
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                    wf_config,
+                    'simple',
+                    config_dir=repo_root,
+                    adapter=TrackingAdapter(),
+                    runner=runner,
+                )
+
+            assert call_count['count'] == 2
+            assert 'unexpected keys' in str(ctx.value)
+            run_json = json.loads((ctx.value.run_dir / 'run.json').read_text(encoding='utf-8'))
+            assert run_json['status'] == 'failed'
+            turn1_result = json.loads((ctx.value.run_dir / 'turns' / 'turn-001' / 'result.json').read_text(encoding='utf-8'))
+            assert turn1_result['status'] == 'recovery-failed'
+            assert 'unexpected keys' in turn1_result['error']
+
+    def test_harness_recovery_chains_backup_team_over_multiple_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            wf_config = WorkflowUserConfig(
+                roles={'architect': 'codex.primary'},
+                harnesses={'codex': WorkflowHarnessConfig(profiles={'primary': HarnessProfileConfig(model='gpt-5.4'), 'backup': HarnessProfileConfig(model='gpt-5.4'), 'backup2': HarnessProfileConfig(model='gpt-5.4')})},
+                teams={
+                    'primary': TeamConfig(roles={'architect': 'codex.primary'}, backup_team='backup'),
+                    'backup': TeamConfig(roles={'architect': 'codex.backup'}, backup_team='backup2'),
+                    'backup2': TeamConfig(roles={'architect': 'codex.backup2'}),
+                },
+                workflows={'simple': WorkflowConfig(
+                    steps={'implement_plan': WorkflowStepConfig(
+                        role='architect',
+                        prompts=('p',),
+                        go=(GoTransition(to='END', when='DONE'), GoTransition(to='implement_plan')),
+                    )},
+                    first_step='implement_plan',
+                    team='primary',
+                )},
+                prompts={'p': 'Work.'},
+                error_handling=ErrorHandlingConfig(
+                    harness_error_recovery=HarnessErrorRecoveryConfig(
+                        rules=(HarnessErrorRecoveryRuleConfig(
+                            action='switch_to_backup_team_and_retry',
+                            match=('capacity exhausted',),
+                        ),),
+                    ),
+                ),
+            )
+
+            call_count = {'count': 0}
+
+            def runner(argv, **kwargs):
+                call_count['count'] += 1
+                if call_count['count'] == 1:
+                    return subprocess.CompletedProcess(argv, 1, '', 'capacity exhausted\n')
+                if call_count['count'] == 2:
+                    return subprocess.CompletedProcess(argv, 1, '', 'capacity exhausted\n')
+                _write_plan(plan_path, '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n')
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            result = run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=4),
+                wf_config,
+                'simple',
+                config_dir=repo_root,
+                adapter=CodexAdapter(),
+                runner=runner,
+            )
+
+            assert result.turns_completed == 3
+            run_json = json.loads((result.run_dir / 'run.json').read_text(encoding='utf-8'))
+            assert run_json['team'] == 'primary'
+            assert run_json['recovery_summary']['to_team'] == 'backup2'
+            turn1_result = json.loads((result.run_dir / 'turns' / 'turn-001' / 'result.json').read_text(encoding='utf-8'))
+            assert turn1_result['recovery_to_team'] == 'backup'
+            turn2_result = json.loads((result.run_dir / 'turns' / 'turn-002' / 'result.json').read_text(encoding='utf-8'))
+            assert turn2_result['recovery_to_team'] == 'backup2'
+            turn3_result = json.loads((result.run_dir / 'turns' / 'turn-003' / 'result.json').read_text(encoding='utf-8'))
+            assert turn3_result['selector'] == 'codex.backup2'
+
+    def test_harness_recovery_resets_to_original_team_after_successful_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n\n### [ ] Checkpoint 2: Second\n- [ ] step two\n')
+            wf_config = WorkflowUserConfig(
+                roles={'architect': 'codex.primary'},
+                harnesses={'codex': WorkflowHarnessConfig(profiles={'primary': HarnessProfileConfig(model='gpt-5.4'), 'backup': HarnessProfileConfig(model='gpt-5.4')})},
+                teams={
+                    'primary': TeamConfig(roles={'architect': 'codex.primary'}, backup_team='backup'),
+                    'backup': TeamConfig(roles={'architect': 'codex.backup'}),
+                },
+                workflows={'simple': WorkflowConfig(
+                    steps={
+                        'step1': WorkflowStepConfig(
+                            role='architect',
+                            prompts=('p',),
+                            go=(GoTransition(to='step2', when='DONE'), GoTransition(to='step1')),
+                        ),
+                        'step2': WorkflowStepConfig(
+                            role='architect',
+                            prompts=('p',),
+                            go=(GoTransition(to='END', when='DONE'), GoTransition(to='step2')),
+                        ),
+                    },
+                    first_step='step1',
+                    team='primary',
+                )},
+                prompts={'p': 'Work.'},
+                error_handling=ErrorHandlingConfig(
+                    harness_error_recovery=HarnessErrorRecoveryConfig(
+                        rules=(HarnessErrorRecoveryRuleConfig(
+                            action='switch_to_backup_team_and_retry',
+                            match=('capacity exhausted',),
+                        ),),
+                    ),
+                ),
+            )
+
+            call_count = {'count': 0}
+
+            def runner(argv, **kwargs):
+                call_count['count'] += 1
+                if call_count['count'] == 1:
+                    return subprocess.CompletedProcess(argv, 1, '', 'capacity exhausted\n')
+                if call_count['count'] == 2:
+                    _write_plan(
+                        plan_path,
+                        '# Plan\n\n'
+                        '### [x] Checkpoint 1: First\n'
+                        '- [x] step one\n\n'
+                        '### [x] Checkpoint 2: Second\n'
+                        '- [x] step two\n',
+                    )
+                    return subprocess.CompletedProcess(argv, 0, 'ok', '')
+                _write_plan(
+                    plan_path,
+                    '# Plan\n\n'
+                    '### [x] Checkpoint 1: First\n'
+                    '- [x] step one\n\n'
+                    '### [x] Checkpoint 2: Second\n'
+                    '- [x] step two\n',
+                )
+                return subprocess.CompletedProcess(argv, 0, 'ok', '')
+
+            result = run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=5),
+                wf_config,
+                'simple',
+                config_dir=repo_root,
+                adapter=CodexAdapter(),
+                runner=runner,
+            )
+
+            assert result.turns_completed == 3
+            run_json = json.loads((result.run_dir / 'run.json').read_text(encoding='utf-8'))
+            assert run_json['team'] == 'primary'
+            assert run_json['recovery_summary']['to_team'] == 'backup'
+            turn1_result = json.loads((result.run_dir / 'turns' / 'turn-001' / 'result.json').read_text(encoding='utf-8'))
+            assert turn1_result['recovery_to_team'] == 'backup'
+            turn2_result = json.loads((result.run_dir / 'turns' / 'turn-002' / 'result.json').read_text(encoding='utf-8'))
+            assert turn2_result['selector'] == 'codex.backup'
+            turn3_result = json.loads((result.run_dir / 'turns' / 'turn-003' / 'result.json').read_text(encoding='utf-8'))
+            assert turn3_result['selector'] == 'codex.primary'
+
+    def test_terminal_backup_recovery_uses_original_team_for_merge_teardown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_root = root / 'repo'
+            repo_root.mkdir()
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            worktree_root = root / 'worktrees'
+            worktree_root.mkdir()
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            _git_commit_file(repo_root, plan_path)
+            wf_config = WorkflowUserConfig(
+                aflow=AflowSection(team_lead='senior_architect', worktree_root=str(worktree_root)),
+                roles={
+                    'architect': 'codex.teamA_step',
+                    'senior_architect': 'codex.teamA_lead',
+                },
+                teams={
+                    'teamA': TeamConfig(
+                        roles={
+                            'architect': 'codex.teamA_step',
+                            'senior_architect': 'codex.teamA_lead',
+                        },
+                        backup_team='teamB',
+                    ),
+                    'teamB': TeamConfig(
+                        roles={
+                            'architect': 'codex.teamB_step',
+                            'senior_architect': 'codex.teamB_lead',
+                        },
+                    ),
+                },
+                harnesses={'codex': WorkflowHarnessConfig(profiles={
+                    'teamA_step': HarnessProfileConfig(model='teamA-step-model'),
+                    'teamA_lead': HarnessProfileConfig(model='teamA-lead-model'),
+                    'teamB_step': HarnessProfileConfig(model='teamB-step-model'),
+                    'teamB_lead': HarnessProfileConfig(model='teamB-lead-model'),
+                })},
+                workflows={'simple': WorkflowConfig(
+                    steps={'implement_plan': WorkflowStepConfig(
+                        role='architect',
+                        prompts=('p',),
+                        go=(GoTransition(to='END', when='DONE'), GoTransition(to='implement_plan')),
+                    )},
+                    first_step='implement_plan',
+                    setup=('worktree', 'branch'),
+                    teardown=('merge', 'rm_worktree'),
+                    main_branch='main',
+                    team='teamA',
+                )},
+                prompts={'p': 'Work.'},
+                error_handling=ErrorHandlingConfig(
+                    harness_error_recovery=HarnessErrorRecoveryConfig(
+                        rules=(HarnessErrorRecoveryRuleConfig(
+                            action='switch_to_backup_team_and_retry',
+                            match=('capacity exhausted',),
+                        ),),
+                    ),
+                ),
+            )
+
+            models: list[str | None] = []
+            call_count: list[int] = [0]
+
+            class TrackingAdapter:
+                name = 'codex'
+                supports_effort = True
+
+                def build_invocation(self, *, repo_root, model, system_prompt, user_prompt, effort=None):
+                    models.append(model)
+                    from aflow.harnesses.codex import CodexAdapter as CA
+                    return CA().build_invocation(
+                        repo_root=repo_root,
+                        model=model,
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        effort=effort,
+                    )
+
+            def runner(argv, **kwargs):
+                call_count[0] += 1
+                cwd = Path(kwargs['cwd'])
+                exec_plan = cwd / plan_path.relative_to(repo_root)
+                if call_count[0] == 1:
+                    return subprocess.CompletedProcess(argv, 1, '', 'capacity exhausted\n')
+                if call_count[0] == 2:
+                    _write_plan(
+                        exec_plan,
+                        '# Plan\n\n### [x] Checkpoint 1: First\n- [x] step one\n',
+                    )
+                    _run_git_in_test(['add', str(exec_plan)], cwd=cwd)
+                    _run_git_in_test(['commit', '-m', 'complete'], cwd=cwd)
+                    return subprocess.CompletedProcess(argv, 0, 'ok', '')
+                _git_merge_feature_into_main(cwd, 'main')
+                return subprocess.CompletedProcess(argv, 0, 'merged', '')
+
+            result = run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                wf_config,
+                'simple',
+                config_dir=repo_root,
+                adapter=TrackingAdapter(),
+                runner=runner,
+            )
+
+            assert call_count[0] == 3
+            assert models == ['teamA-step-model', 'teamB-step-model', 'teamA-lead-model']
+            assert result.turns_completed == 2
+            assert result.final_snapshot.is_complete
+            run_json = json.loads((result.run_dir / 'run.json').read_text(encoding='utf-8'))
+            assert run_json['team'] == 'teamA'
+            assert run_json['recovery_summary']['from_team'] == 'teamA'
+            assert run_json['recovery_summary']['to_team'] == 'teamB'
+            turn1_result = json.loads((result.run_dir / 'turns' / 'turn-001' / 'result.json').read_text(encoding='utf-8'))
+            assert turn1_result['recovery_to_team'] == 'teamB'
+            turn2_result = json.loads((result.run_dir / 'turns' / 'turn-002' / 'result.json').read_text(encoding='utf-8'))
+            assert turn2_result['selector'] == 'codex.teamB_step'
+
+    def test_missing_backup_team_boundary_fails_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            wf_config = WorkflowUserConfig(
+                roles={'architect': 'codex.primary'},
+                harnesses={'codex': WorkflowHarnessConfig(profiles={'primary': HarnessProfileConfig(model='gpt-5.4')})},
+                teams={
+                    'primary': TeamConfig(roles={'architect': 'codex.primary'}),
+                },
+                workflows={'simple': WorkflowConfig(
+                    steps={'implement_plan': WorkflowStepConfig(
+                        role='architect',
+                        prompts=('p',),
+                        go=(GoTransition(to='END', when='DONE'), GoTransition(to='implement_plan')),
+                    )},
+                    first_step='implement_plan',
+                    team='primary',
+                )},
+                prompts={'p': 'Work.'},
+                error_handling=ErrorHandlingConfig(
+                    harness_error_recovery=HarnessErrorRecoveryConfig(
+                        rules=(HarnessErrorRecoveryRuleConfig(
+                            action='switch_to_backup_team_and_retry',
+                            match=('capacity exhausted',),
+                        ),),
+                    ),
+                ),
+            )
+
+            def runner(argv, **kwargs):
+                return subprocess.CompletedProcess(argv, 1, '', 'capacity exhausted\n')
+
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                    wf_config,
+                    'simple',
+                    config_dir=repo_root,
+                    adapter=CodexAdapter(),
+                    runner=runner,
+                )
+
+            assert 'backup_team' in str(ctx.value)
+            run_json = json.loads((ctx.value.run_dir / 'run.json').read_text(encoding='utf-8'))
+            assert run_json['status'] == 'failed'
+            assert run_json['recovery_summary']['to_team'] is None
+            turn_result = json.loads((ctx.value.run_dir / 'turns' / 'turn-001' / 'result.json').read_text(encoding='utf-8'))
+            assert turn_result['status'] == 'recovery-failed'
+            assert turn_result['recovery_to_team'] is None
 
     def test_run_workflow_moves_completed_plan_to_done_on_terminal_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2057,7 +2866,14 @@ class WorkflowLifecycleRuntimeTests(unittest.TestCase):
             worktree_root.mkdir()
             plan_path = root / 'outside_plan.md'
             _write_plan(plan_path, _VALID_PLAN)
-            wf_config = _make_worktree_wf_config(worktree_root=str(worktree_root))
+            base_wf = _make_worktree_wf_config(worktree_root=str(worktree_root))
+            wf_config = WorkflowUserConfig(
+                aflow=base_wf.aflow,
+                roles=base_wf.roles,
+                harnesses=base_wf.harnesses,
+                workflows=base_wf.workflows,
+                prompts=base_wf.prompts,
+            )
             with pytest.raises(WorkflowError) as ctx:
                 run_workflow(
                     ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=1),
@@ -2083,7 +2899,14 @@ class WorkflowLifecycleRuntimeTests(unittest.TestCase):
             plan_path = repo_root / 'plans' / 'in-progress' / 'plan.md'
             plan_path.parent.mkdir(parents=True, exist_ok=True)
             _write_plan(plan_path, _VALID_PLAN)
-            wf_config = _make_worktree_wf_config(worktree_root=str(worktree_root))
+            base_wf = _make_worktree_wf_config(worktree_root=str(worktree_root))
+            wf_config = WorkflowUserConfig(
+                aflow=base_wf.aflow,
+                roles=base_wf.roles,
+                harnesses=base_wf.harnesses,
+                workflows=base_wf.workflows,
+                prompts=base_wf.prompts,
+            )
             call_count: list[int] = [0]
 
             def runner(argv, **kwargs):
@@ -2129,7 +2952,14 @@ class WorkflowLifecycleRuntimeTests(unittest.TestCase):
                 plan_path,
                 _VALID_GIT_TRACKING_PLAN.replace('`base`', f'`{committed_head}`'),
             )
-            wf_config = _make_worktree_no_merge_wf_config(worktree_root=str(worktree_root))
+            base_wf = _make_worktree_no_merge_wf_config(worktree_root=str(worktree_root))
+            wf_config = WorkflowUserConfig(
+                aflow=AflowSection(worktree_root=str(worktree_root)),
+                roles=base_wf.roles,
+                harnesses=base_wf.harnesses,
+                workflows=base_wf.workflows,
+                prompts=base_wf.prompts,
+            )
             call_count: list[int] = [0]
 
             def runner(argv, **kwargs):
@@ -2263,7 +3093,14 @@ class WorkflowLifecycleRuntimeTests(unittest.TestCase):
             plan_path = repo_root / 'plans' / 'in-progress' / 'plan.md'
             plan_path.parent.mkdir(parents=True, exist_ok=True)
             _write_plan(plan_path, _VALID_GIT_TRACKING_PLAN)
-            wf_config = _make_worktree_no_merge_wf_config(worktree_root=str(worktree_root))
+            base_wf = _make_worktree_no_merge_wf_config(worktree_root=str(worktree_root))
+            wf_config = WorkflowUserConfig(
+                aflow=AflowSection(worktree_root=str(worktree_root)),
+                roles=base_wf.roles,
+                harnesses=base_wf.harnesses,
+                workflows=base_wf.workflows,
+                prompts=base_wf.prompts,
+            )
 
             def runner(argv, **kwargs):
                 cwd = Path(kwargs['cwd'])
@@ -2305,7 +3142,14 @@ class WorkflowLifecycleRuntimeTests(unittest.TestCase):
                 plan_path,
                 _VALID_GIT_TRACKING_PLAN.replace('`base`', f'`{current_head}`'),
             )
-            wf_config = _make_worktree_no_merge_wf_config(worktree_root=str(worktree_root))
+            base_wf = _make_worktree_no_merge_wf_config(worktree_root=str(worktree_root))
+            wf_config = WorkflowUserConfig(
+                aflow=AflowSection(worktree_root=str(worktree_root)),
+                roles=base_wf.roles,
+                harnesses=base_wf.harnesses,
+                workflows=base_wf.workflows,
+                prompts=base_wf.prompts,
+            )
             call_count = [0]
             marker = '  - synced marker\n'
 
@@ -2914,7 +3758,14 @@ class WorkflowLifecycleRuntimeTests(unittest.TestCase):
             plan_path = repo_root / 'plan.md'
             _write_plan(plan_path, _VALID_PLAN)
             _git_commit_file(repo_root, plan_path)
-            wf_config = _make_worktree_wf_config(worktree_root=str(worktree_root))
+            base_wf = _make_worktree_wf_config(worktree_root=str(worktree_root))
+            wf_config = WorkflowUserConfig(
+                aflow=AflowSection(worktree_root=str(worktree_root)),
+                roles=base_wf.roles,
+                harnesses=base_wf.harnesses,
+                workflows=base_wf.workflows,
+                prompts=base_wf.prompts,
+            )
 
             first_run_cwd: list[str] = []
             first_run_branch: list[str] = []
@@ -3498,7 +4349,7 @@ class LifecycleBootstrapTests(unittest.TestCase):
                     'senior_architect': 'codex.default',
                 },
                 teams={
-                    'elite': {'senior_architect': 'codex.override'},
+                    'elite': TeamConfig(roles={'senior_architect': 'codex.override'}),
                 },
                 harnesses={'codex': WorkflowHarnessConfig(profiles={
                     'default': HarnessProfileConfig(model='m'),

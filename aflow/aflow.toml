@@ -77,17 +77,43 @@ senior_architect = 'codex.high'
 worker = 'claude.haiku'
 reviewer = 'claude.sonnet'
 
-# Team-specific role overrides. Missing roles fall back to the global [roles] map.
+# Team-specific role overrides live under [teams.<name>.roles]. Missing roles fall back
+# to the global [roles] map. backup_team names the next team to try for harness recovery.
 [teams.codex1]
+backup_team = '7teen'
+
+[teams.codex1.roles]
 architect = 'codex.high'
 senior_architect = 'codex.high'
 reviewer = 'codex.high'
 worker = 'codex.mini'
 
 [teams.7teen]
+
+[teams.7teen.roles]
 architect = 'codex.mini'
 reviewer = 'codex.mini'
 worker = 'codex.nano'
+
+
+#### Harness Error Recovery ####
+
+# [error_handling.harness_error_recovery]
+# max_consecutive_recoveries = 3
+# team_lead_skill = "aflow-harness-recovery-lead"
+#
+# [[error_handling.harness_error_recovery.rules]]
+# action = "retry_same_team_after_delay"
+# match = ["throttled", "rate limit"]
+# delay_seconds = 30
+#
+# [[error_handling.harness_error_recovery.rules]]
+# action = "switch_to_backup_team_and_retry"
+# match = ["quota exceeded", "account exhausted"]
+#
+# [[error_handling.harness_error_recovery.rules]]
+# action = "fail_immediately"
+# match = ["invalid prompt payload"]
 
 
 #### PROMPTS ####

@@ -7,12 +7,14 @@ import sys
 from typing import Any
 
 from .api import (
+    AnalyzeRequest,
     ExecutionEvent,
     ExecutionObserver,
     PreparedRun,
     StartupQuestion,
     StartupQuestionKind,
     StartupRequest,
+    analyze_runs,
     execute_workflow,
     prepare_startup,
     prepare_startup_with_answer,
@@ -29,21 +31,14 @@ from .config import (
 from .git_status import probe_worktree, classify_dirtiness_by_prefix
 from .plan import PlanParseError, load_plan, load_plan_tolerant
 from .skill_installer import InstallerError, install_skills
+from .skill_installer import DEFAULT_BUNDLED_SKILL_NAMES
 from .run_state import WorkflowEndReason, describe_end_reason, ResumeContext
-from .analyzer import (
-    analyze_corpus,
-    analyze_single_run,
-    collect_run_dirs,
-    find_latest_run_dir,
-    is_noise_run,
-    load_json,
-    resolve_run_id,
-)
 from .workflow import (
     WorkflowError,
     move_completed_plan_to_done,
 )
 from .runlog import load_run_json
+from .analyzer import resolve_run_id
 from .status import BannerRenderer
 
 RUN_HELP = """\
@@ -77,7 +72,7 @@ INSTALL_SKILLS_HELP = """\
 Auto mode: omit DESTINATION to install the default bundled skills into each supported harness skill
 directory for the harness CLIs found on PATH.
 
-Manual mode: provide DESTINATION to install the eight default bundled skills into that root, one
+Manual mode: provide DESTINATION to install the nine default bundled skills into that root, one
 subdirectory per skill.
 
 Selection flags:
@@ -387,7 +382,7 @@ def build_parser() -> argparse.ArgumentParser:
         "destination",
         nargs="?",
         help=(
-            "Root directory that will receive the eight default bundled skill subdirectories. "
+            f"Root directory that will receive the {len(DEFAULT_BUNDLED_SKILL_NAMES)} default bundled skill subdirectories. "
             "Omit it to auto-detect supported harness CLIs on PATH and install into each harness's "
             "global skill directory."
         ),
@@ -806,51 +801,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "analyze":
         import json
 
-        if args.all:
-            repo_root = (args.repo_root or Path.cwd()).resolve()
-            runs_root = repo_root / ".aflow" / "runs"
-            if not runs_root.is_dir():
-                print(f"error: runs root does not exist: {runs_root}", file=sys.stderr)
-                return 1
-            run_dirs = collect_run_dirs(runs_root)
-            if args.limit is not None and args.limit > 0:
-                run_dirs = run_dirs[-args.limit :]
-            payload = analyze_corpus(
-                run_dirs=run_dirs,
-                runs_root=runs_root,
-                selection="corpus",
-                include_noise=args.include_noise,
-            )
-        else:
-            repo_root = (args.repo_root or Path.cwd()).resolve()
-            runs_root = repo_root / ".aflow" / "runs"
-
-            if args.run_id is not None:
-                run_dir = runs_root / args.run_id
-                selection = "explicit_run_id"
-            else:
-                resolved_run_id, source = resolve_run_id(None, repo_root)
-                if resolved_run_id is None:
-                    print(
-                        "error: no run ID specified and no last run ID found. "
-                        "Provide a run ID as an argument, use the current shell's last run, "
-                        "set AFLOW_LAST_RUN_ID environment variable, or ensure .aflow/last_run_id file exists.",
-                        file=sys.stderr,
-                    )
-                    return 1
-                selection = source or "unknown"
-                run_dir = runs_root / resolved_run_id.name
-
-            if not (run_dir / "run.json").is_file():
-                print(f"error: run directory does not contain run.json: {run_dir}", file=sys.stderr)
-                return 1
-
-            payload = analyze_single_run(
-                run_dir=run_dir,
-                runs_root=runs_root,
-                selection=selection,
-                include_noise=args.include_noise,
-            )
+        request = AnalyzeRequest(
+            repo_root=(args.repo_root or Path.cwd()).resolve(),
+            run_id=args.run_id,
+            all=args.all,
+            limit=args.limit,
+            include_noise=args.include_noise,
+        )
+        try:
+            payload = analyze_runs(request)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
 
         json.dump(payload, sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")

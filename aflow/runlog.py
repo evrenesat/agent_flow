@@ -12,7 +12,15 @@ from pathlib import Path
 from uuid import uuid4
 
 from .plan import PlanSnapshot
-from .run_state import ControllerConfig, ControllerState, ExecutionContext, RetryContext, WorkflowEndReason
+from .recovery import build_recovery_payload
+from .run_state import (
+    ControllerConfig,
+    ControllerState,
+    ExecutionContext,
+    HarnessRecoveryContext,
+    RetryContext,
+    WorkflowEndReason,
+)
 from .harnesses.base import HarnessInvocation
 
 SHELL_ID_ENV_VARS: tuple[str, ...] = (
@@ -270,6 +278,7 @@ def _turn_result_payload(
     retry_reason: str | None = None,
     retry_next_turn: bool | None = None,
     was_retry: bool | None = None,
+    recovery: HarnessRecoveryContext | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "turn_number": turn_number,
@@ -317,6 +326,20 @@ def _turn_result_payload(
         payload["retry_next_turn"] = retry_next_turn
     if was_retry is not None:
         payload["was_retry"] = was_retry
+    if recovery is not None:
+        payload["recovery_source"] = recovery.source
+        payload["recovery_action"] = recovery.action
+        payload["recovery_match_terms"] = list(recovery.match_terms)
+        payload["recovery_matched_terms"] = list(recovery.matched_terms)
+        payload["recovery_delay_seconds"] = recovery.delay_seconds
+        payload["recovery_from_team"] = recovery.from_team
+        payload["recovery_to_team"] = recovery.to_team
+        payload["recovery_reason"] = recovery.reason
+        payload["recovery_consecutive_count"] = recovery.consecutive_count
+        payload["recovery_suggested_keywords"] = list(recovery.suggested_keywords)
+        payload["recovery_suggested_action"] = recovery.suggested_action
+        payload["recovery_executed"] = recovery.executed
+        payload["recovery_rejection_reason"] = recovery.rejection_reason
     return payload
 
 
@@ -373,6 +396,8 @@ def write_run_metadata(
         payload["new_plan_path"] = str(new_plan_path)
     if team is not None:
         payload["team"] = team
+    elif state is not None and state.current_team is not None:
+        payload["team"] = state.current_team
     if resumed_from_run_id is not None:
         payload["resumed_from_run_id"] = resumed_from_run_id
     if state is not None:
@@ -402,6 +427,23 @@ def write_run_metadata(
         payload["pending_retry_attempt"] = effective_retry.attempt
         payload["pending_retry_limit"] = effective_retry.retry_limit
         payload["pending_retry_reason"] = "inconsistent_checkpoint_state"
+    if state is not None and state.current_harness_recovery is not None:
+        recovery = state.current_harness_recovery
+        payload["recovery_source"] = recovery.source
+        payload["recovery_action"] = recovery.action
+        payload["recovery_match_terms"] = list(recovery.match_terms)
+        payload["recovery_matched_terms"] = list(recovery.matched_terms)
+        payload["recovery_delay_seconds"] = recovery.delay_seconds
+        payload["recovery_from_team"] = recovery.from_team
+        payload["recovery_to_team"] = recovery.to_team
+        payload["recovery_reason"] = recovery.reason
+        payload["recovery_consecutive_count"] = recovery.consecutive_count
+        payload["recovery_suggested_keywords"] = list(recovery.suggested_keywords)
+        payload["recovery_suggested_action"] = recovery.suggested_action
+        payload["recovery_executed"] = recovery.executed
+        payload["recovery_rejection_reason"] = recovery.rejection_reason
+    if state is not None and state.harness_recovery_history:
+        payload.update(build_recovery_payload(state.current_harness_recovery, state.harness_recovery_history))
     _write_json(paths.run_json, payload)
 
 
@@ -419,6 +461,7 @@ def write_turn_artifacts_start(
     original_plan_path: Path | None = None,
     active_plan_path: Path | None = None,
     new_plan_path: Path | None = None,
+    recovery: HarnessRecoveryContext | None = None,
 ) -> Path:
     turn_dir = paths.turns_dir / f"turn-{turn_number:03d}"
     turn_dir.mkdir(parents=False, exist_ok=False)
@@ -440,6 +483,7 @@ def write_turn_artifacts_start(
         original_plan_path=original_plan_path,
         active_plan_path=active_plan_path,
         new_plan_path=new_plan_path,
+        recovery=recovery,
     )
     _write_json(turn_dir / "result.json", result_payload)
     return turn_dir
@@ -472,6 +516,7 @@ def finalize_turn_artifacts(
     retry_reason: str | None = None,
     retry_next_turn: bool | None = None,
     was_retry: bool | None = None,
+    recovery: HarnessRecoveryContext | None = None,
 ) -> Path:
     finished_at = datetime.now(timezone.utc)
     (turn_dir / "stdout.txt").write_text(stdout, encoding="utf-8")
@@ -502,6 +547,7 @@ def finalize_turn_artifacts(
         retry_reason=retry_reason,
         retry_next_turn=retry_next_turn,
         was_retry=was_retry,
+        recovery=recovery,
     )
     _write_json(turn_dir / "result.json", result_payload)
     return turn_dir
