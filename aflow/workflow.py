@@ -2245,41 +2245,50 @@ def run_workflow(
         )
     except ValueError as exc:
         _abort_startup_base_head_refresh(str(exc))
-    if startup_base_head_refresh_check.status in {
-        StartupBaseHeadRefreshStatus.NO_GIT_TRACKING,
-        StartupBaseHeadRefreshStatus.NO_RESOLVABLE_HEAD,
-        StartupBaseHeadRefreshStatus.MATCH,
-    }:
-        pass
-    elif startup_base_head_refresh_check.status in {
-        StartupBaseHeadRefreshStatus.MALFORMED,
-        StartupBaseHeadRefreshStatus.EMPTY_BASE_STARTED,
-        StartupBaseHeadRefreshStatus.MISMATCH_STARTED,
-    }:
-        _abort_startup_base_head_refresh(
-            f"startup preflight rejected Pre-Handoff Base HEAD state: "
-            f"{startup_base_head_refresh_check.status.value}"
+
+    # When resuming a previously-started workflow, the target branch may have
+    # advanced (e.g. a parallel workflow merged while this one was paused).
+    # That is expected — the base head recorded at plan creation no longer
+    # matches current HEAD, but the merge step handles divergence via rebase.
+    # Only enforce base-head consistency for fresh starts, not resumes.
+    if resume is None:
+        if startup_base_head_refresh_check.status in {
+            StartupBaseHeadRefreshStatus.NO_GIT_TRACKING,
+            StartupBaseHeadRefreshStatus.NO_RESOLVABLE_HEAD,
+            StartupBaseHeadRefreshStatus.MATCH,
+        }:
+            pass
+        elif startup_base_head_refresh_check.status in {
+            StartupBaseHeadRefreshStatus.MALFORMED,
+            StartupBaseHeadRefreshStatus.EMPTY_BASE_STARTED,
+            StartupBaseHeadRefreshStatus.MISMATCH_STARTED,
+        }:
+            _abort_startup_base_head_refresh(
+                f"startup preflight rejected Pre-Handoff Base HEAD state: "
+                f"{startup_base_head_refresh_check.status.value}"
+            )
+        else:
+            if startup_base_head_refresh_sha is None:
+                _abort_startup_base_head_refresh(
+                    f"startup preflight requires approval to refresh Pre-Handoff Base HEAD "
+                    f"({startup_base_head_refresh_check.status.value})"
+                )
+            elif startup_base_head_refresh_check.current_head != startup_base_head_refresh_sha:
+                _abort_startup_base_head_refresh(
+                    "startup preflight approval does not match current HEAD for "
+                    "Pre-Handoff Base HEAD refresh"
+                )
+
+        should_refresh_pre_handoff_base_head = (
+            startup_base_head_refresh_check.status
+            in {
+                StartupBaseHeadRefreshStatus.EMPTY_BASE_PRISTINE,
+                StartupBaseHeadRefreshStatus.MISMATCH_PRISTINE,
+            }
+            and startup_base_head_refresh_sha is not None
         )
     else:
-        if startup_base_head_refresh_sha is None:
-            _abort_startup_base_head_refresh(
-                f"startup preflight requires approval to refresh Pre-Handoff Base HEAD "
-                f"({startup_base_head_refresh_check.status.value})"
-            )
-        elif startup_base_head_refresh_check.current_head != startup_base_head_refresh_sha:
-            _abort_startup_base_head_refresh(
-                "startup preflight approval does not match current HEAD for "
-                "Pre-Handoff Base HEAD refresh"
-            )
-
-    should_refresh_pre_handoff_base_head = (
-        startup_base_head_refresh_check.status
-        in {
-            StartupBaseHeadRefreshStatus.EMPTY_BASE_PRISTINE,
-            StartupBaseHeadRefreshStatus.MISMATCH_PRISTINE,
-        }
-        and startup_base_head_refresh_sha is not None
-    )
+        should_refresh_pre_handoff_base_head = False
 
     state.last_snapshot = original_snapshot
     if startup_retry is not None:
