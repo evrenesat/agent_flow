@@ -41,6 +41,7 @@ from .plan import (
     rewrite_git_tracking_field,
 )
 from .recovery import (
+    build_recovery_evidence,
     build_recovery_context,
     build_team_lead_recovery_prompt,
     find_first_matching_rule,
@@ -1784,6 +1785,16 @@ def _run_team_lead_recovery_handoff(
             capture_output=True,
             text=True,
             check=False,
+        )
+    if completed.returncode != 0:
+        evidence = build_recovery_evidence(
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            error=None,
+        )
+        detail = f": {evidence}" if evidence else ""
+        raise TeamLeadRecoveryDecisionError(
+            f"team lead recovery handoff failed with exit code {completed.returncode}{detail}"
         )
     return parse_team_lead_recovery_decision(completed.stdout)
 

@@ -1669,6 +1669,66 @@ class WorkflowArtifactTests(unittest.TestCase):
             assert turn1_result['status'] == 'recovery-failed'
             assert 'unexpected keys' in turn1_result['error']
 
+    def test_team_lead_recovery_surfaces_handoff_process_failure_details(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, '# Plan\n\n### [ ] Checkpoint 1: First\n- [ ] step one\n')
+            wf_config = WorkflowUserConfig(
+                aflow=AflowSection(team_lead='senior_architect'),
+                roles={'architect': 'codex.primary', 'senior_architect': 'codex.lead'},
+                teams={
+                    'primary': TeamConfig(roles={'architect': 'codex.primary', 'senior_architect': 'codex.lead'}),
+                },
+                harnesses={'codex': WorkflowHarnessConfig(profiles={'primary': HarnessProfileConfig(model='gpt-5.4'), 'lead': HarnessProfileConfig(model='gpt-5.4')})},
+                workflows={'simple': WorkflowConfig(
+                    steps={'implement_plan': WorkflowStepConfig(
+                        role='architect',
+                        prompts=('p',),
+                        go=(GoTransition(to='END', when='DONE'), GoTransition(to='implement_plan')),
+                    )},
+                    first_step='implement_plan',
+                    team='primary',
+                )},
+                prompts={'p': 'Work.'},
+                error_handling=ErrorHandlingConfig(
+                    harness_error_recovery=HarnessErrorRecoveryConfig(rules=()),
+                ),
+            )
+
+            call_count = {'count': 0}
+
+            def runner(argv, **kwargs):
+                call_count['count'] += 1
+                if call_count['count'] == 1:
+                    return subprocess.CompletedProcess(argv, 1, '', 'mystery failure\n')
+                return subprocess.CompletedProcess(
+                    argv,
+                    1,
+                    '',
+                    'ThrottlingException: 5-minute credit limit exceeded\n',
+                )
+
+            with pytest.raises(WorkflowError) as ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                    wf_config,
+                    'simple',
+                    config_dir=repo_root,
+                    adapter=CodexAdapter(),
+                    runner=runner,
+                )
+
+            assert call_count['count'] == 2
+            assert 'team lead recovery handoff failed with exit code 1' in str(ctx.value)
+            assert 'ThrottlingException: 5-minute credit limit exceeded' in str(ctx.value)
+            run_json = json.loads((ctx.value.run_dir / 'run.json').read_text(encoding='utf-8'))
+            assert run_json['status'] == 'failed'
+            turn1_result = json.loads((ctx.value.run_dir / 'turns' / 'turn-001' / 'result.json').read_text(encoding='utf-8'))
+            assert turn1_result['status'] == 'recovery-failed'
+            assert 'team lead recovery handoff failed with exit code 1' in turn1_result['error']
+            assert 'ThrottlingException: 5-minute credit limit exceeded' in turn1_result['error']
+
     def test_harness_recovery_chains_backup_team_over_multiple_failures(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = Path(tmpdir)
