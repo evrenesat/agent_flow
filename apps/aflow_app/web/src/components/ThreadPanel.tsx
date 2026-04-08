@@ -220,7 +220,6 @@ export function ThreadPanel({ project, onSavePlanDraft }: ThreadPanelProps) {
       setError(null)
       const result = await api.startProjectThread(project.id, {
         cwd: project.current_path,
-        persist_extended_history: true,
       })
       setThreads((prev) => upsertSortedThread(prev, result.thread))
       setSelectedThreadId(result.thread.id)
@@ -239,7 +238,6 @@ export function ThreadPanel({ project, onSavePlanDraft }: ThreadPanelProps) {
       setError(null)
       const request = {
         cwd: project.current_path,
-        persist_extended_history: true,
       }
       const result =
         action === 'resume'

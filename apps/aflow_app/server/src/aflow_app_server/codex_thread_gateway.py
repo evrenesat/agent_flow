@@ -107,7 +107,7 @@ class CodexThreadGateway(ABC):
         service_tier: str | None = None,
         approval_policy: str | None = None,
         experimental_raw_events: bool = False,
-        persist_extended_history: bool = True,
+        persist_extended_history: bool = False,
     ) -> CodexThreadMutationResult:
         """Start a new thread."""
 
@@ -121,7 +121,7 @@ class CodexThreadGateway(ABC):
         model_provider: str | None = None,
         service_tier: str | None = None,
         approval_policy: str | None = None,
-        persist_extended_history: bool = True,
+        persist_extended_history: bool = False,
     ) -> CodexThreadMutationResult:
         """Resume an existing thread."""
 
@@ -135,7 +135,7 @@ class CodexThreadGateway(ABC):
         model_provider: str | None = None,
         service_tier: str | None = None,
         approval_policy: str | None = None,
-        persist_extended_history: bool = True,
+        persist_extended_history: bool = False,
     ) -> CodexThreadMutationResult:
         """Fork an existing thread."""
 

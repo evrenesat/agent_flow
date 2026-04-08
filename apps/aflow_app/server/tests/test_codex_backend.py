@@ -254,6 +254,67 @@ def test_read_thread_includes_turn_history() -> None:
     assert thread.turns[0].items[0]["content"][0]["type"] == "text"
 
 
+def test_start_thread_omits_extended_history_by_default() -> None:
+    fake = FakeWebSocket(
+        responses=[
+            initialize_payload(),
+            {
+                "jsonrpc": "2.0",
+                "id": "2",
+                "result": {
+                    "thread": thread_payload(),
+                    "model": "o3",
+                    "modelProvider": "openai",
+                    "serviceTier": None,
+                    "cwd": "/tmp/project",
+                    "approvalPolicy": "auto",
+                    "approvalsReviewer": {"mode": "default"},
+                    "sandbox": {"mode": "workspace-write"},
+                    "reasoningEffort": "medium",
+                },
+            },
+        ]
+    )
+    client = CodexAppServerClient("ws://codex.example", connection_factory=make_factory(fake))
+
+    result = client.start_thread(cwd="/tmp/project")
+
+    assert fake.sent_messages[2]["method"] == "thread/start"
+    assert fake.sent_messages[2]["params"] == {
+        "cwd": "/tmp/project",
+    }
+    assert result.thread.cwd == "/tmp/project"
+    assert result.cwd == "/tmp/project"
+
+
+def test_start_thread_can_opt_in_to_extended_history() -> None:
+    fake = FakeWebSocket(
+        responses=[
+            initialize_payload(),
+            {
+                "jsonrpc": "2.0",
+                "id": "2",
+                "result": {
+                    "thread": thread_payload(),
+                    "model": "o3",
+                    "modelProvider": "openai",
+                    "serviceTier": None,
+                    "cwd": "/tmp/project",
+                    "approvalPolicy": "auto",
+                    "approvalsReviewer": {"mode": "default"},
+                    "sandbox": {"mode": "workspace-write"},
+                    "reasoningEffort": "medium",
+                },
+            },
+        ]
+    )
+    client = CodexAppServerClient("ws://codex.example", connection_factory=make_factory(fake))
+
+    client.start_thread(cwd="/tmp/project", persist_extended_history=True)
+
+    assert fake.sent_messages[2]["params"]["persistExtendedHistory"] is True
+
+
 @pytest.mark.parametrize(
     "method_name,call",
     [
@@ -295,7 +356,7 @@ def test_resume_and_fork_include_cwd_override(method_name: str, call) -> None:
     assert fake.sent_messages[2]["method"] == method_name
     assert fake.sent_messages[2]["params"]["threadId"] == "thread-1"
     assert fake.sent_messages[2]["params"]["cwd"] == "/tmp/new"
-    assert fake.sent_messages[2]["params"]["persistExtendedHistory"] is True
+    assert "persistExtendedHistory" not in fake.sent_messages[2]["params"]
     assert result.thread.cwd == "/tmp/project"
     assert result.cwd == "/tmp/new"
     assert result.model == "o3"

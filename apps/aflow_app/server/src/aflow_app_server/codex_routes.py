@@ -29,7 +29,7 @@ class StartThreadRequest(BaseModel):
     service_tier: str | None = None
     approval_policy: str | None = None
     experimental_raw_events: bool = False
-    persist_extended_history: bool = True
+    persist_extended_history: bool = False
 
 
 class ResumeThreadRequest(BaseModel):
@@ -38,7 +38,7 @@ class ResumeThreadRequest(BaseModel):
     model_provider: str | None = None
     service_tier: str | None = None
     approval_policy: str | None = None
-    persist_extended_history: bool = True
+    persist_extended_history: bool = False
 
 
 class ForkThreadRequest(BaseModel):
@@ -47,7 +47,7 @@ class ForkThreadRequest(BaseModel):
     model_provider: str | None = None
     service_tier: str | None = None
     approval_policy: str | None = None
-    persist_extended_history: bool = True
+    persist_extended_history: bool = False
 
 
 class SetThreadNameRequest(BaseModel):

@@ -95,19 +95,22 @@ class CodexAppServerClient(CodexThreadGateway):
         service_tier: str | None = None,
         approval_policy: str | None = None,
         experimental_raw_events: bool = False,
-        persist_extended_history: bool = True,
+        persist_extended_history: bool = False,
     ) -> CodexThreadMutationResult:
+        params = self._compact_params(
+            cwd=cwd,
+            model=model,
+            modelProvider=model_provider,
+            serviceTier=service_tier,
+            approvalPolicy=approval_policy,
+        )
+        if experimental_raw_events:
+            params["experimentalRawEvents"] = True
+        if persist_extended_history:
+            params["persistExtendedHistory"] = True
         result = self._request(
             "thread/start",
-            self._compact_params(
-                cwd=cwd,
-                model=model,
-                modelProvider=model_provider,
-                serviceTier=service_tier,
-                approvalPolicy=approval_policy,
-                experimentalRawEvents=experimental_raw_events,
-                persistExtendedHistory=persist_extended_history,
-            ),
+            params,
         )
         return self._normalize_thread_mutation_result(result)
 
@@ -120,19 +123,21 @@ class CodexAppServerClient(CodexThreadGateway):
         model_provider: str | None = None,
         service_tier: str | None = None,
         approval_policy: str | None = None,
-        persist_extended_history: bool = True,
+        persist_extended_history: bool = False,
     ) -> CodexThreadMutationResult:
+        params = self._compact_params(
+            threadId=thread_id,
+            cwd=cwd,
+            model=model,
+            modelProvider=model_provider,
+            serviceTier=service_tier,
+            approvalPolicy=approval_policy,
+        )
+        if persist_extended_history:
+            params["persistExtendedHistory"] = True
         result = self._request(
             "thread/resume",
-            self._compact_params(
-                threadId=thread_id,
-                cwd=cwd,
-                model=model,
-                modelProvider=model_provider,
-                serviceTier=service_tier,
-                approvalPolicy=approval_policy,
-                persistExtendedHistory=persist_extended_history,
-            ),
+            params,
         )
         return self._normalize_thread_mutation_result(result)
 
@@ -145,19 +150,21 @@ class CodexAppServerClient(CodexThreadGateway):
         model_provider: str | None = None,
         service_tier: str | None = None,
         approval_policy: str | None = None,
-        persist_extended_history: bool = True,
+        persist_extended_history: bool = False,
     ) -> CodexThreadMutationResult:
+        params = self._compact_params(
+            threadId=thread_id,
+            cwd=cwd,
+            model=model,
+            modelProvider=model_provider,
+            serviceTier=service_tier,
+            approvalPolicy=approval_policy,
+        )
+        if persist_extended_history:
+            params["persistExtendedHistory"] = True
         result = self._request(
             "thread/fork",
-            self._compact_params(
-                threadId=thread_id,
-                cwd=cwd,
-                model=model,
-                modelProvider=model_provider,
-                serviceTier=service_tier,
-                approvalPolicy=approval_policy,
-                persistExtendedHistory=persist_extended_history,
-            ),
+            params,
         )
         return self._normalize_thread_mutation_result(result)
 
