@@ -377,33 +377,23 @@ def prepare_startup(request: StartupRequest) -> PreparedRun | StartupQuestion:
             f"{startup_base_head_refresh.status.value}"
         )
 
+    effective_startup_base_head_refresh_sha = request.startup_base_head_refresh_sha
     if startup_base_head_refresh.status in {
         StartupBaseHeadRefreshStatus.EMPTY_BASE_PRISTINE,
         StartupBaseHeadRefreshStatus.MISMATCH_PRISTINE,
-    } and request.startup_base_head_refresh_sha is None:
-        return StartupQuestion(
-            kind=StartupQuestionKind.CONFIRM_BASE_HEAD_REFRESH,
-            message=(
-                "Pre-Handoff Base HEAD does not match the current HEAD. "
-                "Continue and refresh it before the run starts?"
-            ),
-            options={"yes": "refresh", "no": "abort"},
-            continuation_request=replace(
-                request,
-                startup_base_head_refresh_sha=startup_base_head_refresh.current_head,
-            ),
-        )
+    } and effective_startup_base_head_refresh_sha is None:
+        effective_startup_base_head_refresh_sha = startup_base_head_refresh.current_head
     if (
         startup_base_head_refresh.status
         in {
             StartupBaseHeadRefreshStatus.EMPTY_BASE_PRISTINE,
             StartupBaseHeadRefreshStatus.MISMATCH_PRISTINE,
         }
-        and request.startup_base_head_refresh_sha is not None
-        and startup_base_head_refresh.current_head != request.startup_base_head_refresh_sha
+        and effective_startup_base_head_refresh_sha is not None
+        and startup_base_head_refresh.current_head != effective_startup_base_head_refresh_sha
     ):
         raise StartupError(
-            "startup approval does not match current HEAD for Pre-Handoff Base HEAD refresh"
+            "startup refresh target does not match current HEAD for Pre-Handoff Base HEAD refresh"
         )
 
     is_dirty, dirty_desc = _check_worktree_dirtiness(request, workflow_name)
@@ -429,7 +419,7 @@ def prepare_startup(request: StartupRequest) -> PreparedRun | StartupQuestion:
         extra_instructions=request.extra_instructions,
         start_step=selected_start_step,
         startup_retry=startup_retry,
-        startup_base_head_refresh_sha=request.startup_base_head_refresh_sha,
+        startup_base_head_refresh_sha=effective_startup_base_head_refresh_sha,
         move_completed_plan_to_done=is_complete_plan,
         parsed_plan=parsed_plan,
     )

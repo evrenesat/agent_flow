@@ -241,6 +241,26 @@ class PlanParserFenceTests(unittest.TestCase):
         assert metadata.pre_handoff_base_head == ''
         assert metadata.last_reviewed_head == ''
 
+    def test_parse_git_tracking_metadata_allows_missing_optional_review_fields(self) -> None:
+        from aflow.plan import parse_git_tracking_metadata
+        text = textwrap.dedent('''\
+            # Plan
+
+            ## Git Tracking
+
+            - Plan Branch: ``
+            - Pre-Handoff Base HEAD: ``
+
+            ### [ ] Checkpoint 1
+            - [ ] step
+        ''')
+        metadata = parse_git_tracking_metadata(text)
+        assert metadata is not None
+        assert metadata.plan_branch == ''
+        assert metadata.pre_handoff_base_head == ''
+        assert metadata.last_reviewed_head is None
+        assert metadata.review_log_entries == ()
+
     def test_is_handoff_pristine_for_base_refresh_detects_pristine_handoff(self) -> None:
         from aflow.plan import parse_git_tracking_metadata, is_handoff_pristine_for_base_refresh
         from aflow.plan import _collect_sections
@@ -261,6 +281,26 @@ class PlanParserFenceTests(unittest.TestCase):
 
             ### [ ] Checkpoint 2
             - [ ] step three
+        ''')
+        metadata = parse_git_tracking_metadata(text)
+        assert metadata is not None
+        sections = _collect_sections(text, source_path=Path('plan.md'))
+        assert is_handoff_pristine_for_base_refresh(metadata, sections) is True
+
+    def test_is_handoff_pristine_for_base_refresh_allows_missing_optional_review_fields(self) -> None:
+        from aflow.plan import parse_git_tracking_metadata, is_handoff_pristine_for_base_refresh
+        from aflow.plan import _collect_sections
+        text = textwrap.dedent('''\
+            # Plan
+
+            ## Git Tracking
+
+            - Plan Branch: ``
+            - Pre-Handoff Base HEAD: `old`
+
+            ### [ ] Checkpoint 1
+            - [ ] step one
+            - [ ] step two
         ''')
         metadata = parse_git_tracking_metadata(text)
         assert metadata is not None

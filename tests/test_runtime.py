@@ -2751,36 +2751,46 @@ class WorkflowPreflightTests(unittest.TestCase):
                 run_workflow(config, wf_config, 'review_wf', config_dir=repo_root, runner=lambda *a, **k: None)
             assert 'Git Tracking' in str(ctx.value)
 
-    def test_preflight_blocks_direct_run_without_base_head_refresh_approval(self) -> None:
+    def test_preflight_auto_refreshes_pristine_base_head_before_first_turn(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = Path(tmpdir)
             _make_lifecycle_git_repo(repo_root, branch='main')
             rc, initial_head, _ = _run_git_in_test(['rev-parse', 'HEAD'], cwd=repo_root)
             assert rc == 0
             plan_path = repo_root / 'plan.md'
-            _write_plan(
-                plan_path,
-                _VALID_GIT_TRACKING_PLAN.replace('`base`', f'`{initial_head}`'),
-            )
+            _write_plan(plan_path, textwrap.dedent(f'''\
+                # Plan
+
+                ## Git Tracking
+
+                - Plan Branch: ``
+                - Pre-Handoff Base HEAD: `{initial_head}`
+
+                ### [ ] Checkpoint 1: First
+                - [ ] step one
+            '''))
             _git_commit_file(repo_root, plan_path)
             _write_plan(repo_root / 'notes.txt', 'advance head\n')
             _git_commit_file(repo_root, repo_root / 'notes.txt')
 
             wf_config = _make_simple_wf_config()
             call_count = [0]
+            rc, current_head, _ = _run_git_in_test(['rev-parse', 'HEAD'], cwd=repo_root)
+            assert rc == 0
 
             def runner(argv, **kwargs):
                 call_count[0] += 1
+                text = (Path(kwargs['cwd']) / 'plan.md').read_text(encoding='utf-8')
+                assert f'`{current_head}`' in text
                 return subprocess.CompletedProcess(argv, 0, 'ok', '')
 
-            with pytest.raises(WorkflowError) as ctx:
-                run_workflow(
-                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=1),
-                    wf_config, 'simple', config_dir=repo_root,
-                    runner=runner,
-                )
-            assert call_count[0] == 0
-            assert 'Pre-Handoff Base HEAD' in str(ctx.value)
+            run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=1),
+                wf_config, 'simple', config_dir=repo_root,
+                runner=runner,
+            )
+            assert call_count[0] == 1
+            assert f'`{current_head}`' in plan_path.read_text(encoding='utf-8')
 
     def test_preflight_blocks_started_handoff_base_head_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2886,7 +2896,6 @@ class WorkflowPreflightTests(unittest.TestCase):
                 ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=1),
                 wf_config, 'simple', config_dir=repo_root,
                 runner=runner,
-                startup_base_head_refresh_sha=current_head,
             )
             assert call_count[0] == 1
             assert result.turns_completed == 1
@@ -3129,7 +3138,6 @@ class WorkflowLifecycleRuntimeTests(unittest.TestCase):
                 ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=1),
                 wf_config, 'branch_wf', config_dir=repo_root,
                 runner=runner,
-                startup_base_head_refresh_sha=current_head,
             )
 
             assert call_count[0] == 2
@@ -3180,7 +3188,6 @@ class WorkflowLifecycleRuntimeTests(unittest.TestCase):
                 ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=1),
                 wf_config, 'wt_wf', config_dir=repo_root,
                 runner=runner,
-                startup_base_head_refresh_sha=current_head,
             )
 
             assert call_count[0] == 2
@@ -3199,7 +3206,7 @@ class WorkflowLifecycleRuntimeTests(unittest.TestCase):
             worktree_root.mkdir()
             plan_path = repo_root / 'plans' / 'in-progress' / 'plan.md'
             plan_path.parent.mkdir(parents=True, exist_ok=True)
-            _write_plan(plan_path, _VALID_GIT_TRACKING_PLAN)
+            _write_plan(plan_path, _VALID_GIT_TRACKING_PLAN.replace('`main`', '``', 1))
             base_wf = _make_worktree_no_merge_wf_config(worktree_root=str(worktree_root))
             wf_config = WorkflowUserConfig(
                 aflow=AflowSection(worktree_root=str(worktree_root)),
@@ -3226,7 +3233,6 @@ class WorkflowLifecycleRuntimeTests(unittest.TestCase):
                 ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=2),
                 wf_config, 'wt_wf', config_dir=repo_root,
                 adapter=CodexAdapter(), runner=runner,
-                startup_base_head_refresh_sha=current_head,
             )
 
             done_path = repo_root / 'plans' / 'done' / 'plan.md'

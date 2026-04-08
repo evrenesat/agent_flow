@@ -123,6 +123,7 @@ class LibraryStartupTests(unittest.TestCase):
             max_turns=None,
             team=None,
             extra_instructions=(),
+            dirty_worktree_confirmed=True,
         )
 
         with self.assertRaises(StartupError) as ctx:
@@ -152,6 +153,7 @@ class LibraryStartupTests(unittest.TestCase):
             max_turns=None,
             team=None,
             extra_instructions=(),
+            dirty_worktree_confirmed=True,
         )
 
         result = prepare_startup(request)
@@ -241,6 +243,7 @@ class LibraryStartupTests(unittest.TestCase):
             max_turns=None,
             team=None,
             extra_instructions=(),
+            dirty_worktree_confirmed=True,
         )
 
         with patch('sys.stdin.isatty', return_value=True), \
@@ -587,6 +590,61 @@ class LibraryStartupTests(unittest.TestCase):
         with self.assertRaises(StartupError) as ctx:
             prepare_startup(request)
         self.assertIn("out of range", str(ctx.exception))
+
+    def test_prepare_startup_auto_sets_base_head_refresh_for_pristine_git_tracking_plan(self) -> None:
+        subprocess.run(['git', 'init', '-b', 'main'], cwd=str(self.repo_root), check=True, capture_output=True)
+        subprocess.run(['git', 'config', 'user.email', 'test@test.com'], cwd=str(self.repo_root), check=True, capture_output=True)
+        subprocess.run(['git', 'config', 'user.name', 'Test'], cwd=str(self.repo_root), check=True, capture_output=True)
+        (self.repo_root / 'README.md').write_text('init\n', encoding='utf-8')
+        subprocess.run(['git', 'add', 'README.md'], cwd=str(self.repo_root), check=True, capture_output=True)
+        subprocess.run(['git', 'commit', '-m', 'init'], cwd=str(self.repo_root), check=True, capture_output=True)
+        config_text = (
+            '[aflow]\ndefault_workflow = "test"\n\n'
+            '[workflow.test.steps.step1]\nrole = "architect"\nprompts = ["p"]\ngo = [{to = "END"}]\n\n'
+            '[harness.opencode.profiles.default]\nmodel = "m"\n\n'
+            '[roles]\narchitect = "opencode.default"\n\n'
+            '[prompts]\np = "do it"\n'
+        )
+        config_path = _write_config(self.home_dir, config_text)
+        workflow_config = load_workflow_config(config_path)
+        plan_path = self.repo_root / "plan.md"
+        plan_path.write_text(textwrap.dedent("""\
+            # Plan
+
+            ## Git Tracking
+
+            - Plan Branch: ``
+            - Pre-Handoff Base HEAD: ``
+
+            ### [ ] Checkpoint 1: Test
+            - [ ] step one
+        """), encoding="utf-8")
+        subprocess.run(['git', 'add', 'plan.md'], cwd=str(self.repo_root), check=True, capture_output=True)
+        subprocess.run(['git', 'commit', '-m', 'add plan'], cwd=str(self.repo_root), check=True, capture_output=True)
+        current_head = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'],
+            cwd=str(self.repo_root),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+        request = StartupRequest(
+            repo_root=self.repo_root,
+            plan_path=plan_path,
+            config_path=config_path,
+            workflow_config=workflow_config,
+            workflow_name="test",
+            start_step=None,
+            max_turns=None,
+            team=None,
+            extra_instructions=(),
+        )
+
+        result = prepare_startup(request)
+        self.assertIsInstance(result, PreparedRun)
+        assert isinstance(result, PreparedRun)
+        self.assertEqual(result.startup_base_head_refresh_sha, current_head)
 
 
 class LibraryRunnerTests(unittest.TestCase):

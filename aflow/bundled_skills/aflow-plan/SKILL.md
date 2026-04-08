@@ -20,6 +20,7 @@ Use this skill only for aflow-style planning. It is designed to be installed as 
 - Treat the original handoff plan as the long-lived ledger under `plans/in-progress/` until the handoff is complete.
 - Treat reviewer-created fix plans as temporary overlays for rejected work, not replacements for the original plan's long-lived state.
 - Make the final plan self-sufficient. It should not rely on a separate heavy executor skill to supply missing workflow details later.
+- Treat `Git Tracking` as lightweight support metadata in worktree-first workflows. The engine may populate or refresh branch/base values at startup, and the plan must not require manual git bookkeeping before execution begins.
 - Treat `aflow` as the canonical spelling.
 - If the user asks for planning but does not want aflow, do not use this skill.
 
@@ -58,12 +59,12 @@ Requirements:
 - Include anti-shortcut constraints and preserved behaviors.
 - Include scoped and non-regression verification commands per checkpoint.
 - Require a git commit boundary per checkpoint.
-- Define a commit message format per checkpoint that starts with the checkpoint/version prefix `cpN vNN` on the first line, followed by the rest of the commit message body. Every checkpoint commit, including the first commit for that checkpoint, must use an explicit version starting at `v01`. Example first line: `cp1 v01`
+- Define a commit message format per checkpoint that includes the checkpoint/version prefix, the branch name, and a meaningful summary on the first line. Every checkpoint commit, including the first commit for that checkpoint, must use an explicit version starting at `v01`. Example first line: `cp1 v01 feature-branch: implement parser cleanup`
 - Make checkpoint state durable enough for restart. Step checkboxes should reflect meaningful progress inside the checkpoint and help a later rerun or reviewer understand what is already done.
 - Do not encode whether plan checkboxes are updated by the executor or the reviewer. The consuming execution or review skill owns that policy.
 - Include explicit stop-and-escalate conditions.
 - Require an explicit documentation impact review that updates relevant existing docs when the change warrants it.
-- Require a `Git Tracking` section that captures the current branch, the immutable pre-handoff base commit, an optional last-reviewed commit field, and a review log for later review passes. Review state should be understandable from checkpoint/version labels even when exact reviewed SHAs are omitted or become stale.
+- Require a `Git Tracking` section that captures `Plan Branch` and `Pre-Handoff Base HEAD` as lightweight support fields. These fields may start empty in a fresh plan and be populated by the workflow engine at startup. `Last Reviewed HEAD` and `Review Log` are optional support fields, not mandatory bookkeeping.
 - Add `Critical Invariants` for rules that must hold across the entire implementation.
 - Add `Forbidden Implementations` for shortcuts the implementer might otherwise take.
 - Add `Behavioral Acceptance Tests` as observable outcomes, not just test commands.
@@ -83,9 +84,6 @@ Use this checkpoint skeleton:
 - Run these commands before editing:
 - `<command>`
 - `<command>`
-- If this is Checkpoint 1, capture the git tracking values before any edits:
-- `git branch --show-current`
-- `git rev-parse HEAD`
 
 **Scope & Blast Radius:**
 
@@ -112,10 +110,9 @@ Use this checkpoint skeleton:
 
 - Verification commands pass cleanly.
 - <observable condition>
-- A git commit is created with message starting with:
+- A checkpoint-scoped git commit boundary exists with first line:
   ```text
-  cpN vNN
-  <rest of the commit message>
+  cpN vNN <branch-name>: <meaningful summary>
   ```
   The first commit for a checkpoint must use `v01`. Later fix passes for the same checkpoint increment the version number, for example `cp4 v02`, `cp4 v03`, and so on.
 
@@ -129,12 +126,11 @@ Use this `Git Tracking` skeleton in the final plan:
 ```markdown
 ## Git Tracking
 
-- Plan Branch: `<git branch --show-current>`
-- Pre-Handoff Base HEAD: `<git rev-parse HEAD>`
-- Last Reviewed HEAD: `none`  <!-- optional support field, not the primary review tracker -->
-- Review Log:
-  - None yet.
+- Plan Branch: ``
+- Pre-Handoff Base HEAD: ``
 ```
+
+`Plan Branch` and `Pre-Handoff Base HEAD` are engine-owned support fields for fresh handoffs. The workflow engine may populate them at startup. Add optional fields such as `Last Reviewed HEAD` or `Review Log` only when they materially help later review or inconsistency resolution.
 
 ## Critical Invariants Guidance
 
@@ -197,17 +193,17 @@ If docs intentionally describe future state, the plan must say so explicitly and
 
 ## Git Tracking Rule
 
-The `Git Tracking` section is the source of truth for later review workflows.
+The `Git Tracking` section is lightweight support metadata for later review workflows and inconsistency resolution.
 
 Requirements:
 
-- Capture `Plan Branch` and `Pre-Handoff Base HEAD` before any implementation checkpoint begins.
-- Use the full SHA from `git rev-parse HEAD`, not a short SHA.
+- Include `Plan Branch` and `Pre-Handoff Base HEAD` in every original handoff plan, but allow both fields to start empty in a fresh plan.
+- Let the workflow engine populate or refresh those two fields at startup for pristine handoffs. Do not require manual git capture in the plan steps.
+- When `Pre-Handoff Base HEAD` is populated, use the full SHA, not a short SHA.
 - Treat `Pre-Handoff Base HEAD` as immutable for the life of the handoff, even after squashes.
-- Initialize `Last Reviewed HEAD` to `none`.
 - Treat checkpoint/version commit prefixes such as `cp4 v01`, `cp4 v02`, and `cp5 v01` as the primary human-readable tracking mechanism for review progress.
-- Use `Last Reviewed HEAD` only as optional support metadata. Do not make the handoff process depend on updating that field after every review.
-- Require later review workflows to append to `Review Log` after each review pass. Review-log entries should name the checkpoint/version batch that was reviewed, and may include exact SHAs when useful.
+- Use `Last Reviewed HEAD` and `Review Log` only as optional support metadata. Do not require them in fresh plans, and do not make the handoff process depend on updating them after every review.
+- If later review workflows do use `Review Log`, entries should name the checkpoint/version batch that was reviewed, and may include exact SHAs when useful.
 - If a later plan revision changes scope, preserve the original base SHA unless the user explicitly restarts the handoff from a new baseline.
 
 ## Documentation Coverage Rule

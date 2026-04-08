@@ -71,7 +71,7 @@ _REVIEW_SKILL_NAMES = frozenset({
     "aflow-review-checkpoint",
     "aflow-review-final",
 })
-_PLAN_BRANCH_LINE_RE = re.compile(r"^(\s*-\s+Plan Branch:\s+`)([^`]+)(`.*)$", re.MULTILINE)
+_PLAN_BRANCH_LINE_RE = re.compile(r"^(\s*-\s+Plan Branch:\s+`)([^`]*)(`.*)$", re.MULTILINE)
 
 
 class StartupBaseHeadRefreshStatus(str, Enum):
@@ -2275,6 +2275,8 @@ def run_workflow(
     # That is expected — the base head recorded at plan creation no longer
     # matches current HEAD, but the merge step handles divergence via rebase.
     # Only enforce base-head consistency for fresh starts, not resumes.
+    effective_startup_base_head_refresh_sha = startup_base_head_refresh_sha
+
     if resume is None:
         if startup_base_head_refresh_check.status in {
             StartupBaseHeadRefreshStatus.NO_GIT_TRACKING,
@@ -2292,14 +2294,11 @@ def run_workflow(
                 f"{startup_base_head_refresh_check.status.value}"
             )
         else:
-            if startup_base_head_refresh_sha is None:
+            if effective_startup_base_head_refresh_sha is None:
+                effective_startup_base_head_refresh_sha = startup_base_head_refresh_check.current_head
+            if startup_base_head_refresh_check.current_head != effective_startup_base_head_refresh_sha:
                 _abort_startup_base_head_refresh(
-                    f"startup preflight requires approval to refresh Pre-Handoff Base HEAD "
-                    f"({startup_base_head_refresh_check.status.value})"
-                )
-            elif startup_base_head_refresh_check.current_head != startup_base_head_refresh_sha:
-                _abort_startup_base_head_refresh(
-                    "startup preflight approval does not match current HEAD for "
+                    "startup preflight refresh target does not match current HEAD for "
                     "Pre-Handoff Base HEAD refresh"
                 )
 
@@ -2309,7 +2308,7 @@ def run_workflow(
                 StartupBaseHeadRefreshStatus.EMPTY_BASE_PRISTINE,
                 StartupBaseHeadRefreshStatus.MISMATCH_PRISTINE,
             }
-            and startup_base_head_refresh_sha is not None
+            and effective_startup_base_head_refresh_sha is not None
         )
     else:
         should_refresh_pre_handoff_base_head = False
@@ -2398,7 +2397,7 @@ def run_workflow(
                 original_plan_path,
                 exec_ctx,
                 startup_base_head_refresh_sha=(
-                    startup_base_head_refresh_sha if should_refresh_pre_handoff_base_head else None
+                    effective_startup_base_head_refresh_sha if should_refresh_pre_handoff_base_head else None
                 ),
             )
         except WorkflowError as exc:
@@ -2473,7 +2472,7 @@ def run_workflow(
                 original_plan_path,
                 exec_ctx,
                 startup_base_head_refresh_sha=(
-                    startup_base_head_refresh_sha if should_refresh_pre_handoff_base_head else None
+                    effective_startup_base_head_refresh_sha if should_refresh_pre_handoff_base_head else None
                 ),
             )
         except WorkflowError as exc:
@@ -2498,7 +2497,7 @@ def run_workflow(
             original_plan_path,
             None,
             startup_base_head_refresh_sha=(
-                startup_base_head_refresh_sha if should_refresh_pre_handoff_base_head else None
+                effective_startup_base_head_refresh_sha if should_refresh_pre_handoff_base_head else None
             ),
         )
 

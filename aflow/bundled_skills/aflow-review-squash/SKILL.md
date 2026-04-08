@@ -14,6 +14,7 @@ Use this skill only for the final review pass of work produced under a aflow pla
 - Assume the happy path is a completed autonomous run. Review the whole accumulated handoff, not just one checkpoint batch.
 - Treat files under `plans/` as architect or reviewer-owned artifacts. If an implementation commit modifies plan files unexpectedly, reject that work unless the user explicitly asked for plan-file commits from the implementer.
 - Treat checkpoint/version commit prefixes such as `cp4 v01`, `cp4 v02`, and `cp5 v01` as the primary review-tracking mechanism. Use exact SHAs as supporting evidence, not as the only way to understand state.
+- Treat `Git Tracking` as lightweight support metadata. In worktree-first plans, `Plan Branch` and `Pre-Handoff Base HEAD` may have been auto-populated by the engine, while `Last Reviewed HEAD` and `Review Log` may be absent.
 - Treat prompt-supplied concrete review context as authoritative when it is present. Use repo discovery only when the prompt leaves a target ambiguous.
 - If the original plan still has unchecked checkpoints, do not repurpose this skill for routine checkpoint review. Rerun the autonomous executor unless the user explicitly asks for a different workflow.
 - If the full accumulated work is acceptable, approve and squash once at the whole-plan level.
@@ -74,7 +75,7 @@ If the accumulated work looks correct:
 4. Delete any remaining fix plans for that handoff unless the user explicitly asked to keep them.
 5. Rewrite history so every commit after the squash anchor becomes one final accumulated commit.
 6. Use a non-interactive workflow. Prefer `git reset --soft <squash-base>` followed by a new commit over interactive rebase.
-7. Write a fresh final commit message that covers the full accumulated scope of the handoff.
+7. Write a fresh final commit message whose first line includes the branch name and a meaningful summary of the accumulated handoff.
 8. If `DEVLOG.md` exists and multiple handoff-related entries were added or updated during the handoff, compact them to one entry that matches the final squashed change.
 9. If the original plan's checkpoints are all complete, leave the original plan in `plans/in-progress/`. The workflow engine finalizes the original plan location after terminal success.
 10. Treat dirty changes in plan files that are intentionally part of the final handoff state as part of finalization, not as unrelated worktree noise. Still stop if truly unrelated dirty changes remain and make the squash ambiguous.
@@ -91,7 +92,7 @@ If the accumulated work is not acceptable:
 6. When creating a new fix plan, delete older superseded fix plans for the same original handoff by default unless the user explicitly asks to keep them.
 7. After creating the new fix plan, `plans/in-progress/` should contain only the original handoff plan plus that newest fix plan for the same handoff.
 8. Update the original plan:
-   - append a `Review Log` entry with the review date, the reviewed checkpoint or behavior range, and outcome `changes-requested`
+   - append a `Review Log` entry only when it materially helps later review or ambiguity resolution
    - update `Last Reviewed HEAD` only when it clearly helps and does not create brittle bookkeeping pressure
 9. Keep `Pre-Handoff Base HEAD` unchanged.
 10. Do not compact `DEVLOG.md`.
@@ -109,11 +110,12 @@ If the accumulated work is not acceptable:
 
 Before finishing, verify:
 
-- the reviewed range is correct relative to the original plan's checkpoint/version review history, `Last Reviewed HEAD`, or `Pre-Handoff Base HEAD`
+- the reviewed range is correct relative to the original plan's checkpoint/version review history and any helpful support metadata such as `Last Reviewed HEAD` or `Pre-Handoff Base HEAD`
 - the reported commit counts match git history
 - after approval, the branch contains exactly one accumulated handoff commit after `Pre-Handoff Base HEAD`
 - after approval, no stale fix plans remain in `plans/in-progress/`
 - after approval, all approval-grade git/tracking chores were completed by the reviewer in the same turn
+- after approval, the final squashed commit includes the branch name plus a meaningful summary
 - after final approval, the original handoff plan stays intact long enough for the workflow engine to finalize it
 - after rejection, no history rewrite occurred
 - after rejection, `plans/in-progress/` contains only the original handoff plan plus the newest focused fix plan for that handoff

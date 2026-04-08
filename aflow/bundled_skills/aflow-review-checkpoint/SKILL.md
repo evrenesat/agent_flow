@@ -12,6 +12,7 @@ Use this skill only for checkpoint-scoped review of work produced under an aflow
 - Load the active plan before reviewing code or history.
 - Review one checkpoint at a time, not the whole accumulated handoff.
 - Treat checkpoint/version commit prefixes such as `cp4 v01`, `cp4 v02`, and `cp5 v01` as the primary review target. Use exact SHAs as supporting evidence, not as the only way to understand state.
+- Treat `Git Tracking` as lightweight support metadata. In worktree-first plans, `Plan Branch` and `Pre-Handoff Base HEAD` may have been auto-populated by the engine, while `Last Reviewed HEAD` and `Review Log` may be absent.
 - If the latest checkpoint commit boundary is missing or ambiguous, review the current worktree state and say that the fallback was used.
 - Treat files under `plans/` as architect or reviewer-owned artifacts. If an implementation commit modifies plan files unexpectedly, reject that work unless the user explicitly asked for plan-file commits from the implementer.
 - Treat prompt-supplied concrete review context as authoritative when it is present. Use repo discovery only when the prompt leaves a target ambiguous.
@@ -66,9 +67,9 @@ Selection rules:
 
 If the checkpoint looks correct:
 
-1. Create the checkpoint approval commit for the reviewed work in this review turn.
+1. Create the checkpoint approval commit for the reviewed work in this review turn. The first line must use `cpN vNN <branch-name>: <meaningful summary>`.
 2. Advance the original plan's review state for that checkpoint.
-3. Update the original plan's `Git Tracking` and `Review Log` to capture the approved checkpoint review.
+3. Update the original plan's lightweight review metadata only when it materially helps later reviewers. Prefer the checkpoint/version commit label as the primary durable marker.
 4. Do not squash the whole handoff.
 5. Leave the checkpoint commit structure intact unless a later workflow explicitly asks for a different history action.
 6. If later checkpoints remain unchecked, keep the original plan in progress for the next checkpoint review or execution pass.
@@ -86,7 +87,7 @@ If the checkpoint is not acceptable:
 6. When creating a new fix plan, delete older superseded fix plans for the same checkpoint by default unless the user explicitly asks to keep them.
 7. After creating the new fix plan, `plans/in-progress/` should contain only the original handoff plan plus that newest fix plan for the same checkpoint.
 8. Update the original plan:
-   - append a `Review Log` entry with the review date, the reviewed checkpoint or behavior range, and outcome `changes-requested`
+   - append a `Review Log` entry only when it materially helps later review or ambiguity resolution
    - update `Last Reviewed HEAD` only when it clearly helps and does not create brittle bookkeeping pressure
 9. Keep `Pre-Handoff Base HEAD` unchanged.
 10. Do not compact `DEVLOG.md` and do not squash the whole handoff.
@@ -103,12 +104,12 @@ If the checkpoint is not acceptable:
 
 Before finishing, verify:
 
-- the reviewed range is correct relative to the original plan's checkpoint/version review history, `Last Reviewed HEAD`, or `Pre-Handoff Base HEAD`
+- the reviewed range is correct relative to the original plan's checkpoint/version review history and any helpful support metadata such as `Last Reviewed HEAD` or `Pre-Handoff Base HEAD`
 - the reviewed target was the latest checkpoint commit when that boundary was available
 - the fallback to current worktree state was only used when the checkpoint commit boundary was missing or ambiguous
 - the reported commit counts match git history when a commit boundary is available
 - after approval, the original plan's review state advances only for the reviewed checkpoint
-- after approval, the checkpoint commit was created by the reviewer in the same turn
+- after approval, the checkpoint commit was created by the reviewer in the same turn and its first line includes the branch name plus a meaningful summary
 - after rejection, no history rewrite occurred
 - after rejection, `plans/in-progress/` contains only the original handoff plan plus the newest focused fix plan for that checkpoint
 - after rejection, superseded older fix plans were deleted unless the user asked to keep them

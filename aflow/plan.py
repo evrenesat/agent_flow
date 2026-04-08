@@ -230,8 +230,8 @@ def is_handoff_pristine_for_base_refresh(metadata: GitTrackingMetadata, sections
     A handoff is considered pristine if:
     - No checkpoint headings are checked
     - No checkpoint steps are checked
-    - Last Reviewed HEAD is exactly 'none'
-    - Review Log contains only the single sentinel 'None yet.' entry
+    - Last Reviewed HEAD is absent/empty or exactly 'none'
+    - Review Log is absent/empty or contains only the single sentinel 'None yet.' entry
     """
     for section in sections:
         if section.heading_checked:
@@ -239,8 +239,11 @@ def is_handoff_pristine_for_base_refresh(metadata: GitTrackingMetadata, sections
         if section.checked_step_count > 0:
             return False
 
-    if metadata.last_reviewed_head != 'none':
+    if metadata.last_reviewed_head not in (None, '', 'none'):
         return False
+
+    if not metadata.review_log_entries:
+        return True
 
     if len(metadata.review_log_entries) != 1:
         return False
