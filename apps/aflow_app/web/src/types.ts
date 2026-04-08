@@ -68,28 +68,38 @@ export interface ThreadTurn {
   error: Record<string, unknown> | null
 }
 
-export interface ProjectThread {
+export interface ProjectThreadSummary {
   id: string
   preview: string
+  updated_at: string
+  status: Record<string, unknown>
+  cwd: string
+  source: string
+  name: string | null
+}
+
+export interface ProjectThread extends ProjectThreadSummary {
   ephemeral: boolean
   model_provider: string
   created_at: string
-  updated_at: string
-  status: Record<string, unknown>
   path: string | null
-  cwd: string
   cli_version: string
-  source: string
   agent_nickname: string | null
   agent_role: string | null
   git_info: Record<string, unknown> | null
-  name: string | null
   turns: ThreadTurn[]
 }
 
+export interface CodexBackendStatus {
+  state: 'ready' | 'not_configured' | 'uninitialized' | 'error'
+  message: string | null
+  detail?: string | null
+}
+
 export interface ProjectThreadPage {
-  threads: ProjectThread[]
+  threads: ProjectThreadSummary[]
   next_cursor: string | null
+  backend_status?: CodexBackendStatus
 }
 
 export interface ThreadMutationResult {

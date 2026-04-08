@@ -49,8 +49,8 @@ export function ProjectPicker({ selectedProjectId, onSelectProject }: ProjectPic
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 'var(--spacing-md)' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)', minHeight: 0, height: '100%' }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 'var(--spacing-md)', minWidth: 0 }}>
         <div>
           <h2 style={{ fontSize: '1.25rem', fontWeight: 600 }}>Projects</h2>
           <div className="text-sm text-dim">Detected under your configured projects root and from Codex threads.</div>
@@ -62,7 +62,7 @@ export function ProjectPicker({ selectedProjectId, onSelectProject }: ProjectPic
 
       {error && <div className="error-message">{error}</div>}
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-sm)' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-sm)', minHeight: 0, flex: 1, overflowY: 'auto', paddingRight: 'var(--spacing-xs)' }}>
         {projects.length === 0 ? (
           <div className="card text-dim text-sm">No projects found under the configured projects root.</div>
         ) : (
@@ -81,23 +81,17 @@ export function ProjectPicker({ selectedProjectId, onSelectProject }: ProjectPic
                 }}
               >
                 <button
-                  className="btn"
-                  style={{
-                    textAlign: 'left',
-                    width: '100%',
-                    padding: 0,
-                    border: 'none',
-                    background: 'transparent',
-                    color: 'inherit',
-                  }}
+                  className="content-button"
                   onClick={() => onSelectProject(project)}
                 >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 'var(--spacing-sm)' }}>
-                    <div style={{ fontWeight: 600 }}>{project.display_name}</div>
+                  <div className="content-button-row">
+                    <div style={{ fontWeight: 600, overflowWrap: 'anywhere', wordBreak: 'break-word', minWidth: 0 }}>{project.display_name}</div>
                     <span className="text-xs text-dim">{project.linked_thread_count} threads</span>
                   </div>
-                  <div className="text-sm text-dim truncate">{project.current_path}</div>
-                  <div className="text-xs text-dim" style={{ marginTop: 'var(--spacing-xs)' }}>
+                  <div className="text-sm text-dim" style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
+                    {project.current_path}
+                  </div>
+                  <div className="text-xs text-dim" style={{ marginTop: 'var(--spacing-xs)', overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
                     {project.detection_source}
                   </div>
                 </button>
@@ -130,8 +124,12 @@ export function ProjectPicker({ selectedProjectId, onSelectProject }: ProjectPic
       {selectedProject && (
         <div className="card">
           <div style={{ fontWeight: 600, marginBottom: 'var(--spacing-xs)' }}>Selected project</div>
-          <div className="text-sm">{selectedProject.display_name}</div>
-          <div className="text-xs text-dim mono">{selectedProject.current_path}</div>
+          <div className="text-sm" style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
+            {selectedProject.display_name}
+          </div>
+          <div className="text-xs text-dim mono" style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
+            {selectedProject.current_path}
+          </div>
         </div>
       )}
     </div>

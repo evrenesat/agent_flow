@@ -68,13 +68,23 @@ describe('API Client', () => {
   describe('Thread operations', () => {
     it('lists project threads with snake_case query params', async () => {
       api.setAuthToken('test-token')
-      mockOkJson({ threads: [], next_cursor: null })
+      mockOkJson({
+        threads: [],
+        next_cursor: null,
+        backend_status: {
+          state: 'ready',
+          message: null,
+          detail: null,
+        },
+      })
 
-      await api.listProjectThreads('project-1', {
+      const page = await api.listProjectThreads('project-1', {
         search_term: 'hello',
         limit: 5,
         source_kinds: ['app-server'],
       })
+
+      expect(page.backend_status?.state).toBe('ready')
 
       expect(global.fetch).toHaveBeenCalledWith(
         '/api/projects/project-1/threads?search_term=hello&limit=5&source_kinds=app-server',

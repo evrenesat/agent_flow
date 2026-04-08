@@ -85,17 +85,32 @@ def thread_payload(*, thread_id: str = "thread-1", include_turns: bool = True) -
     return payload
 
 
+def initialize_payload() -> dict[str, Any]:
+    """Return a minimal successful initialize response."""
+    return {
+        "jsonrpc": "2.0",
+        "id": "1",
+        "result": {
+            "userAgent": "aflow_app_server/0.1.0",
+            "codexHome": "/Users/evren/.codex",
+            "platformFamily": "unix",
+            "platformOs": "macos",
+        },
+    }
+
+
 def test_list_threads_request_shape_and_normalization() -> None:
     fake = FakeWebSocket(
         responses=[
+            initialize_payload(),
             {
-            "jsonrpc": "2.0",
-            "id": "1",
-            "result": {
-                "data": [thread_payload()],
-                "nextCursor": "cursor-2",
+                "jsonrpc": "2.0",
+                "id": "2",
+                "result": {
+                    "data": [thread_payload()],
+                    "nextCursor": "cursor-2",
                 },
-            }
+            },
         ]
     )
     client = CodexAppServerClient(
@@ -119,6 +134,19 @@ def test_list_threads_request_shape_and_normalization() -> None:
         {
             "jsonrpc": "2.0",
             "id": "1",
+            "method": "initialize",
+            "params": {
+                "clientInfo": {
+                    "name": "aflow_app_server",
+                    "title": "Aflow App Server",
+                    "version": "0.1.0",
+                }
+            },
+        },
+        {"method": "initialized", "params": {}},
+        {
+            "jsonrpc": "2.0",
+            "id": "2",
             "method": "thread/list",
             "params": {
                 "cwd": "/tmp/project",
@@ -128,7 +156,7 @@ def test_list_threads_request_shape_and_normalization() -> None:
                 "sourceKinds": ["interactive"],
                 "archived": False,
             },
-        }
+        },
     ]
     assert page.next_cursor == "cursor-2"
     assert len(page.threads) == 1
@@ -140,22 +168,84 @@ def test_list_threads_request_shape_and_normalization() -> None:
     assert thread.turns[0].id == "turn-1"
 
 
+def test_list_threads_sends_empty_params_object_when_unfiltered() -> None:
+    fake = FakeWebSocket(
+        responses=[
+            initialize_payload(),
+            {
+                "jsonrpc": "2.0",
+                "id": "2",
+                "result": {"data": [], "nextCursor": None},
+            },
+        ]
+    )
+    client = CodexAppServerClient("ws://codex.example", connection_factory=make_factory(fake))
+
+    page = client.list_threads()
+
+    assert fake.sent_messages == [
+        {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "initialize",
+            "params": {
+                "clientInfo": {
+                    "name": "aflow_app_server",
+                    "title": "Aflow App Server",
+                    "version": "0.1.0",
+                }
+            },
+        },
+        {"method": "initialized", "params": {}},
+        {
+            "jsonrpc": "2.0",
+            "id": "2",
+            "method": "thread/list",
+            "params": {},
+        },
+    ]
+    assert page.threads == []
+    assert page.next_cursor is None
+
+
+def test_list_threads_ignores_notifications_before_response() -> None:
+    fake = FakeWebSocket(
+        responses=[
+            initialize_payload(),
+            {"method": "thread/updated", "params": {"threadId": "thread-1"}},
+            {
+                "jsonrpc": "2.0",
+                "id": "2",
+                "result": {"data": [], "nextCursor": None},
+            },
+        ]
+    )
+    client = CodexAppServerClient("ws://codex.example", connection_factory=make_factory(fake))
+
+    page = client.list_threads()
+
+    assert page.threads == []
+    assert page.next_cursor is None
+    assert fake.sent_messages[2]["method"] == "thread/list"
+
+
 def test_read_thread_includes_turn_history() -> None:
     fake = FakeWebSocket(
         responses=[
+            initialize_payload(),
             {
                 "jsonrpc": "2.0",
-                "id": "1",
+                "id": "2",
                 "result": {"thread": thread_payload(include_turns=True)},
-            }
+            },
         ]
     )
     client = CodexAppServerClient("ws://codex.example", connection_factory=make_factory(fake))
 
     thread = client.read_thread("thread-1")
 
-    assert fake.sent_messages[0]["method"] == "thread/read"
-    assert fake.sent_messages[0]["params"] == {
+    assert fake.sent_messages[2]["method"] == "thread/read"
+    assert fake.sent_messages[2]["params"] == {
         "threadId": "thread-1",
         "includeTurns": True,
     }
@@ -180,9 +270,10 @@ def test_read_thread_includes_turn_history() -> None:
 def test_resume_and_fork_include_cwd_override(method_name: str, call) -> None:
     fake = FakeWebSocket(
         responses=[
+            initialize_payload(),
             {
                 "jsonrpc": "2.0",
-                "id": "1",
+                "id": "2",
                 "result": {
                     "thread": thread_payload(),
                     "model": "o3",
@@ -194,17 +285,17 @@ def test_resume_and_fork_include_cwd_override(method_name: str, call) -> None:
                     "sandbox": {"mode": "workspace-write"},
                     "reasoningEffort": "medium",
                 },
-            }
+            },
         ]
     )
     client = CodexAppServerClient("ws://codex.example", connection_factory=make_factory(fake))
 
     result = call(client)
 
-    assert fake.sent_messages[0]["method"] == method_name
-    assert fake.sent_messages[0]["params"]["threadId"] == "thread-1"
-    assert fake.sent_messages[0]["params"]["cwd"] == "/tmp/new"
-    assert fake.sent_messages[0]["params"]["persistExtendedHistory"] is True
+    assert fake.sent_messages[2]["method"] == method_name
+    assert fake.sent_messages[2]["params"]["threadId"] == "thread-1"
+    assert fake.sent_messages[2]["params"]["cwd"] == "/tmp/new"
+    assert fake.sent_messages[2]["params"]["persistExtendedHistory"] is True
     assert result.thread.cwd == "/tmp/project"
     assert result.cwd == "/tmp/new"
     assert result.model == "o3"
@@ -213,18 +304,19 @@ def test_resume_and_fork_include_cwd_override(method_name: str, call) -> None:
 def test_start_turn_uses_turn_start_method() -> None:
     fake = FakeWebSocket(
         responses=[
+            initialize_payload(),
             {
                 "jsonrpc": "2.0",
-                "id": "1",
+                "id": "2",
                 "result": {
-                        "turn": {
-                            "id": "turn-2",
+                    "turn": {
+                        "id": "turn-2",
                         "status": "inProgress",
                         "items": [],
                         "error": None,
                     }
                 },
-            }
+            },
         ]
     )
     client = CodexAppServerClient("ws://codex.example", connection_factory=make_factory(fake))
@@ -241,13 +333,13 @@ def test_start_turn_uses_turn_start_method() -> None:
         personality="concise",
     )
 
-    assert fake.sent_messages[0]["method"] == "turn/start"
-    assert fake.sent_messages[0]["params"]["threadId"] == "thread-1"
-    assert fake.sent_messages[0]["params"]["cwd"] == "/tmp/project"
-    assert fake.sent_messages[0]["params"]["input"] == [
+    assert fake.sent_messages[2]["method"] == "turn/start"
+    assert fake.sent_messages[2]["params"]["threadId"] == "thread-1"
+    assert fake.sent_messages[2]["params"]["cwd"] == "/tmp/project"
+    assert fake.sent_messages[2]["params"]["input"] == [
         {"type": "text", "text": "hello", "text_elements": []}
     ]
-    assert "modelProvider" not in fake.sent_messages[0]["params"]
+    assert "modelProvider" not in fake.sent_messages[2]["params"]
     assert turn.id == "turn-2"
     assert turn.status == "inProgress"
 
@@ -255,19 +347,20 @@ def test_start_turn_uses_turn_start_method() -> None:
 def test_set_thread_name_uses_set_name_method() -> None:
     fake = FakeWebSocket(
         responses=[
+            initialize_payload(),
             {
                 "jsonrpc": "2.0",
-                "id": "1",
+                "id": "2",
                 "result": {},
-            }
+            },
         ]
     )
     client = CodexAppServerClient("ws://codex.example", connection_factory=make_factory(fake))
 
     client.set_thread_name("thread-1", "Renamed thread")
 
-    assert fake.sent_messages[0]["method"] == "thread/setName"
-    assert fake.sent_messages[0]["params"] == {
+    assert fake.sent_messages[2]["method"] == "thread/name/set"
+    assert fake.sent_messages[2]["params"] == {
         "threadId": "thread-1",
         "name": "Renamed thread",
     }

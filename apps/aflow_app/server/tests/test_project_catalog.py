@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from aflow_app_server.codex_thread_gateway import CodexThreadPage
+from aflow_app_server.codex_thread_gateway import CodexThreadGatewayError, CodexThreadPage
 from aflow_app_server.models import CodexThread
 from aflow_app_server.project_catalog import ProjectCatalog
 from aflow_app_server.project_overrides import ProjectOverridesStore
@@ -24,9 +26,45 @@ class FakeThreadGateway:
         return CodexThreadPage(threads=self.threads, next_cursor=None)
 
 
+@dataclass
+class FailingThreadGateway:
+    """Thread gateway that simulates an unavailable Codex backend."""
+
+    error_message: str = "Not initialized"
+
+    def list_threads(self, **kwargs: Any) -> CodexThreadPage:
+        raise CodexThreadGatewayError(self.error_message)
+
+
 def _make_git_repo(path: Path) -> Path:
     path.mkdir(parents=True)
     (path / ".git").mkdir()
+    return path
+
+
+def _run_git(args: list[str], *, cwd: Path) -> None:
+    subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "GIT_AUTHOR_NAME": "Test User",
+            "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "Test User",
+            "GIT_COMMITTER_EMAIL": "test@example.com",
+        },
+    )
+
+
+def _init_git_repo(path: Path) -> Path:
+    path.mkdir(parents=True)
+    _run_git(["init"], cwd=path)
+    (path / "README.md").write_text("# test\n")
+    _run_git(["add", "README.md"], cwd=path)
+    _run_git(["commit", "-m", "init"], cwd=path)
     return path
 
 
@@ -92,6 +130,19 @@ def test_merges_thread_cwds_into_catalog(tmp_path: Path) -> None:
     assert by_path[thread_only].linked_thread_count == 1
     assert by_path[thread_only].detection_source == "codex_thread_cwd"
     assert by_path[thread_only].is_git_root is False
+
+
+def test_catalog_ignores_codex_thread_gateway_failure(tmp_path: Path) -> None:
+    projects_home = tmp_path / "code"
+    alpha = _make_git_repo(projects_home / "alpha")
+    store_path = tmp_path / "project_overrides.json"
+    catalog = ProjectCatalog(projects_home, store_path)
+
+    projects = catalog.list_projects(thread_gateway=FailingThreadGateway())
+
+    assert [project.current_path for project in projects] == [alpha]
+    assert projects[0].linked_thread_count == 0
+    assert projects[0].detection_source == "local_git_root"
 
 
 def test_moved_projects_keep_old_threads_visible(tmp_path: Path) -> None:
@@ -225,6 +276,25 @@ def test_project_ownership_helper_prefers_alias_owner(tmp_path: Path) -> None:
         legacy_path,
         projects=projects,
     ) is False
+
+
+def test_worktree_projects_collapse_to_primary_checkout(tmp_path: Path) -> None:
+    projects_home = tmp_path / "code"
+    primary = _init_git_repo(projects_home / "alpha")
+    worktree = projects_home / "worktrees" / "alpha-feature"
+    _run_git(["worktree", "add", str(worktree)], cwd=primary)
+
+    gateway = FakeThreadGateway([_make_thread("thread-1", worktree)])
+    catalog = ProjectCatalog(projects_home, tmp_path / "project_overrides.json")
+
+    projects = catalog.list_projects(thread_gateway=gateway)
+    assert [project.current_path for project in projects] == [primary]
+    assert projects[0].linked_thread_count == 1
+    assert projects[0].detection_source == "local_git_root+codex_thread_cwd"
+
+    resolved = catalog.resolve_project_for_path(worktree, thread_gateway=gateway)
+    assert resolved is not None
+    assert resolved.current_path == primary
 
 
 def test_migrates_legacy_repo_registry_once(tmp_path: Path) -> None:

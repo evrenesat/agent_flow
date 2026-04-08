@@ -1,6 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import * as api from '../api'
-import type { ProjectInfo, ProjectThread, ThreadTurn, ThreadTurnItem, ThreadUserInputText } from '../types'
+import type {
+  CodexBackendStatus,
+  ProjectInfo,
+  ProjectThread,
+  ProjectThreadSummary,
+  ThreadTurn,
+  ThreadTurnItem,
+  ThreadUserInputText,
+} from '../types'
 
 interface ThreadPanelProps {
   project: ProjectInfo
@@ -10,6 +18,11 @@ interface ThreadPanelProps {
 const TURN_POLL_INTERVAL_MS = 1000
 const TURN_POLL_TIMEOUT_MS = 15000
 const TERMINAL_TURN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'canceled', 'aborted'])
+const READY_BACKEND_STATUS: CodexBackendStatus = {
+  state: 'ready',
+  message: null,
+  detail: null,
+}
 
 function stringifyItem(item: ThreadTurnItem): string {
   if (typeof item === 'string') return item
@@ -60,12 +73,32 @@ function sleep(ms: number): Promise<void> {
   })
 }
 
-function upsertThread(threads: ProjectThread[], thread: ProjectThread): ProjectThread[] {
-  const nextThreads = threads.map((existing) => (existing.id === thread.id ? thread : existing))
-  if (nextThreads.some((existing) => existing.id === thread.id)) {
-    return nextThreads
+function toThreadSummary(thread: ProjectThread | ProjectThreadSummary): ProjectThreadSummary {
+  return {
+    id: thread.id,
+    preview: thread.preview,
+    updated_at: thread.updated_at,
+    status: thread.status,
+    cwd: thread.cwd,
+    source: thread.source,
+    name: thread.name,
   }
-  return [thread, ...threads]
+}
+
+function sortThreads(threads: ProjectThreadSummary[]): ProjectThreadSummary[] {
+  return [...threads].sort((left, right) => right.updated_at.localeCompare(left.updated_at))
+}
+
+function threadTitle(thread: ProjectThread | ProjectThreadSummary): string {
+  return thread.name || thread.preview || thread.id
+}
+
+function upsertSortedThread(threads: ProjectThreadSummary[], thread: ProjectThread | ProjectThreadSummary): ProjectThreadSummary[] {
+  const summary = toThreadSummary(thread)
+  if (threads.some((existing) => existing.id === summary.id)) {
+    return sortThreads(threads.map((existing) => (existing.id === summary.id ? summary : existing)))
+  }
+  return sortThreads([summary, ...threads])
 }
 
 function upsertTurn(thread: ProjectThread, turn: ThreadTurn): ProjectThread {
@@ -81,12 +114,13 @@ function getTurnStatus(thread: ProjectThread, turnId: string): string | null {
 }
 
 export function ThreadPanel({ project, onSavePlanDraft }: ThreadPanelProps) {
-  const [threads, setThreads] = useState<ProjectThread[]>([])
+  const [threads, setThreads] = useState<ProjectThreadSummary[]>([])
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null)
   const [selectedThread, setSelectedThread] = useState<ProjectThread | null>(null)
   const [loadingThreads, setLoadingThreads] = useState(true)
   const [loadingThread, setLoadingThread] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [backendStatus, setBackendStatus] = useState<CodexBackendStatus>(READY_BACKEND_STATUS)
   const [turnInput, setTurnInput] = useState('')
   const [sendingTurn, setSendingTurn] = useState(false)
   const [startingThread, setStartingThread] = useState(false)
@@ -126,7 +160,8 @@ export function ThreadPanel({ project, onSavePlanDraft }: ThreadPanelProps) {
       setLoadingThreads(true)
       setError(null)
       const data = await api.listProjectThreads(project.id)
-      setThreads(data.threads)
+      setThreads(sortThreads(data.threads))
+      setBackendStatus(data.backend_status ?? READY_BACKEND_STATUS)
       if (data.threads.length > 0) {
         const nextSelected = data.threads.find((thread) => thread.id === preferredThreadId) ?? data.threads[0]
         setSelectedThreadId(nextSelected.id)
@@ -136,6 +171,11 @@ export function ThreadPanel({ project, onSavePlanDraft }: ThreadPanelProps) {
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load threads')
+      setBackendStatus({
+        state: 'error',
+        message: 'Failed to load Codex threads.',
+        detail: err instanceof Error ? err.message : null,
+      })
     } finally {
       setLoadingThreads(false)
     }
@@ -150,7 +190,7 @@ export function ThreadPanel({ project, onSavePlanDraft }: ThreadPanelProps) {
       const data = await api.getProjectThread(project.id, threadId)
       if (requestId !== threadLoadRequestRef.current) return
       setSelectedThread(data)
-      setThreads((prev) => upsertThread(prev, data))
+      setThreads((prev) => upsertSortedThread(prev, data))
     } catch (err) {
       if (requestId !== threadLoadRequestRef.current) return
       setError(err instanceof Error ? err.message : 'Failed to load thread')
@@ -163,7 +203,8 @@ export function ThreadPanel({ project, onSavePlanDraft }: ThreadPanelProps) {
 
   async function refreshThreads(preferredThreadId: string | null = selectedThreadId) {
     const data = await api.listProjectThreads(project.id)
-    setThreads(data.threads)
+    setThreads(sortThreads(data.threads))
+    setBackendStatus(data.backend_status ?? READY_BACKEND_STATUS)
     if (data.threads.length > 0) {
       const nextSelected = data.threads.find((thread) => thread.id === preferredThreadId) ?? data.threads[0]
       setSelectedThreadId(nextSelected.id)
@@ -181,7 +222,7 @@ export function ThreadPanel({ project, onSavePlanDraft }: ThreadPanelProps) {
         cwd: project.current_path,
         persist_extended_history: true,
       })
-      setThreads((prev) => [result.thread, ...prev.filter((thread) => thread.id !== result.thread.id)])
+      setThreads((prev) => upsertSortedThread(prev, result.thread))
       setSelectedThreadId(result.thread.id)
       setSelectedThread(result.thread)
     } catch (err) {
@@ -205,7 +246,7 @@ export function ThreadPanel({ project, onSavePlanDraft }: ThreadPanelProps) {
           ? await api.resumeProjectThread(project.id, selectedThread.id, request)
           : await api.forkProjectThread(project.id, selectedThread.id, request)
 
-      setThreads((prev) => [result.thread, ...prev.filter((thread) => thread.id !== result.thread.id)])
+      setThreads((prev) => upsertSortedThread(prev, result.thread))
       setSelectedThreadId(result.thread.id)
       setSelectedThread(result.thread)
     } catch (err) {
@@ -242,7 +283,7 @@ export function ThreadPanel({ project, onSavePlanDraft }: ThreadPanelProps) {
       setTurnInput('')
       const updatedThread = upsertTurn(selectedThread, turn)
       setSelectedThread((prev) => (prev && prev.id === threadId ? updatedThread : prev))
-      setThreads((prev) => upsertThread(prev, updatedThread))
+      setThreads((prev) => upsertSortedThread(prev, updatedThread))
       shouldRefreshThreads = true
 
       let turnSettled = isTerminalTurnStatus(turn.status)
@@ -260,7 +301,7 @@ export function ThreadPanel({ project, onSavePlanDraft }: ThreadPanelProps) {
           }
 
           setSelectedThread((prev) => (prev && prev.id === threadId ? data : prev))
-          setThreads((prev) => upsertThread(prev, data))
+          setThreads((prev) => upsertSortedThread(prev, data))
 
           if (isTerminalTurnStatus(getTurnStatus(data, turn.id))) {
             turnSettled = true
@@ -300,6 +341,10 @@ export function ThreadPanel({ project, onSavePlanDraft }: ThreadPanelProps) {
     return selectedThread.cwd !== project.current_path
   }, [project.current_path, selectedThread])
 
+  const backendNeedsAttention = backendStatus.state !== 'ready'
+  const backendBannerText =
+    backendStatus.message ?? 'Codex threads are temporarily unavailable.'
+
   if (loadingThreads) {
     return (
       <div style={{ padding: 'var(--spacing-lg)', textAlign: 'center' }}>
@@ -309,13 +354,22 @@ export function ThreadPanel({ project, onSavePlanDraft }: ThreadPanelProps) {
   }
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 300px) minmax(0, 1fr)', gap: 'var(--spacing-md)', height: '100%' }}>
-      <aside style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)', minWidth: 0 }}>
+    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 300px) minmax(0, 1fr)', gap: 'var(--spacing-md)', height: '100%', minHeight: 0 }}>
+      <aside style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)', minWidth: 0, minHeight: 0 }}>
         <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-xs)' }}>
           <div style={{ fontWeight: 600 }}>Threads</div>
-          <div className="text-xs text-dim mono truncate">{project.current_path}</div>
+          <div className="text-xs text-dim mono" style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
+            {project.current_path}
+          </div>
           <div className="text-xs text-dim">{threads.length} matched threads</div>
         </div>
+
+        {backendNeedsAttention && (
+          <div className="error-message" style={{ borderColor: 'rgba(248, 113, 113, 0.6)' }}>
+            <div style={{ fontWeight: 600, marginBottom: 'var(--spacing-xs)' }}>Codex backend unavailable</div>
+            <div className="text-sm">{backendBannerText}</div>
+          </div>
+        )}
 
         <div style={{ display: 'flex', gap: 'var(--spacing-sm)' }}>
           <button className="btn btn-primary btn-sm" onClick={() => void handleStartThread()} disabled={startingThread}>
@@ -326,7 +380,7 @@ export function ThreadPanel({ project, onSavePlanDraft }: ThreadPanelProps) {
           </button>
         </div>
 
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-sm)' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-sm)', minHeight: 0, flex: 1, overflowY: 'auto' }}>
           {threads.length === 0 ? (
             <div className="card text-dim text-sm">No threads found for this project yet.</div>
           ) : (
@@ -344,15 +398,14 @@ export function ThreadPanel({ project, onSavePlanDraft }: ThreadPanelProps) {
                 }}
                 onClick={() => setSelectedThreadId(thread.id)}
               >
-                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 'var(--spacing-sm)' }}>
-                  <div style={{ fontWeight: 600 }} className="truncate">
-                    {thread.name || thread.preview || thread.id}
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 'var(--spacing-sm)', alignItems: 'baseline' }}>
+                  <div style={{ fontWeight: 600, overflowWrap: 'anywhere', wordBreak: 'break-word', minWidth: 0 }}>
+                    {threadTitle(thread)}
                   </div>
                   <span className="text-xs text-dim">{new Date(thread.updated_at).toLocaleDateString()}</span>
                 </div>
-                <div className="text-xs text-dim truncate">{thread.cwd}</div>
-                <div className="text-xs text-dim truncate" style={{ marginTop: 'var(--spacing-xs)' }}>
-                  {thread.preview || thread.source}
+                <div className="text-xs text-dim" style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
+                  {thread.cwd}
                 </div>
               </button>
             ))
@@ -385,10 +438,12 @@ export function ThreadPanel({ project, onSavePlanDraft }: ThreadPanelProps) {
               }}
             >
               <div style={{ minWidth: 0 }}>
-                <div style={{ fontWeight: 600 }} className="truncate">
-                  {selectedThread.name || selectedThread.preview || selectedThread.id}
+                <div style={{ fontWeight: 600, overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
+                  {threadTitle(selectedThread)}
                 </div>
-                <div className="text-xs text-dim mono truncate">{selectedThread.cwd}</div>
+                <div className="text-xs text-dim mono" style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
+                  {selectedThread.cwd}
+                </div>
               </div>
 
               <div style={{ display: 'flex', gap: 'var(--spacing-sm)', flexWrap: 'wrap' }}>
@@ -420,7 +475,7 @@ export function ThreadPanel({ project, onSavePlanDraft }: ThreadPanelProps) {
               </div>
             )}
 
-            <div style={{ flex: 1, overflowY: 'auto', padding: 'var(--spacing-md)', display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
+            <div style={{ flex: 1, overflowY: 'auto', padding: 'var(--spacing-md)', display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)', minHeight: 0 }}>
               {loadingThread ? (
                 <div style={{ padding: 'var(--spacing-lg)', textAlign: 'center' }}>
                   <div className="spinner" />

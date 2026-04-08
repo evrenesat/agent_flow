@@ -579,6 +579,18 @@ class TestCodexEndpoints:
             assert len(data["threads"]) == 1
             assert data["threads"][0]["id"] == "thread-1"
             assert data["threads"][0]["status"]["type"] == "active"
+            assert data["threads"][0]["cwd"] == str(project_path)
+            assert data["threads"][0]["name"] == "Test Thread"
+            assert "turns" not in data["threads"][0]
+            assert "git_info" not in data["threads"][0]
+            mock_backend.list_threads.assert_called_once_with(
+                cwd=str(project_path),
+                search_term=None,
+                limit=None,
+                cursor=None,
+                source_kinds=None,
+                archived=None,
+            )
 
     def test_list_projects_includes_thread_only_project_when_codex_is_configured(
         self,
@@ -644,6 +656,97 @@ class TestCodexEndpoints:
                 assert detail.json()["id"] == project["id"]
                 assert detail.json()["linked_thread_count"] == 1
                 assert detail.json()["detection_source"] == "codex_thread_cwd"
+        finally:
+            main_module._config = None
+            main_module._project_catalog = None
+            main_module._service = None
+
+    def test_list_projects_ignores_codex_gateway_failure(
+        self,
+        client_with_config: TestClient,
+        test_config: ServerConfig,
+    ) -> None:
+        """Test that project listing stays available if Codex thread listing fails."""
+        from aflow_app_server import main as main_module
+        from aflow_app_server.codex_thread_gateway import CodexThreadGatewayError
+
+        project_path = _create_git_project(test_config.projects_home, "local-only")
+        project_id = _project_id_for_path(client_with_config, project_path)
+
+        config = ServerConfig(
+            bind_host=test_config.bind_host,
+            bind_port=test_config.bind_port,
+            auth_token=test_config.auth_token,
+            repo_registry_path=test_config.repo_registry_path,
+            codex_app_server_url="ws://localhost:9000",
+            codex_app_server_token="test-codex-token",
+            transcription_url=None,
+            transcription_token=None,
+            projects_home=test_config.projects_home,
+            project_overrides_path=test_config.project_overrides_path,
+        )
+
+        class FailingBackend:
+            def list_threads(self, **kwargs):
+                raise CodexThreadGatewayError("Not initialized")
+
+        _set_server_state(config)
+
+        try:
+            with patch("aflow_app_server.main.CodexAppServerClient", return_value=FailingBackend()):
+                response = client_with_config.get("/api/projects")
+                assert response.status_code == 200
+                projects = response.json()
+                project = next(item for item in projects if item["id"] == project_id)
+                assert project["current_path"] == str(project_path)
+                assert project["linked_thread_count"] == 0
+                assert project["detection_source"] == "local_git_root"
+        finally:
+            main_module._config = None
+            main_module._project_catalog = None
+            main_module._service = None
+
+    def test_list_threads_gracefully_handles_uninitialized_codex_backend(
+        self,
+        client_with_config: TestClient,
+        test_config: ServerConfig,
+    ) -> None:
+        """Test that thread listing degrades instead of surfacing a 502."""
+        from aflow_app_server import main as main_module
+        from aflow_app_server.codex_thread_gateway import CodexThreadGatewayError
+
+        project_path = _create_git_project(test_config.projects_home, "thread-project")
+        project_id = _project_id_for_path(client_with_config, project_path)
+
+        config = ServerConfig(
+            bind_host=test_config.bind_host,
+            bind_port=test_config.bind_port,
+            auth_token=test_config.auth_token,
+            repo_registry_path=test_config.repo_registry_path,
+            codex_app_server_url="ws://localhost:9000",
+            codex_app_server_token="test-codex-token",
+            transcription_url=None,
+            transcription_token=None,
+            projects_home=test_config.projects_home,
+            project_overrides_path=test_config.project_overrides_path,
+        )
+
+        class FailingBackend:
+            def list_threads(self, **kwargs):
+                raise CodexThreadGatewayError("Not initialized")
+
+        _set_server_state(config)
+
+        try:
+            with patch("aflow_app_server.codex_routes.CodexAppServerClient", return_value=FailingBackend()):
+                response = client_with_config.get(f"/api/projects/{project_id}/threads")
+                assert response.status_code == 200
+                payload = response.json()
+                assert payload["threads"] == []
+                assert payload["next_cursor"] is None
+                assert payload["backend_status"]["state"] == "uninitialized"
+                assert payload["backend_status"]["message"] == "Codex app-server is not initialized yet."
+                assert payload["backend_status"]["detail"] == "Not initialized"
         finally:
             main_module._config = None
             main_module._project_catalog = None
@@ -717,6 +820,9 @@ class TestCodexEndpoints:
                 assert len(data["threads"]) == 1
                 assert data["threads"][0]["id"] == "thread-1"
                 assert data["threads"][0]["cwd"] == str(old_path)
+                queried_cwds = [call.kwargs["cwd"] for call in fake_backend.list_threads.call_args_list]
+                assert str(new_path) in queried_cwds
+                assert str(old_path) in queried_cwds
         finally:
             main_module._config = None
             main_module._project_catalog = None

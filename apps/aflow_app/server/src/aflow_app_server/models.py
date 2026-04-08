@@ -75,6 +75,22 @@ class CodexThread:
             "turns": [turn.to_dict() for turn in self.turns],
         }
 
+    def to_summary_dict(self, *, preview_limit: int = 120) -> dict[str, Any]:
+        """Serialize only the fields needed for the thread list sidebar."""
+        preview = self.preview.strip()
+        if len(preview) > preview_limit:
+            preview = preview[: preview_limit - 1].rstrip() + "..."
+
+        return {
+            "id": self.id,
+            "preview": preview,
+            "updated_at": self.updated_at.isoformat(),
+            "cwd": self.cwd,
+            "source": self.source,
+            "name": self.name,
+            "status": self.status,
+        }
+
 
 @dataclass(frozen=True)
 class CodexThreadMutationResult:

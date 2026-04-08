@@ -35,6 +35,12 @@ class CodexAppServerConnectionConfig:
 class CodexAppServerClient(CodexThreadGateway):
     """Thread gateway backed by the official Codex app-server websocket API."""
 
+    _CLIENT_INFO = {
+        "name": "aflow_app_server",
+        "title": "Aflow App Server",
+        "version": "0.1.0",
+    }
+
     def __init__(
         self,
         server_url: str,
@@ -156,7 +162,7 @@ class CodexAppServerClient(CodexThreadGateway):
         return self._normalize_thread_mutation_result(result)
 
     def set_thread_name(self, thread_id: str, name: str) -> None:
-        self._request("thread/setName", {"threadId": thread_id, "name": name})
+        self._request("thread/name/set", {"threadId": thread_id, "name": name})
 
     def start_turn(
         self,
@@ -194,33 +200,47 @@ class CodexAppServerClient(CodexThreadGateway):
         return self._connection_factory(self.server_url, additional_headers=headers)
 
     def _request(self, method: str, params: dict[str, Any] | None) -> JsonDict:
-        self._request_counter += 1
-        request_id = str(self._request_counter)
-        request: JsonDict = {"jsonrpc": "2.0", "id": request_id, "method": method}
-        if params:
-            request["params"] = params
-
         try:
             with self._open_connection() as websocket:
+                self._initialize_connection(websocket)
+                request = self._build_request(method, params)
                 websocket.send(json.dumps(request))
-                while True:
-                    payload = websocket.recv()
-                    message = self._parse_payload(payload)
-                    if message.get("id") != request_id:
-                        continue
-                    if "error" in message:
-                        error = message["error"]
-                        raise CodexThreadGatewayError(
-                            f"{method} failed: {error.get('message', 'unknown error')}"
-                        )
-                    result = message.get("result")
-                    if not isinstance(result, dict):
-                        raise CodexThreadGatewayError(f"{method} returned a malformed response")
-                    return result
+                return self._read_response(websocket, method, request["id"])
         except CodexThreadGatewayError:
             raise
         except Exception as exc:  # pragma: no cover - defensive transport normalization
             raise CodexThreadGatewayError(f"{method} failed: {exc}") from exc
+
+    def _initialize_connection(self, websocket: Any) -> None:
+        """Perform the Codex app-server handshake for a fresh websocket connection."""
+        initialize_request = self._build_request("initialize", {"clientInfo": self._CLIENT_INFO})
+        websocket.send(json.dumps(initialize_request))
+        self._read_response(websocket, "initialize", initialize_request["id"])
+        websocket.send(json.dumps({"method": "initialized", "params": {}}))
+
+    def _build_request(self, method: str, params: dict[str, Any] | None) -> JsonDict:
+        self._request_counter += 1
+        request_id = str(self._request_counter)
+        request: JsonDict = {"jsonrpc": "2.0", "id": request_id, "method": method}
+        if params is not None:
+            request["params"] = params
+        return request
+
+    def _read_response(self, websocket: Any, method: str, request_id: str) -> JsonDict:
+        while True:
+            payload = websocket.recv()
+            message = self._parse_payload(payload)
+            if message.get("id") != request_id:
+                continue
+            if "error" in message:
+                error = message["error"]
+                raise CodexThreadGatewayError(
+                    f"{method} failed: {error.get('message', 'unknown error')}"
+                )
+            result = message.get("result")
+            if not isinstance(result, dict):
+                raise CodexThreadGatewayError(f"{method} returned a malformed response")
+            return result
 
     def _parse_payload(self, payload: Any) -> JsonDict:
         if isinstance(payload, bytes):

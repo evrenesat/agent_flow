@@ -27,13 +27,13 @@ class ServerConfig:
     transcription_token: str | None
     projects_home: Path = field(default_factory=lambda: Path("~/code").expanduser())
     project_overrides_path: Path = field(
-        default_factory=lambda: Path("~/.config/aflow-app/project_overrides.json").expanduser()
+        default_factory=lambda: Path("~/.config/aflow/project_overrides.json").expanduser()
     )
 
     @classmethod
     def from_env(cls) -> ServerConfig:
         """Load configuration from environment variables and config file."""
-        config_dir = Path(os.environ.get("AFLOW_APP_CONFIG_DIR", "~/.config/aflow-app")).expanduser()
+        config_dir = Path(os.environ.get("AFLOW_APP_CONFIG_DIR", "~/.config/aflow")).expanduser()
         config_file = config_dir / "config.toml"
 
         # Load from file if exists

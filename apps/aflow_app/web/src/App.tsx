@@ -132,20 +132,24 @@ export function App() {
           gap: 'var(--spacing-md)',
           padding: 'var(--spacing-md)',
           minHeight: 0,
+          alignItems: 'stretch',
+          overflow: 'hidden',
         }}
       >
-        <aside style={{ minWidth: 0 }}>
+        <aside style={{ minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <ProjectPicker selectedProjectId={selectedProject?.id ?? null} onSelectProject={handleSelectProject} />
         </aside>
 
-        <section style={{ minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
+        <section style={{ minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)', overflow: 'hidden' }}>
           {selectedProject ? (
             <>
               <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-sm)' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', gap: 'var(--spacing-sm)', alignItems: 'flex-start' }}>
                   <div style={{ minWidth: 0 }}>
-                    <div style={{ fontWeight: 600 }}>{selectedProject.display_name}</div>
-                    <div className="text-xs text-dim mono truncate">{selectedProject.current_path}</div>
+                    <div style={{ fontWeight: 600, overflowWrap: 'anywhere', wordBreak: 'break-word' }}>{selectedProject.display_name}</div>
+                    <div className="text-xs text-dim mono" style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
+                      {selectedProject.current_path}
+                    </div>
                   </div>
                   <div className="text-xs text-dim">{selectedProject.linked_thread_count} linked threads</div>
                 </div>

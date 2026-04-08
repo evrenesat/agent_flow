@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -103,7 +104,7 @@ def get_plan_store_for_project(
     project_catalog: ProjectCatalog = Depends(_get_project_catalog),
 ) -> PlanStore:
     """Get a plan store for a project."""
-    project = project_catalog.get_project(project_id)
+    project = project_catalog.get_project_fast(project_id)
     if project is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -119,6 +120,28 @@ def _codex_error_to_http_error(error: CodexThreadGatewayError) -> HTTPException:
     )
 
 
+def _codex_backend_status(ready: bool, *, error: str | None = None) -> dict[str, str | None]:
+    if ready:
+        return {"state": "ready", "message": None, "detail": None}
+
+    lowered_error = (error or "").lower()
+    if "not initialized" in lowered_error:
+        message = "Codex app-server is not initialized yet."
+        state = "uninitialized"
+    elif "not configured" in lowered_error:
+        message = "Codex app-server is not configured."
+        state = "not_configured"
+    else:
+        message = "Codex app-server is unavailable."
+        state = "error"
+
+    return {
+        "state": state,
+        "message": message,
+        "detail": error,
+    }
+
+
 def _list_all_threads_for_project(
     backend: CodexThreadGateway,
     *,
@@ -127,7 +150,7 @@ def _list_all_threads_for_project(
     cursor: str | None,
     source_kinds: list[str] | None,
     archived: bool | None,
-) -> list[Any]:
+    ) -> list[Any]:
     """Fetch every matching thread page so ownership filtering stays correct."""
     threads: list[Any] = []
     current_cursor = cursor
@@ -146,6 +169,57 @@ def _list_all_threads_for_project(
     return threads
 
 
+def _project_lookup_paths(project: Any, requested_cwd: str | None = None) -> list[str]:
+    """Return the concrete cwd filters to use when listing one project's threads."""
+    if requested_cwd:
+        return [requested_cwd]
+
+    paths: list[str] = []
+    seen: set[Path] = set()
+    candidates = [project.current_path, *getattr(project, "historical_aliases", ())]
+    for candidate in candidates:
+        normalized = Path(candidate).expanduser().absolute()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        paths.append(str(normalized))
+    return paths
+
+
+def _list_threads_for_project_paths(
+    backend: CodexThreadGateway,
+    *,
+    project: Any,
+    requested_cwd: str | None,
+    search_term: str | None,
+    limit: int | None,
+    cursor: str | None,
+    source_kinds: list[str] | None,
+    archived: bool | None,
+) -> list[Any]:
+    """List threads by querying only the current project path and stored aliases."""
+    threads_by_id: dict[str, Any] = {}
+    remaining = limit
+
+    for path in _project_lookup_paths(project, requested_cwd):
+        page = backend.list_threads(
+            cwd=path,
+            search_term=search_term,
+            limit=remaining,
+            cursor=cursor,
+            source_kinds=source_kinds,
+            archived=archived,
+        )
+        for thread in page.threads:
+            threads_by_id[getattr(thread, "id")] = thread
+            if remaining is not None:
+                remaining = max(0, limit - len(threads_by_id))
+                if remaining == 0:
+                    return list(threads_by_id.values())
+
+    return list(threads_by_id.values())
+
+
 @router.get("/threads")
 async def list_threads(
     project_id: str,
@@ -159,40 +233,34 @@ async def list_threads(
     backend: CodexThreadGateway = Depends(get_codex_backend),
 ) -> dict[str, Any]:
     """List available Codex threads."""
-    projects = project_catalog.list_projects(thread_gateway=backend)
-    project = next((item for item in projects if item.id == project_id), None)
+    project = project_catalog.get_project(project_id)
     if project is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Project not found",
         )
     try:
-        threads = []
-        for thread in _list_all_threads_for_project(
+        threads = _list_threads_for_project_paths(
             backend,
+            project=project,
+            requested_cwd=cwd,
             search_term=search_term,
             limit=limit,
             cursor=cursor,
             source_kinds=source_kinds,
             archived=archived,
-        ):
-            thread_cwd = getattr(thread, "cwd", None)
-            if not thread_cwd:
-                continue
-            if project_catalog.project_owns_path(
-                project,
-                thread_cwd,
-                projects=projects,
-            ):
-                threads.append(thread)
-                if limit is not None and len(threads) >= limit:
-                    break
+        )
         return {
-            "threads": [thread.to_dict() for thread in threads],
+            "threads": [thread.to_summary_dict() for thread in threads],
             "next_cursor": None,
+            "backend_status": _codex_backend_status(True),
         }
     except CodexThreadGatewayError as error:
-        raise _codex_error_to_http_error(error) from error
+        return {
+            "threads": [],
+            "next_cursor": None,
+            "backend_status": _codex_backend_status(False, error=str(error)),
+        }
 
 
 @router.get("/threads/{thread_id}")
@@ -204,7 +272,7 @@ async def read_thread(
     backend: CodexThreadGateway = Depends(get_codex_backend),
 ) -> dict[str, Any]:
     """Read a specific Codex thread."""
-    project = project_catalog.get_project(project_id, thread_gateway=backend)
+    project = project_catalog.get_project_fast(project_id)
     if project is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -225,7 +293,7 @@ async def start_thread(
     backend: CodexThreadGateway = Depends(get_codex_backend),
 ) -> dict[str, Any]:
     """Start a new Codex thread."""
-    project = project_catalog.get_project(project_id, thread_gateway=backend)
+    project = project_catalog.get_project_fast(project_id)
     if project is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -255,7 +323,7 @@ async def resume_thread(
     backend: CodexThreadGateway = Depends(get_codex_backend),
 ) -> dict[str, Any]:
     """Resume an existing Codex thread."""
-    project = project_catalog.get_project(project_id, thread_gateway=backend)
+    project = project_catalog.get_project_fast(project_id)
     if project is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -285,7 +353,7 @@ async def fork_thread(
     backend: CodexThreadGateway = Depends(get_codex_backend),
 ) -> dict[str, Any]:
     """Fork an existing Codex thread."""
-    project = project_catalog.get_project(project_id, thread_gateway=backend)
+    project = project_catalog.get_project_fast(project_id)
     if project is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -315,7 +383,7 @@ async def set_thread_name(
     backend: CodexThreadGateway = Depends(get_codex_backend),
 ) -> dict[str, str]:
     """Set a thread's display name."""
-    project = project_catalog.get_project(project_id, thread_gateway=backend)
+    project = project_catalog.get_project_fast(project_id)
     if project is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -337,7 +405,7 @@ async def start_turn(
     backend: CodexThreadGateway = Depends(get_codex_backend),
 ) -> dict[str, Any]:
     """Send a user turn into an existing thread."""
-    project = project_catalog.get_project(project_id, thread_gateway=backend)
+    project = project_catalog.get_project_fast(project_id)
     if project is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

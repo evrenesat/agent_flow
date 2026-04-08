@@ -47,7 +47,7 @@ The server is configured via environment variables or a TOML config file.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `AFLOW_APP_CONFIG_DIR` | Config directory path | `~/.config/aflow-app` |
+| `AFLOW_APP_CONFIG_DIR` | Config directory path | `~/.config/aflow` |
 | `AFLOW_APP_HOST` | Bind host | `127.0.0.1` |
 | `AFLOW_APP_PORT` | Bind port | `8765` |
 | `AFLOW_APP_TOKEN` | Auth token (required) | - |
@@ -59,7 +59,7 @@ The server is configured via environment variables or a TOML config file.
 
 ### Config File
 
-Create `~/.config/aflow-app/config.toml`:
+Create `~/.config/aflow/config.toml`:
 
 ```toml
 [server]

@@ -90,6 +90,7 @@ describe('App', () => {
     await waitFor(() => {
       expect(screen.getByText('Alpha Project')).toBeDefined()
     })
+    expect(screen.getByText('Alpha Project').closest('button')?.className).toContain('content-button')
     fireEvent.click(screen.getByText('Open'))
     await waitFor(() => {
       expect(screen.getByText('Planning thread')).toBeDefined()
@@ -160,6 +161,37 @@ describe('App', () => {
         })
       )
     })
+  })
+
+  it('shows a non-fatal Codex status banner when thread listing is uninitialized', async () => {
+    ;(api.getAuthToken as any).mockReturnValue('test-token')
+    ;(api.listProjects as any).mockResolvedValue([project])
+    ;(api.listProjectThreads as any).mockResolvedValue({
+      threads: [],
+      next_cursor: null,
+      backend_status: {
+        state: 'uninitialized',
+        message: 'Codex app-server is not initialized yet.',
+        detail: 'Not initialized',
+      },
+    })
+    ;(api.listProjectPlans as any).mockResolvedValue([])
+    ;(api.listPlanDrafts as any).mockResolvedValue([])
+
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByText('Alpha Project')).toBeDefined()
+    })
+    fireEvent.click(screen.getByText('Open'))
+
+    await waitFor(() => {
+      expect(screen.getByText('Codex backend unavailable')).toBeDefined()
+    })
+    expect(screen.getByText('Codex app-server is not initialized yet.')).toBeDefined()
+    expect(screen.queryByText('Not initialized')).toBeNull()
+    expect(screen.getByRole('button', { name: 'New thread' }).disabled).toBe(false)
+    expect(screen.getByText('No threads found for this project yet.')).toBeDefined()
   })
 
   it('opens a plan for execution from the selected project path', async () => {
