@@ -1897,9 +1897,54 @@ def _verify_merge_success(
         cwd=primary_root,
     )
     if rc != 0:
-        return f"feature branch '{feature_branch}' is not an ancestor of '{main_branch}' after merge"
+        _, main_head, _ = _run_git(["rev-parse", main_branch], cwd=primary_root)
+        _, feature_head, _ = _run_git(["rev-parse", feature_branch], cwd=primary_root)
+        return (
+            f"feature branch '{feature_branch}' is not an ancestor of '{main_branch}' after merge "
+            f"(main={main_head or 'unknown'}, feature={feature_head or 'unknown'})"
+        )
 
     return None
+
+
+def _try_fast_forward_merge(
+    exec_ctx: ExecutionContext,
+) -> subprocess.CompletedProcess[str] | None:
+    primary_root = exec_ctx.primary_repo_root
+
+    rc, head_ref, err = _run_git(["symbolic-ref", "--short", "HEAD"], cwd=primary_root)
+    if rc != 0:
+        raise WorkflowError(
+            f"merge teardown requires the primary checkout to be on '{exec_ctx.main_branch}': "
+            f"{err or head_ref or 'detached HEAD'}"
+        )
+    if head_ref.strip() != exec_ctx.main_branch:
+        raise WorkflowError(
+            f"merge teardown requires the primary checkout to be on '{exec_ctx.main_branch}' "
+            f"(got '{head_ref.strip()}')"
+        )
+
+    rc, _, _ = _run_git(
+        ["merge-base", "--is-ancestor", exec_ctx.main_branch, exec_ctx.feature_branch],
+        cwd=primary_root,
+    )
+    if rc != 0:
+        return None
+
+    merge_args = ["merge", "--ff-only", exec_ctx.feature_branch]
+    merge_rc, merge_out, merge_err = _run_git(merge_args, cwd=primary_root)
+    if merge_rc != 0:
+        raise WorkflowError(
+            f"lifecycle teardown: fast-forward merge of '{exec_ctx.feature_branch}' into "
+            f"'{exec_ctx.main_branch}' failed: {merge_err or merge_out or 'unknown git error'}"
+        )
+
+    return subprocess.CompletedProcess(
+        ["git", *merge_args],
+        merge_rc,
+        merge_out,
+        merge_err,
+    )
 
 
 def _is_ignored_merge_status_line(
@@ -2048,6 +2093,10 @@ def _execute_merge_handoff(
     team_lead_role = workflow_config.aflow.team_lead
     if not team_lead_role:
         raise WorkflowError("merge teardown requires [aflow].team_lead to be configured")
+
+    fast_forward_merge = _try_fast_forward_merge(exec_ctx)
+    if fast_forward_merge is not None:
+        return fast_forward_merge
 
     team_lead_selector = resolve_role_selector(
         team_lead_role, team_name, workflow_config, step_path="merge teardown"

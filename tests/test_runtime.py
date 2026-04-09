@@ -1983,8 +1983,8 @@ class WorkflowArtifactTests(unittest.TestCase):
                 runner=runner,
             )
 
-            assert call_count[0] == 3
-            assert models == ['teamA-step-model', 'teamB-step-model', 'teamA-lead-model']
+            assert call_count[0] == 2
+            assert models == ['teamA-step-model', 'teamB-step-model']
             assert result.turns_completed == 2
             assert result.final_snapshot.is_complete
             run_json = json.loads((result.run_dir / 'run.json').read_text(encoding='utf-8'))
@@ -3330,15 +3330,18 @@ class WorkflowLifecycleRuntimeTests(unittest.TestCase):
                     _git_merge_feature_into_main(cwd, 'main')
                 return subprocess.CompletedProcess(argv, 0, 'ok', '')
 
-            run_workflow(
+            result = run_workflow(
                 ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
                 wf_config, 'wt_wf', config_dir=repo_root,
                 adapter=CodexAdapter(), runner=runner,
             )
 
-            assert call_count[0] == 2
+            run_json = json.loads((result.run_dir / 'run.json').read_text(encoding='utf-8'))
+            assert call_count[0] == 1
             done_path = repo_root / 'plans' / 'done' / 'plan.md'
             assert marker in done_path.read_text(encoding='utf-8')
+            rc, _, _ = _run_git_in_test(['merge-base', '--is-ancestor', run_json['feature_branch'], 'main'], cwd=repo_root)
+            assert rc == 0
 
     def test_worktree_merge_preserves_tracked_original_plan_sync_after_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3381,15 +3384,18 @@ class WorkflowLifecycleRuntimeTests(unittest.TestCase):
                     _git_merge_feature_into_main(cwd, 'main')
                 return subprocess.CompletedProcess(argv, 0, 'ok', '')
 
-            run_workflow(
+            result = run_workflow(
                 ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
                 wf_config, 'wt_wf', config_dir=repo_root,
                 adapter=CodexAdapter(), runner=runner,
             )
 
-            assert call_count[0] == 2
+            run_json = json.loads((result.run_dir / 'run.json').read_text(encoding='utf-8'))
+            assert call_count[0] == 1
             done_path = repo_root / 'plans' / 'done' / 'plan.md'
             assert marker in done_path.read_text(encoding='utf-8')
+            rc, _, _ = _run_git_in_test(['merge-base', '--is-ancestor', run_json['feature_branch'], 'main'], cwd=repo_root)
+            assert rc == 0
 
     def test_worktree_syncs_plan_back_even_on_harness_failure(self) -> None:
         """Verify plan edits are synced back from worktree even when harness returns non-zero."""
@@ -4109,6 +4115,69 @@ class WorkflowLifecycleRuntimeTests(unittest.TestCase):
 
             rc, wt_list, _ = _run_git_in_test(['worktree', 'list', '--porcelain'], cwd=repo_root)
             assert str(original_worktree_path) not in wt_list, 'Worktree should not be registered after removal'
+
+    def test_resume_fast_forward_merge_does_not_depend_on_merge_handoff_runner(self) -> None:
+        """Test that fast-forward merge teardown is performed by the engine, not the model runner."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_root = root / 'repo'
+            repo_root.mkdir()
+            _make_lifecycle_git_repo(repo_root, branch='main')
+            worktree_root = root / 'worktrees'
+            worktree_root.mkdir()
+            plan_path = repo_root / 'plan.md'
+            _write_plan(plan_path, _VALID_PLAN)
+            _git_commit_file(repo_root, plan_path)
+            wf_config = _make_worktree_wf_config(worktree_root=str(worktree_root))
+
+            def first_runner(argv, **kwargs):
+                return subprocess.CompletedProcess(argv, 1, 'failed', 'first run failed')
+
+            with pytest.raises(WorkflowError) as first_ctx:
+                run_workflow(
+                    ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                    wf_config, 'wt_wf', config_dir=repo_root,
+                    adapter=CodexAdapter(), runner=first_runner,
+                )
+
+            run_json1 = json.loads((first_ctx.value.run_dir / 'run.json').read_text(encoding='utf-8'))
+            original_worktree_path = Path(run_json1['worktree_path'])
+            assert original_worktree_path.exists()
+
+            second_runner_calls = {'count': 0}
+
+            def second_runner(argv, **kwargs):
+                second_runner_calls['count'] += 1
+                cwd = Path(kwargs['cwd'])
+                exec_plan = cwd / plan_path.relative_to(repo_root)
+                if second_runner_calls['count'] == 1:
+                    _write_plan(exec_plan, _COMPLETE_PLAN)
+                    return subprocess.CompletedProcess(argv, 0, 'ok', '')
+                raise AssertionError('fast-forward merge teardown should not invoke the runner')
+
+            resume_ctx = ResumeContext(
+                resumed_from_run_id=first_ctx.value.run_dir.name,
+                feature_branch=run_json1['feature_branch'],
+                worktree_path=original_worktree_path,
+                main_branch='main',
+                setup=('worktree', 'branch'),
+                teardown=('merge', 'rm_worktree'),
+            )
+
+            result2 = run_workflow(
+                ControllerConfig(repo_root=repo_root, plan_path=plan_path, max_turns=3),
+                wf_config, 'wt_wf', config_dir=repo_root,
+                adapter=CodexAdapter(), runner=second_runner, resume=resume_ctx,
+            )
+
+            assert second_runner_calls['count'] == 1
+            assert not original_worktree_path.exists(), 'Worktree should be removed after successful merge'
+
+            run_json2 = json.loads((result2.run_dir / 'run.json').read_text(encoding='utf-8'))
+            assert run_json2['merge_status'] == 'success'
+            feature_branch = run_json2['feature_branch']
+            rc, _, _ = _run_git_in_test(['merge-base', '--is-ancestor', feature_branch, 'main'], cwd=repo_root)
+            assert rc == 0, 'main should contain the fast-forward merged feature branch'
 
     def test_resume_rejects_worktree_with_in_progress_merge(self) -> None:
         """Test that validation rejects a worktree with an in-progress git operation."""
