@@ -21,12 +21,28 @@ Use this skill only for aflow-style planning. It is designed to be installed as 
 - Treat reviewer-created fix plans as temporary overlays for rejected work, not replacements for the original plan's long-lived state.
 - Make the final plan self-sufficient. It should not rely on a separate heavy executor skill to supply missing workflow details later.
 - Treat `Git Tracking` as lightweight support metadata in worktree-first workflows. The engine may populate or refresh branch/base values at startup, and the plan must not require manual git bookkeeping before execution begins.
+- Treat the current execution repo root as authoritative for in-repo commands. Do not hardcode a guessed primary checkout path into plan steps, bootstrap commands, verification commands, or doc references.
 - Treat `aflow` as the canonical spelling.
 - If the user asks for planning but does not want aflow, do not use this skill.
 
 ## Core Rule
 
 The plan must be decision complete. The implementer should not need to choose behavior, precedence, fallback, validation policy, or verification strategy on their own.
+
+## Execution Root Safety Rule
+
+For repository-local work, the plan must be safe under worktree-first execution.
+
+Requirements:
+
+- Treat the runtime-selected repo root or worktree as the source of truth for all in-repo commands.
+- Prefer repo-relative commands and paths for files inside the repository.
+- If a bootstrap command needs to anchor execution, use execution-root-safe discovery such as `git rev-parse --show-toplevel` rather than a guessed checkout path.
+- Do not write plan commands that `cd` into a hardcoded host-specific checkout such as `/Users/.../repo` or `/home/.../repo` for repository-local work.
+- Do not hardcode absolute paths to repository files in `Context Bootstrapping`, `Verification`, `Behavioral Acceptance Tests`, or the `Plan-to-Verification Matrix`.
+- Absolute paths are allowed only for clearly external artifacts explicitly supplied by the user, environment, or harness and not mirrored inside the execution repo.
+- When prompt context names both a primary checkout and a worktree, prefer commands that remain correct in the worktree.
+- If the correct execution root is ambiguous, stop and ask instead of guessing a canonical checkout path.
 
 ## Required Plan Sections
 
@@ -55,6 +71,7 @@ Requirements:
 - Keep checkpoints atomic and independently verifiable.
 - Write each checkpoint so a fresh agent or thread can resume from disk with no hidden chat context.
 - Include explicit context bootstrapping commands before edits.
+- Make bootstrap and verification commands execution-root-safe for worktree-first runs. For repository-local work, do not hardcode host-specific absolute checkout paths.
 - List allowed files and forbidden files or systems per checkpoint.
 - Include anti-shortcut constraints and preserved behaviors.
 - Include scoped and non-regression verification commands per checkpoint.
@@ -82,8 +99,8 @@ Use this checkpoint skeleton:
 **Context Bootstrapping:**
 
 - Run these commands before editing:
-- `<command>`
-- `<command>`
+- `git rev-parse --show-toplevel`
+- `<repo-relative or execution-root-safe command>`
 
 **Scope & Blast Radius:**
 
@@ -103,8 +120,8 @@ Use this checkpoint skeleton:
 
 **Verification:**
 
-- Run scoped tests: `<exact command>`
-- Run non-regression tests: `<exact command>`
+- Run scoped tests: `<exact repo-relative or execution-root-safe command>`
+- Run non-regression tests: `<exact repo-relative or execution-root-safe command>`
 
 **Done When:**
 
@@ -155,6 +172,7 @@ Use `Forbidden Implementations` to name likely shortcuts explicitly.
 Examples:
 
 - Do not silently fall back to a local absolute path.
+- Do not hardcode a primary checkout path such as `/Users/.../repo` or `/home/.../repo` into checkpoint bootstrap or verification commands for repository-local work.
 - Do not keep both old and new config sources live.
 - Do not describe future-state docs as implemented behavior before code reaches parity.
 
